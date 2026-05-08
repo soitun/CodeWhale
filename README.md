@@ -441,10 +441,8 @@ Full Changelog: [CHANGELOG.md](CHANGELOG.md).
 
 ## Thanks
 
-Special thanks to our whale brothers 🐋:
-
 - **[DeepSeek](https://github.com/deepseek-ai)** — for the models that power every turn
-- **[DataWhale](https://github.com/datawhalechina)** — for their support and the open-source AI education community they've built
+- **[DataWhale](https://github.com/datawhalechina)** 🐋 — for their support and the open-source AI education community they've built
 
 This project ships with help from a growing community of contributors:
 
