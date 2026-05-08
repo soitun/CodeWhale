@@ -11,7 +11,8 @@ use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind, PopKeyboardEnhancementFlags,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        KeyboardEnhancementFlags, EnableFocusChange, DisableFocusChange,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -209,6 +210,10 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     if use_bracketed_paste {
         execute!(stdout, EnableBracketedPaste)?;
     }
+    // Enable focus events so the terminal reports FocusGained/FocusLost.
+    // Necessary for IME compositor re-activation on macOS when the user
+    // switches away (Cmd+Tab) and returns — see issue #XXXX.
+    execute!(stdout, EnableFocusChange)?;
     // #442: opt into the Kitty keyboard protocol's escape-code
     // disambiguation so terminals that support it (Kitty, Ghostty,
     // Alacritty 0.13+, WezTerm, recent Konsole, recent xterm) report
@@ -429,6 +434,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     if use_bracketed_paste {
         execute!(terminal.backend_mut(), DisableBracketedPaste)?;
     }
+    execute!(terminal.backend_mut(), DisableFocusChange)?;
     terminal.show_cursor()?;
     drop(terminal);
 
@@ -1583,6 +1589,17 @@ async fn run_event_loop(
                 continue;
             }
 
+            // Re-push keyboard enhancement flags on focus-gain.
+            // On macOS, switching away (Cmd+Tab) and back can reset the
+            // terminal's keyboard mode, which breaks IME compositor state.
+            // Acknowledging FocusGained and re-pushing the flags restores
+            // the IME so CJK input methods work after a focus toggle.
+            if evt == Event::FocusGained {
+                let _ = execute!(
+                    terminal.backend_mut(),
+                    PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+                );
+            }
             if let Event::Resize(width, height) = evt {
                 tracing::debug!(
                     width,
