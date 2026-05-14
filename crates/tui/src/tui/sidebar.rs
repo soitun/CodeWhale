@@ -2089,10 +2089,8 @@ mod tests {
                     command: command.to_string(),
                     status: ToolStatus::Running,
                     output: None,
-                    started_at: Some(
-                        Instant::now() - ACTIVE_TOOL_STALE_RUNNING_ROW_TTL - Duration::from_secs(1),
-                    ),
-                    duration_ms: None,
+                    started_at: None,
+                    duration_ms: Some(ACTIVE_TOOL_STALE_RUNNING_ROW_TTL.as_millis() as u64 + 1),
                     source: ExecSource::Assistant,
                     interaction: None,
                     output_summary: None,
