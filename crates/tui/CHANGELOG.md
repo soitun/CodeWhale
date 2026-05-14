@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.36] - 2026-05-14
+
 ### Added
 
 - **Tencent Lighthouse + Feishu/Lark bridge setup.** Added a `/opt/whalebro`
@@ -17,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Feishu/Lark + optional EdgeOne teaching path and added non-active CNB deploy
   templates for a future Lighthouse deploy button. The v0.8.36 Lighthouse
   branch is now mirrored to CNB for Tencent-first bootstrap.
+
+### Fixed
+
+- **Feishu/Lark bridge dependency installs are locked and audited.** The
+  bridge now ships a package lock, installs with `npm ci` on Lighthouse when
+  available, and overrides the Lark SDK's transitive `axios` dependency to a
+  patched line.
 
 ## [0.8.35] - 2026-05-13
 
@@ -4116,7 +4125,8 @@ Welcome — and thank you.
 - Hooks system and config profiles
 - Example skills and launch assets
 
-[Unreleased]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.35...HEAD
+[Unreleased]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.36...HEAD
+[0.8.36]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.35...v0.8.36
 [0.8.35]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.34...v0.8.35
 [0.8.34]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.33...v0.8.34
 [0.8.33]: https://github.com/Hmbown/DeepSeek-TUI/compare/v0.8.32...v0.8.33

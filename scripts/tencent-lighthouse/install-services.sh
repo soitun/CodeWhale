@@ -17,7 +17,11 @@ rsync -a --delete \
   "${DEEPSEEK_ROOT}/bridge/"
 chown -R "${DEEPSEEK_USER}:${DEEPSEEK_USER}" "${DEEPSEEK_ROOT}/bridge"
 
-sudo -u "${DEEPSEEK_USER}" npm --prefix "${DEEPSEEK_ROOT}/bridge" install --omit=dev
+if [[ -f "${DEEPSEEK_ROOT}/bridge/package-lock.json" ]]; then
+  sudo -u "${DEEPSEEK_USER}" npm --prefix "${DEEPSEEK_ROOT}/bridge" ci --omit=dev
+else
+  sudo -u "${DEEPSEEK_USER}" npm --prefix "${DEEPSEEK_ROOT}/bridge" install --omit=dev
+fi
 
 install -m 0644 "${REPO_ROOT}/deploy/tencent-lighthouse/systemd/deepseek-runtime.service" /etc/systemd/system/deepseek-runtime.service
 install -m 0644 "${REPO_ROOT}/deploy/tencent-lighthouse/systemd/deepseek-feishu-bridge.service" /etc/systemd/system/deepseek-feishu-bridge.service
