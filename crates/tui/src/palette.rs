@@ -276,8 +276,13 @@ impl PaletteMode {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn detect_macos_appearance() -> Option<Self> {
+        // Runtime `cfg!` (not `#[cfg]`) so `from_apple_interface_style`
+        // stays referenced on every platform and does not trip the
+        // dead-code lint on non-macOS builds.
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
         let output = std::process::Command::new("defaults")
             .args(["read", "-g", "AppleInterfaceStyle"])
             .output()
@@ -287,11 +292,6 @@ impl PaletteMode {
             .success()
             .then(|| String::from_utf8_lossy(&output.stdout).into_owned());
         Some(Self::from_apple_interface_style(style.as_deref()))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn detect_macos_appearance() -> Option<Self> {
-        None
     }
 
     /// Detect whether the terminal profile is light. `COLORFGBG` wins when
