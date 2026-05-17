@@ -45,6 +45,13 @@ impl Engine {
         const MAX_STREAM_RETRIES: u32 = 3;
         let mut stream_retry_attempts: u32 = 0;
 
+        // A turn that streams only reasoning (or nothing) — no final text,
+        // no tool calls — used to fall through to a silent `Completed` with
+        // no answer (#1727, #861, #1435). Request the answer once, then
+        // surface a clear failure rather than ending the turn blank.
+        const MAX_THINKING_ONLY_RETRIES: u32 = 1;
+        let mut thinking_only_retries: u32 = 0;
+
         loop {
             if self.cancel_token.is_cancelled() {
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
@@ -1064,7 +1071,45 @@ impl Engine {
                     continue;
                 }
 
-                break;
+                match classify_no_tool_turn(
+                    has_sendable_assistant_content,
+                    thinking_only_retries,
+                    MAX_THINKING_ONLY_RETRIES,
+                ) {
+                    NoToolTurnDecision::Finish => break,
+                    NoToolTurnDecision::RetryForAnswer => {
+                        thinking_only_retries = thinking_only_retries.saturating_add(1);
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Model returned reasoning with no final answer; requesting the answer",
+                            ))
+                            .await;
+                        self.add_session_message(self.user_text_message_with_turn_metadata(
+                            "You produced internal reasoning but no final answer. Provide your \
+                             final answer to the previous request now as plain text, or call a \
+                             tool if you still need to."
+                                .to_string(),
+                        ))
+                        .await;
+                        turn.next_step();
+                        continue;
+                    }
+                    NoToolTurnDecision::FailNoAnswer => {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Model returned only reasoning with no final answer after a retry",
+                            ))
+                            .await;
+                        return (
+                            TurnOutcomeStatus::Failed,
+                            Some(
+                                "Model returned only reasoning with no final answer".to_string(),
+                            ),
+                        );
+                    }
+                }
             }
 
             // Execute tools
@@ -1965,6 +2010,36 @@ fn should_hold_turn_for_subagents(queued_completions: usize, running_children: u
     queued_completions > 0 || running_children > 0
 }
 
+/// What to do when a streamed turn ends with no tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoToolTurnDecision {
+    /// The assistant produced a real answer (text/tool) — finish normally.
+    Finish,
+    /// Thinking-only / empty turn: nudge once and retry for an answer.
+    RetryForAnswer,
+    /// Still no answer after retrying — surface a clear terminal failure
+    /// instead of a silent "completed" turn (#1727, #861, #1435).
+    FailNoAnswer,
+}
+
+/// Decide how to settle a turn that produced no tool calls. A turn that
+/// streamed only reasoning (or nothing) used to fall through to a silent
+/// `Completed` with no answer; we now request the answer once and, if it
+/// still doesn't arrive, fail with a clear reason.
+fn classify_no_tool_turn(
+    has_sendable_assistant_content: bool,
+    thinking_only_retries: u32,
+    max_retries: u32,
+) -> NoToolTurnDecision {
+    if has_sendable_assistant_content {
+        NoToolTurnDecision::Finish
+    } else if thinking_only_retries < max_retries {
+        NoToolTurnDecision::RetryForAnswer
+    } else {
+        NoToolTurnDecision::FailNoAnswer
+    }
+}
+
 /// Resolve an `"auto"` reasoning-effort tier to a concrete value.
 ///
 /// When the configured effort is `"auto"`, inspects the last user message
@@ -2045,6 +2120,37 @@ mod tests {
         assert!(should_hold_turn_for_subagents(1, 0));
         assert!(should_hold_turn_for_subagents(0, 1));
         assert!(!should_hold_turn_for_subagents(0, 0));
+    }
+
+    // Regression for #1727 / #861 / #1435: a thinking-only / no-answer turn
+    // must not silently complete. It should be retried once for the answer
+    // and then fail with a clear reason rather than ending blank.
+    #[test]
+    fn thinking_only_turn_retries_once_then_fails_instead_of_silent_complete() {
+        // Real answer present → finish normally regardless of retry count.
+        assert_eq!(
+            classify_no_tool_turn(true, 0, 1),
+            NoToolTurnDecision::Finish
+        );
+        assert_eq!(
+            classify_no_tool_turn(true, 1, 1),
+            NoToolTurnDecision::Finish
+        );
+        // Thinking-only / empty, first encounter → request the answer.
+        assert_eq!(
+            classify_no_tool_turn(false, 0, 1),
+            NoToolTurnDecision::RetryForAnswer
+        );
+        // Still no answer after the retry budget → clear failure, never a
+        // silent `Completed`.
+        assert_eq!(
+            classify_no_tool_turn(false, 1, 1),
+            NoToolTurnDecision::FailNoAnswer
+        );
+        assert_eq!(
+            classify_no_tool_turn(false, 2, 1),
+            NoToolTurnDecision::FailNoAnswer
+        );
     }
 
     /// Regression test for the OpenAI streaming batch tool_calls bug.
