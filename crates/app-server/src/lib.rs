@@ -406,9 +406,11 @@ async fn dispatch_stdio_request(
         "capabilities" => StdioDispatchResult {
             result: json!({
                 "transport": "stdio",
-                "families": ["thread/*", "app/*", "prompt/*"],
+                "families": ["thread/*", "app/*", "prompt/*", "orca/*"],
                 "methods": [
                     "healthz",
+                    "orca/handshake",
+                    "orca/capabilities",
                     "thread/capabilities",
                     "thread/request",
                     "thread/create",
@@ -676,6 +678,32 @@ async fn dispatch_stdio_request(
                 should_exit: false,
             }
         }
+        "orca/handshake" => StdioDispatchResult {
+            result: json!({
+                "connector": "deepseek-tui",
+                "connector_protocol": "0.1",
+                "agent": "DeepSeek V4",
+                "transports": ["stdio", "http"],
+                "session_model": "orca-session=app-server-thread"
+            }),
+            should_exit: false,
+        },
+        "orca/capabilities" => StdioDispatchResult {
+            result: json!({
+                "connect": ["orca/handshake", "thread/create", "thread/start"],
+                "step": ["thread/message", "prompt/run"],
+                "resume": ["thread/resume"],
+                "disconnect": ["shutdown"],
+                "events": [
+                    "response_start",
+                    "response_delta",
+                    "response_end",
+                    "tool_call_start",
+                    "tool_call_result"
+                ]
+            }),
+            should_exit: false,
+        },
         "shutdown" => StdioDispatchResult {
             result: json!({"ok": true, "status": "stopped"}),
             should_exit: true,
