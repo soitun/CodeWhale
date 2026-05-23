@@ -7,10 +7,11 @@
 //! endpoint, so we materialize the bytes to disk instead of base64-embedding
 //! them in the request).
 
+use std::io::Write;
 #[cfg(not(test))]
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-#[cfg(all(any(target_os = "macos", target_os = "windows"), not(test)))]
+#[cfg(any(test, all(any(target_os = "macos", target_os = "windows"), not(test))))]
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -161,43 +162,44 @@ impl ClipboardHandler {
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn write_text_with_pbcopy(text: &str) -> Result<()> {
-    let mut child = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to run pbcopy: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to write to pbcopy: {e}"))?;
-    }
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("Failed to wait for pbcopy: {e}"))?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(anyhow::anyhow!("pbcopy failed"))
+    write_text_with_stdin_command("pbcopy", &[], text, "pbcopy")
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
 fn write_text_with_set_clipboard(text: &str) -> Result<()> {
-    let mut child = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", "Set-Clipboard -Value $input"])
+    write_text_with_stdin_command(
+        "powershell.exe",
+        &["-NoProfile", "-Command", "Set-Clipboard -Value $input"],
+        text,
+        "Set-Clipboard",
+    )
+}
+
+#[cfg(any(test, all(any(target_os = "macos", target_os = "windows"), not(test))))]
+fn write_text_with_stdin_command(
+    program: &str,
+    args: &[&str],
+    text: &str,
+    label: &str,
+) -> Result<()> {
+    let mut child = Command::new(program)
+        .args(args)
         .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to run Set-Clipboard: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run {label}: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(text.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to write to Set-Clipboard: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to write to {label}: {e}"))?;
     }
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("Failed to wait for Set-Clipboard: {e}"))?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(anyhow::anyhow!("Set-Clipboard failed"))
+    let _ = std::thread::Builder::new()
+        .name("clipboard-wait".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
 }
 
 #[cfg(not(test))]
@@ -323,6 +325,45 @@ mod tests {
         // we ever regress to PPM or another format this will catch it.
         let header = std::fs::read(&pasted.path).unwrap();
         assert_eq!(&header[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_clipboard_command_returns_before_helper_exits() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("clipboard.txt");
+        let script = dir.path().join("slow-clipboard.sh");
+        std::fs::write(&script, "#!/bin/sh\ncat > \"$1\"\nsleep 1\n").unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let started = Instant::now();
+        write_text_with_stdin_command(
+            script.to_str().unwrap(),
+            &[marker.to_str().unwrap()],
+            "copied",
+            "test-clipboard",
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "clipboard helper wait leaked onto caller path"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(body) = std::fs::read_to_string(&marker) {
+                assert_eq!(body, "copied");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("clipboard helper did not receive stdin");
     }
 
     #[test]
