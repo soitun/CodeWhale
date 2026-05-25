@@ -57,7 +57,9 @@ pub struct ModelPickerView {
     initial_model: String,
     initial_effort: ReasoningEffort,
     /// Working selection (separate from the initial values so we can offer a
-    /// clean Esc-to-cancel without mutating App state).
+    /// clean Esc-to-close without mutating App state. If the user has moved
+    /// the selection (dirty), Esc applies the last-highlighted choice; otherwise
+    /// Esc closes without mutating App state (#2037).
     selected_model_idx: usize,
     selected_effort_idx: usize,
     focus: Pane,
@@ -67,6 +69,9 @@ pub struct ModelPickerView {
     /// When true, hide DeepSeek-specific model rows (pass-through providers
     /// like openai don't support them).
     hide_deepseek_models: bool,
+    /// True after the user has moved the selection at least once. On Esc,
+    /// a dirty picker applies the last-highlighted choice (#2037).
+    dirty: bool,
 }
 
 impl ModelPickerView {
@@ -110,6 +115,7 @@ impl ModelPickerView {
             focus: Pane::Model,
             show_custom_model_row,
             hide_deepseek_models,
+            dirty: false,
         }
     }
 
@@ -151,11 +157,13 @@ impl ModelPickerView {
             Pane::Model => {
                 if self.selected_model_idx > 0 {
                     self.selected_model_idx -= 1;
+                    self.dirty = true;
                 }
             }
             Pane::Effort => {
                 if self.selected_effort_idx > 0 {
                     self.selected_effort_idx -= 1;
+                    self.dirty = true;
                 }
             }
         }
@@ -167,18 +175,21 @@ impl ModelPickerView {
                 let max = self.model_row_count().saturating_sub(1);
                 if self.selected_model_idx < max {
                     self.selected_model_idx += 1;
+                    self.dirty = true;
                 }
             }
             Pane::Effort => {
                 let max = PICKER_EFFORTS.len().saturating_sub(1);
                 if self.selected_effort_idx < max {
                     self.selected_effort_idx += 1;
+                    self.dirty = true;
                 }
             }
         }
     }
 
     fn toggle_focus(&mut self) {
+        self.dirty = true;
         self.focus = match self.focus {
             Pane::Model => Pane::Effort,
             Pane::Effort => Pane::Model,
@@ -265,7 +276,15 @@ impl ModalView for ModelPickerView {
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         match key.code {
-            KeyCode::Esc => ViewAction::Close,
+            KeyCode::Esc => {
+                // #2037: if the user moved the selection, apply the last-
+                // highlighted choice on Esc; otherwise close without mutation.
+                if self.dirty {
+                    ViewAction::EmitAndClose(self.build_event())
+                } else {
+                    ViewAction::Close
+                }
+            }
             KeyCode::Enter => ViewAction::EmitAndClose(self.build_event()),
             KeyCode::Up => {
                 self.move_up();
