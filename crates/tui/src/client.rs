@@ -125,6 +125,7 @@ pub struct DeepSeekClient {
     pub(super) http_client: reqwest::Client,
     api_key: String,
     pub(super) base_url: String,
+    chat_path_suffix: Option<String>,
     pub(super) api_provider: ApiProvider,
     retry: RetryPolicy,
     default_model: String,
@@ -291,6 +292,7 @@ impl Clone for DeepSeekClient {
             http_client: self.http_client.clone(),
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
+            chat_path_suffix: self.chat_path_suffix.clone(),
             api_provider: self.api_provider,
             retry: self.retry.clone(),
             default_model: self.default_model.clone(),
@@ -407,6 +409,21 @@ pub(super) fn api_url(base_url: &str, path: &str) -> String {
     format!("{}/{}", versioned.trim_end_matches('/'), path)
 }
 
+pub(super) fn api_url_with_path_suffix(
+    base_url: &str,
+    default_path: &str,
+    path_suffix: Option<&str>,
+) -> String {
+    let Some(path_suffix) = path_suffix else {
+        return api_url(base_url, default_path);
+    };
+    let path_suffix = path_suffix.trim().trim_matches('/');
+    if path_suffix.is_empty() {
+        return api_url(base_url, default_path);
+    }
+    format!("{}/{}", base_url.trim_end_matches('/'), path_suffix)
+}
+
 // === DeepSeekClient ===
 
 /// Returns true when DEEPSEEK_FORCE_HTTP1 is set to a truthy value
@@ -469,6 +486,7 @@ impl DeepSeekClient {
     pub fn new(config: &Config) -> Result<Self> {
         let api_key = config.deepseek_api_key()?;
         let base_url = config.deepseek_base_url();
+        let chat_path_suffix = config.chat_completions_path_suffix();
         let api_provider = config.api_provider();
         validate_base_url_security(&base_url)?;
         let retry = config.retry_policy();
@@ -494,12 +512,21 @@ impl DeepSeekClient {
             http_client,
             api_key,
             base_url,
+            chat_path_suffix,
             api_provider,
             retry,
             default_model,
             connection_health: Arc::new(AsyncMutex::new(ConnectionHealth::default())),
             rate_limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
         })
+    }
+
+    pub(super) fn chat_completions_url(&self) -> String {
+        api_url_with_path_suffix(
+            &self.base_url,
+            "chat/completions",
+            self.chat_path_suffix.as_deref(),
+        )
     }
 
     fn build_http_client(
@@ -580,7 +607,7 @@ impl DeepSeekClient {
         model: &str,
         target_language: &str,
     ) -> Result<String> {
-        let url = api_url(&self.base_url, "chat/completions");
+        let url = self.chat_completions_url();
         let mut body = serde_json::json!({
             "model": model,
             "messages": [
@@ -1180,6 +1207,34 @@ mod tests {
                 "chat/completions"
             ),
             "https://openai-compatible.example/api/coding/paas/v4/chat/completions"
+        );
+    }
+
+    #[test]
+    fn api_url_path_suffix_bypasses_automatic_v1_insertion() {
+        assert_eq!(
+            api_url_with_path_suffix(
+                "https://openai-compatible.example",
+                "chat/completions",
+                Some("/chat/completions")
+            ),
+            "https://openai-compatible.example/chat/completions"
+        );
+        assert_eq!(
+            api_url_with_path_suffix(
+                "https://openai-compatible.example/",
+                "chat/completions",
+                Some("  /api/chat/completions/  ")
+            ),
+            "https://openai-compatible.example/api/chat/completions"
+        );
+        assert_eq!(
+            api_url_with_path_suffix(
+                "https://openai-compatible.example",
+                "chat/completions",
+                Some("  ")
+            ),
+            "https://openai-compatible.example/v1/chat/completions"
         );
     }
 

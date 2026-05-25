@@ -116,6 +116,7 @@ impl ProviderKind {
 pub struct ProviderConfigToml {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub path_suffix: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
     pub http_headers: BTreeMap<String, String>,
@@ -437,66 +438,77 @@ impl ConfigToml {
             "sandbox_mode" => self.sandbox_mode.clone(),
             "providers.deepseek.api_key" => self.providers.deepseek.api_key.clone(),
             "providers.deepseek.base_url" => self.providers.deepseek.base_url.clone(),
+            "providers.deepseek.path_suffix" => self.providers.deepseek.path_suffix.clone(),
             "providers.deepseek.model" => self.providers.deepseek.model.clone(),
             "providers.deepseek.http_headers" => {
                 serialize_http_headers(&self.providers.deepseek.http_headers)
             }
             "providers.nvidia_nim.api_key" => self.providers.nvidia_nim.api_key.clone(),
             "providers.nvidia_nim.base_url" => self.providers.nvidia_nim.base_url.clone(),
+            "providers.nvidia_nim.path_suffix" => self.providers.nvidia_nim.path_suffix.clone(),
             "providers.nvidia_nim.model" => self.providers.nvidia_nim.model.clone(),
             "providers.nvidia_nim.http_headers" => {
                 serialize_http_headers(&self.providers.nvidia_nim.http_headers)
             }
             "providers.openai.api_key" => self.providers.openai.api_key.clone(),
             "providers.openai.base_url" => self.providers.openai.base_url.clone(),
+            "providers.openai.path_suffix" => self.providers.openai.path_suffix.clone(),
             "providers.openai.model" => self.providers.openai.model.clone(),
             "providers.openai.http_headers" => {
                 serialize_http_headers(&self.providers.openai.http_headers)
             }
             "providers.atlascloud.api_key" => self.providers.atlascloud.api_key.clone(),
             "providers.atlascloud.base_url" => self.providers.atlascloud.base_url.clone(),
+            "providers.atlascloud.path_suffix" => self.providers.atlascloud.path_suffix.clone(),
             "providers.atlascloud.model" => self.providers.atlascloud.model.clone(),
             "providers.atlascloud.http_headers" => {
                 serialize_http_headers(&self.providers.atlascloud.http_headers)
             }
             "providers.wanjie_ark.api_key" => self.providers.wanjie_ark.api_key.clone(),
             "providers.wanjie_ark.base_url" => self.providers.wanjie_ark.base_url.clone(),
+            "providers.wanjie_ark.path_suffix" => self.providers.wanjie_ark.path_suffix.clone(),
             "providers.wanjie_ark.model" => self.providers.wanjie_ark.model.clone(),
             "providers.wanjie_ark.http_headers" => {
                 serialize_http_headers(&self.providers.wanjie_ark.http_headers)
             }
             "providers.openrouter.api_key" => self.providers.openrouter.api_key.clone(),
             "providers.openrouter.base_url" => self.providers.openrouter.base_url.clone(),
+            "providers.openrouter.path_suffix" => self.providers.openrouter.path_suffix.clone(),
             "providers.openrouter.model" => self.providers.openrouter.model.clone(),
             "providers.openrouter.http_headers" => {
                 serialize_http_headers(&self.providers.openrouter.http_headers)
             }
             "providers.novita.api_key" => self.providers.novita.api_key.clone(),
             "providers.novita.base_url" => self.providers.novita.base_url.clone(),
+            "providers.novita.path_suffix" => self.providers.novita.path_suffix.clone(),
             "providers.novita.model" => self.providers.novita.model.clone(),
             "providers.novita.http_headers" => {
                 serialize_http_headers(&self.providers.novita.http_headers)
             }
             "providers.fireworks.api_key" => self.providers.fireworks.api_key.clone(),
             "providers.fireworks.base_url" => self.providers.fireworks.base_url.clone(),
+            "providers.fireworks.path_suffix" => self.providers.fireworks.path_suffix.clone(),
             "providers.fireworks.model" => self.providers.fireworks.model.clone(),
             "providers.fireworks.http_headers" => {
                 serialize_http_headers(&self.providers.fireworks.http_headers)
             }
             "providers.sglang.api_key" => self.providers.sglang.api_key.clone(),
             "providers.sglang.base_url" => self.providers.sglang.base_url.clone(),
+            "providers.sglang.path_suffix" => self.providers.sglang.path_suffix.clone(),
             "providers.sglang.model" => self.providers.sglang.model.clone(),
             "providers.sglang.http_headers" => {
                 serialize_http_headers(&self.providers.sglang.http_headers)
             }
             "providers.vllm.api_key" => self.providers.vllm.api_key.clone(),
             "providers.vllm.base_url" => self.providers.vllm.base_url.clone(),
+            "providers.vllm.path_suffix" => self.providers.vllm.path_suffix.clone(),
             "providers.vllm.model" => self.providers.vllm.model.clone(),
             "providers.vllm.http_headers" => {
                 serialize_http_headers(&self.providers.vllm.http_headers)
             }
             "providers.ollama.api_key" => self.providers.ollama.api_key.clone(),
             "providers.ollama.base_url" => self.providers.ollama.base_url.clone(),
+            "providers.ollama.path_suffix" => self.providers.ollama.path_suffix.clone(),
             "providers.ollama.model" => self.providers.ollama.model.clone(),
             "providers.ollama.http_headers" => {
                 serialize_http_headers(&self.providers.ollama.http_headers)
@@ -547,6 +559,9 @@ impl ConfigToml {
                 self.providers.deepseek.base_url = Some(value.clone());
                 self.base_url = Some(value);
             }
+            "providers.deepseek.path_suffix" => {
+                self.providers.deepseek.path_suffix = Some(value.to_string());
+            }
             "providers.deepseek.model" => {
                 let value = value.to_string();
                 self.providers.deepseek.model = Some(value.clone());
@@ -559,6 +574,9 @@ impl ConfigToml {
             }
             "providers.openai.api_key" => self.providers.openai.api_key = Some(value.to_string()),
             "providers.openai.base_url" => self.providers.openai.base_url = Some(value.to_string()),
+            "providers.openai.path_suffix" => {
+                self.providers.openai.path_suffix = Some(value.to_string());
+            }
             "providers.openai.model" => self.providers.openai.model = Some(value.to_string()),
             "providers.openai.http_headers" => {
                 self.providers.openai.http_headers = parse_http_headers(value)?;
@@ -568,6 +586,9 @@ impl ConfigToml {
             }
             "providers.atlascloud.base_url" => {
                 self.providers.atlascloud.base_url = Some(value.to_string());
+            }
+            "providers.atlascloud.path_suffix" => {
+                self.providers.atlascloud.path_suffix = Some(value.to_string());
             }
             "providers.atlascloud.model" => {
                 self.providers.atlascloud.model = Some(value.to_string());
@@ -581,6 +602,9 @@ impl ConfigToml {
             "providers.wanjie_ark.base_url" => {
                 self.providers.wanjie_ark.base_url = Some(value.to_string());
             }
+            "providers.wanjie_ark.path_suffix" => {
+                self.providers.wanjie_ark.path_suffix = Some(value.to_string());
+            }
             "providers.wanjie_ark.model" => {
                 self.providers.wanjie_ark.model = Some(value.to_string());
             }
@@ -592,6 +616,9 @@ impl ConfigToml {
             }
             "providers.nvidia_nim.base_url" => {
                 self.providers.nvidia_nim.base_url = Some(value.to_string());
+            }
+            "providers.nvidia_nim.path_suffix" => {
+                self.providers.nvidia_nim.path_suffix = Some(value.to_string());
             }
             "providers.nvidia_nim.model" => {
                 self.providers.nvidia_nim.model = Some(value.to_string());
@@ -605,6 +632,9 @@ impl ConfigToml {
             "providers.openrouter.base_url" => {
                 self.providers.openrouter.base_url = Some(value.to_string());
             }
+            "providers.openrouter.path_suffix" => {
+                self.providers.openrouter.path_suffix = Some(value.to_string());
+            }
             "providers.openrouter.model" => {
                 self.providers.openrouter.model = Some(value.to_string());
             }
@@ -616,6 +646,9 @@ impl ConfigToml {
             }
             "providers.novita.base_url" => {
                 self.providers.novita.base_url = Some(value.to_string());
+            }
+            "providers.novita.path_suffix" => {
+                self.providers.novita.path_suffix = Some(value.to_string());
             }
             "providers.novita.model" => {
                 self.providers.novita.model = Some(value.to_string());
@@ -629,6 +662,9 @@ impl ConfigToml {
             "providers.fireworks.base_url" => {
                 self.providers.fireworks.base_url = Some(value.to_string());
             }
+            "providers.fireworks.path_suffix" => {
+                self.providers.fireworks.path_suffix = Some(value.to_string());
+            }
             "providers.fireworks.model" => {
                 self.providers.fireworks.model = Some(value.to_string());
             }
@@ -640,6 +676,9 @@ impl ConfigToml {
             }
             "providers.sglang.base_url" => {
                 self.providers.sglang.base_url = Some(value.to_string());
+            }
+            "providers.sglang.path_suffix" => {
+                self.providers.sglang.path_suffix = Some(value.to_string());
             }
             "providers.sglang.model" => {
                 self.providers.sglang.model = Some(value.to_string());
@@ -653,6 +692,9 @@ impl ConfigToml {
             "providers.vllm.base_url" => {
                 self.providers.vllm.base_url = Some(value.to_string());
             }
+            "providers.vllm.path_suffix" => {
+                self.providers.vllm.path_suffix = Some(value.to_string());
+            }
             "providers.vllm.model" => {
                 self.providers.vllm.model = Some(value.to_string());
             }
@@ -664,6 +706,9 @@ impl ConfigToml {
             }
             "providers.ollama.base_url" => {
                 self.providers.ollama.base_url = Some(value.to_string());
+            }
+            "providers.ollama.path_suffix" => {
+                self.providers.ollama.path_suffix = Some(value.to_string());
             }
             "providers.ollama.model" => {
                 self.providers.ollama.model = Some(value.to_string());
@@ -703,6 +748,7 @@ impl ConfigToml {
                 self.providers.deepseek.base_url = None;
                 self.base_url = None;
             }
+            "providers.deepseek.path_suffix" => self.providers.deepseek.path_suffix = None,
             "providers.deepseek.model" => {
                 self.providers.deepseek.model = None;
                 self.default_text_model = None;
@@ -713,44 +759,54 @@ impl ConfigToml {
             }
             "providers.openai.api_key" => self.providers.openai.api_key = None,
             "providers.openai.base_url" => self.providers.openai.base_url = None,
+            "providers.openai.path_suffix" => self.providers.openai.path_suffix = None,
             "providers.openai.model" => self.providers.openai.model = None,
             "providers.openai.http_headers" => self.providers.openai.http_headers.clear(),
             "providers.atlascloud.api_key" => self.providers.atlascloud.api_key = None,
             "providers.atlascloud.base_url" => self.providers.atlascloud.base_url = None,
+            "providers.atlascloud.path_suffix" => self.providers.atlascloud.path_suffix = None,
             "providers.atlascloud.model" => self.providers.atlascloud.model = None,
             "providers.atlascloud.http_headers" => self.providers.atlascloud.http_headers.clear(),
             "providers.wanjie_ark.api_key" => self.providers.wanjie_ark.api_key = None,
             "providers.wanjie_ark.base_url" => self.providers.wanjie_ark.base_url = None,
+            "providers.wanjie_ark.path_suffix" => self.providers.wanjie_ark.path_suffix = None,
             "providers.wanjie_ark.model" => self.providers.wanjie_ark.model = None,
             "providers.wanjie_ark.http_headers" => {
                 self.providers.wanjie_ark.http_headers.clear();
             }
             "providers.nvidia_nim.api_key" => self.providers.nvidia_nim.api_key = None,
             "providers.nvidia_nim.base_url" => self.providers.nvidia_nim.base_url = None,
+            "providers.nvidia_nim.path_suffix" => self.providers.nvidia_nim.path_suffix = None,
             "providers.nvidia_nim.model" => self.providers.nvidia_nim.model = None,
             "providers.nvidia_nim.http_headers" => self.providers.nvidia_nim.http_headers.clear(),
             "providers.openrouter.api_key" => self.providers.openrouter.api_key = None,
             "providers.openrouter.base_url" => self.providers.openrouter.base_url = None,
+            "providers.openrouter.path_suffix" => self.providers.openrouter.path_suffix = None,
             "providers.openrouter.model" => self.providers.openrouter.model = None,
             "providers.openrouter.http_headers" => self.providers.openrouter.http_headers.clear(),
             "providers.novita.api_key" => self.providers.novita.api_key = None,
             "providers.novita.base_url" => self.providers.novita.base_url = None,
+            "providers.novita.path_suffix" => self.providers.novita.path_suffix = None,
             "providers.novita.model" => self.providers.novita.model = None,
             "providers.novita.http_headers" => self.providers.novita.http_headers.clear(),
             "providers.fireworks.api_key" => self.providers.fireworks.api_key = None,
             "providers.fireworks.base_url" => self.providers.fireworks.base_url = None,
+            "providers.fireworks.path_suffix" => self.providers.fireworks.path_suffix = None,
             "providers.fireworks.model" => self.providers.fireworks.model = None,
             "providers.fireworks.http_headers" => self.providers.fireworks.http_headers.clear(),
             "providers.sglang.api_key" => self.providers.sglang.api_key = None,
             "providers.sglang.base_url" => self.providers.sglang.base_url = None,
+            "providers.sglang.path_suffix" => self.providers.sglang.path_suffix = None,
             "providers.sglang.model" => self.providers.sglang.model = None,
             "providers.sglang.http_headers" => self.providers.sglang.http_headers.clear(),
             "providers.vllm.api_key" => self.providers.vllm.api_key = None,
             "providers.vllm.base_url" => self.providers.vllm.base_url = None,
+            "providers.vllm.path_suffix" => self.providers.vllm.path_suffix = None,
             "providers.vllm.model" => self.providers.vllm.model = None,
             "providers.vllm.http_headers" => self.providers.vllm.http_headers.clear(),
             "providers.ollama.api_key" => self.providers.ollama.api_key = None,
             "providers.ollama.base_url" => self.providers.ollama.base_url = None,
+            "providers.ollama.path_suffix" => self.providers.ollama.path_suffix = None,
             "providers.ollama.model" => self.providers.ollama.model = None,
             "providers.ollama.http_headers" => self.providers.ollama.http_headers.clear(),
             _ => {
@@ -810,6 +866,9 @@ impl ConfigToml {
         if let Some(v) = self.providers.deepseek.base_url.as_ref() {
             out.insert("providers.deepseek.base_url".to_string(), v.clone());
         }
+        if let Some(v) = self.providers.deepseek.path_suffix.as_ref() {
+            out.insert("providers.deepseek.path_suffix".to_string(), v.clone());
+        }
         if let Some(v) = self.providers.deepseek.model.as_ref() {
             out.insert("providers.deepseek.model".to_string(), v.clone());
         }
@@ -821,6 +880,9 @@ impl ConfigToml {
         }
         if let Some(v) = self.providers.openai.base_url.as_ref() {
             out.insert("providers.openai.base_url".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.openai.path_suffix.as_ref() {
+            out.insert("providers.openai.path_suffix".to_string(), v.clone());
         }
         if let Some(v) = self.providers.openai.model.as_ref() {
             out.insert("providers.openai.model".to_string(), v.clone());
@@ -834,6 +896,9 @@ impl ConfigToml {
         if let Some(v) = self.providers.atlascloud.base_url.as_ref() {
             out.insert("providers.atlascloud.base_url".to_string(), v.clone());
         }
+        if let Some(v) = self.providers.atlascloud.path_suffix.as_ref() {
+            out.insert("providers.atlascloud.path_suffix".to_string(), v.clone());
+        }
         if let Some(v) = self.providers.atlascloud.model.as_ref() {
             out.insert("providers.atlascloud.model".to_string(), v.clone());
         }
@@ -845,6 +910,9 @@ impl ConfigToml {
         }
         if let Some(v) = self.providers.wanjie_ark.base_url.as_ref() {
             out.insert("providers.wanjie_ark.base_url".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.wanjie_ark.path_suffix.as_ref() {
+            out.insert("providers.wanjie_ark.path_suffix".to_string(), v.clone());
         }
         if let Some(v) = self.providers.wanjie_ark.model.as_ref() {
             out.insert("providers.wanjie_ark.model".to_string(), v.clone());
@@ -858,6 +926,9 @@ impl ConfigToml {
         if let Some(v) = self.providers.nvidia_nim.base_url.as_ref() {
             out.insert("providers.nvidia_nim.base_url".to_string(), v.clone());
         }
+        if let Some(v) = self.providers.nvidia_nim.path_suffix.as_ref() {
+            out.insert("providers.nvidia_nim.path_suffix".to_string(), v.clone());
+        }
         if let Some(v) = self.providers.nvidia_nim.model.as_ref() {
             out.insert("providers.nvidia_nim.model".to_string(), v.clone());
         }
@@ -869,6 +940,9 @@ impl ConfigToml {
         }
         if let Some(v) = self.providers.openrouter.base_url.as_ref() {
             out.insert("providers.openrouter.base_url".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.openrouter.path_suffix.as_ref() {
+            out.insert("providers.openrouter.path_suffix".to_string(), v.clone());
         }
         if let Some(v) = self.providers.openrouter.model.as_ref() {
             out.insert("providers.openrouter.model".to_string(), v.clone());
@@ -882,6 +956,9 @@ impl ConfigToml {
         if let Some(v) = self.providers.novita.base_url.as_ref() {
             out.insert("providers.novita.base_url".to_string(), v.clone());
         }
+        if let Some(v) = self.providers.novita.path_suffix.as_ref() {
+            out.insert("providers.novita.path_suffix".to_string(), v.clone());
+        }
         if let Some(v) = self.providers.novita.model.as_ref() {
             out.insert("providers.novita.model".to_string(), v.clone());
         }
@@ -893,6 +970,9 @@ impl ConfigToml {
         }
         if let Some(v) = self.providers.fireworks.base_url.as_ref() {
             out.insert("providers.fireworks.base_url".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.fireworks.path_suffix.as_ref() {
+            out.insert("providers.fireworks.path_suffix".to_string(), v.clone());
         }
         if let Some(v) = self.providers.fireworks.model.as_ref() {
             out.insert("providers.fireworks.model".to_string(), v.clone());
@@ -906,6 +986,9 @@ impl ConfigToml {
         if let Some(v) = self.providers.sglang.base_url.as_ref() {
             out.insert("providers.sglang.base_url".to_string(), v.clone());
         }
+        if let Some(v) = self.providers.sglang.path_suffix.as_ref() {
+            out.insert("providers.sglang.path_suffix".to_string(), v.clone());
+        }
         if let Some(v) = self.providers.sglang.model.as_ref() {
             out.insert("providers.sglang.model".to_string(), v.clone());
         }
@@ -918,6 +1001,9 @@ impl ConfigToml {
         if let Some(v) = self.providers.vllm.base_url.as_ref() {
             out.insert("providers.vllm.base_url".to_string(), v.clone());
         }
+        if let Some(v) = self.providers.vllm.path_suffix.as_ref() {
+            out.insert("providers.vllm.path_suffix".to_string(), v.clone());
+        }
         if let Some(v) = self.providers.vllm.model.as_ref() {
             out.insert("providers.vllm.model".to_string(), v.clone());
         }
@@ -929,6 +1015,9 @@ impl ConfigToml {
         }
         if let Some(v) = self.providers.ollama.base_url.as_ref() {
             out.insert("providers.ollama.base_url".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.ollama.path_suffix.as_ref() {
+            out.insert("providers.ollama.path_suffix".to_string(), v.clone());
         }
         if let Some(v) = self.providers.ollama.model.as_ref() {
             out.insert("providers.ollama.model".to_string(), v.clone());
@@ -998,6 +1087,10 @@ impl ConfigToml {
                 ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL.to_string(),
                 ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL.to_string(),
             });
+        let path_suffix = provider_cfg
+            .path_suffix
+            .as_deref()
+            .and_then(normalize_path_suffix);
         let auth_mode = cli
             .auth_mode
             .clone()
@@ -1101,6 +1194,7 @@ impl ConfigToml {
             sandbox_mode,
             yolo,
             http_headers,
+            path_suffix,
         }
     }
 }
@@ -1111,6 +1205,9 @@ fn merge_provider_config(target: &mut ProviderConfigToml, source: &ProviderConfi
     }
     if source.base_url.is_some() {
         target.base_url = source.base_url.clone();
+    }
+    if source.path_suffix.is_some() {
+        target.path_suffix = source.path_suffix.clone();
     }
     if source.model.is_some() {
         target.model = source.model.clone();
@@ -1347,6 +1444,7 @@ pub struct ResolvedRuntimeOptions {
     pub api_key: Option<String>,
     pub api_key_source: Option<RuntimeApiKeySource>,
     pub base_url: String,
+    pub path_suffix: Option<String>,
     pub auth_mode: Option<String>,
     pub output_mode: Option<String>,
     pub log_level: Option<String>,
@@ -1355,6 +1453,11 @@ pub struct ResolvedRuntimeOptions {
     pub sandbox_mode: Option<String>,
     pub yolo: Option<bool>,
     pub http_headers: BTreeMap<String, String>,
+}
+
+fn normalize_path_suffix(path_suffix: &str) -> Option<String> {
+    let trimmed = path_suffix.trim().trim_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -2408,6 +2511,28 @@ mod tests {
         assert_eq!(resolved.provider, ProviderKind::Openrouter);
         assert_eq!(resolved.base_url, DEFAULT_OPENROUTER_BASE_URL);
         assert_eq!(resolved.model, DEFAULT_OPENROUTER_MODEL);
+    }
+
+    #[test]
+    fn provider_path_suffix_resolves_for_openai_compatible_chat_endpoints() {
+        let _lock = env_lock();
+        let _env = EnvGuard::without_deepseek_runtime_overrides();
+        let mut config = ConfigToml {
+            provider: ProviderKind::Openai,
+            ..ConfigToml::default()
+        };
+        config.providers.openai.base_url = Some("https://gateway.example".to_string());
+        config.providers.openai.path_suffix = Some("/chat/completions".to_string());
+
+        let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+
+        assert_eq!(resolved.provider, ProviderKind::Openai);
+        assert_eq!(resolved.base_url, "https://gateway.example");
+        assert_eq!(resolved.path_suffix.as_deref(), Some("chat/completions"));
+        assert_eq!(
+            config.get_value("providers.openai.path_suffix").as_deref(),
+            Some("/chat/completions")
+        );
     }
 
     #[test]

@@ -1208,6 +1208,7 @@ impl LspConfigToml {
 pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub path_suffix: Option<String>,
     pub model: Option<String>,
     pub http_headers: Option<HashMap<String, String>>,
 }
@@ -1613,6 +1614,18 @@ impl Config {
             .to_string()
         });
         normalize_base_url(&base)
+    }
+
+    /// Optional provider-scoped chat completions path override.
+    ///
+    /// Defaults to the current OpenAI-compatible `/v1/chat/completions`
+    /// routing. When set, the value is appended directly to the configured
+    /// `base_url`, which lets gateways that only expose `/chat/completions`
+    /// opt out of the automatic `/v1` insertion.
+    #[must_use]
+    pub fn chat_completions_path_suffix(&self) -> Option<String> {
+        self.provider_config()
+            .and_then(|provider| normalize_path_suffix(provider.path_suffix.as_deref()?))
     }
 
     fn active_provider_preserves_custom_base_url_model(&self) -> bool {
@@ -2847,6 +2860,11 @@ fn normalize_base_url(base: &str) -> String {
     trimmed.to_string()
 }
 
+fn normalize_path_suffix(path_suffix: &str) -> Option<String> {
+    let trimmed = path_suffix.trim().trim_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn parse_http_headers(raw: &str) -> Result<HashMap<String, String>> {
     let mut headers = HashMap::new();
     for pair in raw.trim().split(',') {
@@ -2978,6 +2996,7 @@ fn merge_provider_config(base: ProviderConfig, override_cfg: ProviderConfig) -> 
     ProviderConfig {
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
+        path_suffix: override_cfg.path_suffix.or(base.path_suffix),
         model: override_cfg.model.or(base.model),
         http_headers: override_cfg.http_headers.or(base.http_headers),
     }
@@ -5408,6 +5427,7 @@ model = "account-model-id"
 [providers.openai]
 api_key = "openai-table-key"
 base_url = "https://openai-compatible.example/api/coding/paas/v4"
+path_suffix = "/chat/completions"
 model = "glm-5"
 "#,
         )?;
@@ -5418,6 +5438,10 @@ model = "glm-5"
         assert_eq!(
             config.deepseek_base_url(),
             "https://openai-compatible.example/api/coding/paas/v4"
+        );
+        assert_eq!(
+            config.chat_completions_path_suffix().as_deref(),
+            Some("chat/completions")
         );
         assert_eq!(config.default_model(), "glm-5");
         Ok(())

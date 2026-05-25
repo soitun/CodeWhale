@@ -2616,6 +2616,7 @@ mod tests {
             api_key: Some("resolved-openai-key".to_string()),
             api_key_source: Some(RuntimeApiKeySource::Keyring),
             base_url: "https://openai-compatible.example/v4".to_string(),
+            path_suffix: None,
             auth_mode: Some("api_key".to_string()),
             output_mode: None,
             log_level: None,
