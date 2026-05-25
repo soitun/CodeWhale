@@ -623,6 +623,7 @@ secrets or permission to merge to `main`.
 | [GUIDE.md](docs/GUIDE.md) | User guide: getting started, modes, shortcuts, sessions, sub-agents |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Codebase internals |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Full config reference |
+| [PROVIDERS.md](docs/PROVIDERS.md) | Supported providers and model families |
 | [MODES.md](docs/MODES.md) | Plan / Agent / YOLO modes |
 | [MCP.md](docs/MCP.md) | Model Context Protocol integration |
 | [RUNTIME_API.md](docs/RUNTIME_API.md) | HTTP/SSE API server |
