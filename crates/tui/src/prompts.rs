@@ -1905,8 +1905,10 @@ mod tests {
     #[test]
     fn agent_prompts_start_with_generated_tool_taxonomy() {
         let taxonomy = render_core_tool_taxonomy_block();
-        assert!(AGENT_MODE.starts_with(&taxonomy));
-        assert!(AGENT_PROMPT.starts_with(&taxonomy));
+        let agent_mode = AGENT_MODE.replace("\r\n", "\n");
+        let agent_prompt = AGENT_PROMPT.replace("\r\n", "\n");
+        assert!(agent_mode.starts_with(&taxonomy));
+        assert!(agent_prompt.starts_with(&taxonomy));
         assert!(taxonomy.contains("`grep_files`/`file_search`"));
         assert!(taxonomy.contains("`git_status`/`git_diff`"));
         assert!(taxonomy.contains("`run_tests`"));
