@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
@@ -1048,7 +1049,7 @@ pub struct App {
     /// Viewport sub-state (scroll, cache, selection).
     pub viewport: ViewportState,
     /// Goal sub-state.
-    pub goal: GoalState,
+    pub goal: Arc<std::sync::Mutex<GoalState>>,
     /// Session sub-state (cost, tokens, telemetry).
     pub session: SessionState,
     pub history: Vec<HistoryCell>,
@@ -1780,7 +1781,7 @@ impl App {
                 vim_pending_d: false,
             },
             viewport: ViewportState::default(),
-            goal: GoalState::default(),
+            goal: Arc::new(std::sync::Mutex::new(GoalState::default())),
             session: SessionState::default(),
             history: Vec::new(),
             history_version: 0,

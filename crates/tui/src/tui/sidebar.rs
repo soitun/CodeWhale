@@ -225,11 +225,12 @@ impl SidebarWorkSummary {
 }
 
 fn sidebar_work_summary(app: &App) -> SidebarWorkSummary {
+    let goal = app.goal.lock().unwrap();
     let mut summary = SidebarWorkSummary {
-        goal_objective: app.goal.goal_objective.clone(),
-        goal_token_budget: app.goal.goal_token_budget,
-        goal_completed: app.goal.goal_completed,
-        goal_started_at: app.goal.goal_started_at,
+        goal_objective: goal.goal_objective.clone(),
+        goal_token_budget: goal.goal_token_budget,
+        goal_completed: goal.goal_completed,
+        goal_started_at: goal.goal_started_at,
         tokens_used: app.session.total_conversation_tokens,
         cycle_count: app.cycle_count,
         ..SidebarWorkSummary::default()

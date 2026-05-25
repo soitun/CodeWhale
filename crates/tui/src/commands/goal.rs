@@ -8,28 +8,32 @@ use super::CommandResult;
 pub fn goal(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg {
         Some("clear") | Some("reset") => {
-            app.goal.goal_objective = None;
-            app.goal.goal_token_budget = None;
-            app.goal.goal_started_at = None;
-            app.goal.goal_completed = false;
+            let mut goal = app.goal.lock().unwrap();
+            goal.goal_objective = None;
+            goal.goal_token_budget = None;
+            goal.goal_started_at = None;
+            goal.goal_completed = false;
             CommandResult::message("Goal cleared.")
         }
         Some("done") | Some("complete") => {
-            app.goal.goal_completed = true;
-            let elapsed = app
-                .goal
+            let mut goal = app.goal.lock().unwrap();
+            goal.goal_completed = true;
+            let elapsed = goal
                 .goal_started_at
-                .map(|t| crate::tui::notifications::humanize_duration(t.elapsed()))
+                .map(|t: std::time::Instant| {
+                    crate::tui::notifications::humanize_duration(t.elapsed())
+                })
                 .unwrap_or_else(|| "unknown".to_string());
             CommandResult::message(format!("Goal marked complete! Elapsed: {elapsed}"))
         }
         Some(text) if !text.is_empty() => {
             // Parse optional budget: "/goal Implement login | budget: 50000"
             let (objective, budget) = parse_goal_budget(text);
-            app.goal.goal_objective = Some(objective.clone());
-            app.goal.goal_token_budget = budget;
-            app.goal.goal_started_at = Some(std::time::Instant::now());
-            app.goal.goal_completed = false;
+            let mut goal = app.goal.lock().unwrap();
+            goal.goal_objective = Some(objective.clone());
+            goal.goal_token_budget = budget;
+            goal.goal_started_at = Some(std::time::Instant::now());
+            goal.goal_completed = false;
             let budget_str = budget
                 .map(|b| format!(" (budget: {b} tokens)"))
                 .unwrap_or_default();
@@ -39,17 +43,18 @@ pub fn goal(app: &mut App, arg: Option<&str>) -> CommandResult {
         }
         _ => {
             // Show current goal
-            if let Some(ref obj) = app.goal.goal_objective {
+            let goal = app.goal.lock().unwrap();
+            if let Some(ref obj) = goal.goal_objective {
                 // #447: render long elapsed times as `2d 3h` rather
                 // than Rust's default Debug `Duration` (which produces
                 // `188415.234s` or similar for multi-day goals).
-                let elapsed = app
-                    .goal
+                let elapsed = goal
                     .goal_started_at
-                    .map(|t| crate::tui::notifications::humanize_duration(t.elapsed()))
+                    .map(|t: std::time::Instant| {
+                        crate::tui::notifications::humanize_duration(t.elapsed())
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
-                let budget_str = app
-                    .goal
+                let budget_str = goal
                     .goal_token_budget
                     .map(|b| {
                         let used = app.session.total_conversation_tokens;
@@ -61,7 +66,7 @@ pub fn goal(app: &mut App, arg: Option<&str>) -> CommandResult {
                         format!(" | tokens: {used}/{b} ({pct:.0}%)")
                     })
                     .unwrap_or_default();
-                let status = if app.goal.goal_completed {
+                let status = if goal.goal_completed {
                     " [COMPLETED]"
                 } else {
                     ""
@@ -135,27 +140,27 @@ mod tests {
         let mut app = create_test_app();
         let result = goal(&mut app, Some("Fix the login bug"));
         assert!(result.message.unwrap().contains("Goal set"));
-        assert_eq!(
-            app.goal.goal_objective.as_deref(),
-            Some("Fix the login bug")
-        );
+        let goal = app.goal.lock().unwrap();
+        assert_eq!(goal.goal_objective.as_deref(), Some("Fix the login bug"));
     }
 
     #[test]
     fn test_set_goal_with_budget() {
         let mut app = create_test_app();
         let _ = goal(&mut app, Some("Refactor auth | budget: 50000"));
-        assert_eq!(app.goal.goal_objective.as_deref(), Some("Refactor auth"));
-        assert_eq!(app.goal.goal_token_budget, Some(50_000));
+        let goal = app.goal.lock().unwrap();
+        assert_eq!(goal.goal_objective.as_deref(), Some("Refactor auth"));
+        assert_eq!(goal.goal_token_budget, Some(50_000));
     }
 
     #[test]
     fn test_clear_goal() {
         let mut app = create_test_app();
-        app.goal.goal_objective = Some("test".to_string());
+        app.goal.lock().unwrap().goal_objective = Some("test".to_string());
         let _ = goal(&mut app, Some("clear"));
-        assert!(app.goal.goal_objective.is_none());
-        assert!(app.goal.goal_token_budget.is_none());
+        let goal = app.goal.lock().unwrap();
+        assert!(goal.goal_objective.is_none());
+        assert!(goal.goal_token_budget.is_none());
     }
 
     #[test]

@@ -719,7 +719,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         memory_path: config.memory_path(),
         vision_config: config.vision_model_config(),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
-        goal_objective: app.goal.goal_objective.clone(),
+        goal_objective: app.goal.lock().unwrap().goal_objective.clone(),
         locale_tag: app.ui_locale.tag().to_string(),
         workshop: config.workshop.clone(),
         search_provider: config
@@ -4103,7 +4103,7 @@ async fn dispatch_user_message(
             None,
             prompts::PromptSessionContext {
                 user_memory_block: None,
-                goal_objective: app.goal.goal_objective.as_deref(),
+                goal_objective: app.goal.lock().unwrap().goal_objective.as_deref(),
                 project_context_pack_enabled: config.project_context_pack_enabled(),
                 locale_tag: app.ui_locale.tag(),
                 translation_enabled: app.translation_enabled,
@@ -4195,7 +4195,7 @@ async fn dispatch_user_message(
             content,
             mode: app.mode,
             model: effective_model,
-            goal_objective: app.goal.goal_objective.clone(),
+            goal_objective: app.goal.lock().unwrap().goal_objective.clone(),
             reasoning_effort: effective_reasoning_effort,
             reasoning_effort_auto: auto_controls_reasoning,
             auto_model: app.auto_model,
