@@ -4,6 +4,10 @@ use ratatui::style::Color;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+pub fn rgb_tuple_color(rgb: (u8, u8, u8)) -> Color {
+    Color::Rgb(rgb.0, rgb.1, rgb.2)
+}
+
 pub const DEEPSEEK_BLUE_RGB: (u8, u8, u8) = (53, 120, 229); // #3578E5
 pub const DEEPSEEK_SKY_RGB: (u8, u8, u8) = (106, 174, 242);
 #[allow(dead_code)]

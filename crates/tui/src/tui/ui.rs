@@ -5719,6 +5719,10 @@ fn render(f: &mut Frame, app: &mut App) {
             .filter(|value| !value.is_empty())
             .unwrap_or("workspace");
         let model_label = app.model_display_label();
+        let model_palette = codewhale_agent::ModelFamilyPalette::for_family(
+            codewhale_agent::model_family(&app.model),
+        );
+        let model_accent = palette::rgb_tuple_color(model_palette.accent);
         let effort_label = app.reasoning_effort_display_label();
         let provider_label = match app.api_provider {
             crate::config::ApiProvider::Deepseek => None,
@@ -5753,6 +5757,7 @@ fn render(f: &mut Frame, app: &mut App) {
             sanitized_prompt_tokens,
         )
         .with_reasoning_effort(Some(&effort_label))
+        .with_model_accent(Some(model_accent))
         .with_provider(provider_label)
         .with_status_indicator(crate::tui::widgets::header_status_indicator_frame(
             status_indicator_started_at,

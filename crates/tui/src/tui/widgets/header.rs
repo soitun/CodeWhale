@@ -96,6 +96,8 @@ pub struct HeaderData<'a> {
     /// so the widget itself stays a pure pre-built render. `None` hides the
     /// chip entirely (e.g., `status_indicator = "off"`).
     pub status_indicator_frame: Option<&'static str>,
+    /// Accent color for the model label, derived from the model family.
+    pub model_accent: Option<Color>,
 }
 
 impl<'a> HeaderData<'a> {
@@ -121,6 +123,7 @@ impl<'a> HeaderData<'a> {
             reasoning_effort_label: None,
             provider_label: None,
             status_indicator_frame: None,
+            model_accent: None,
         }
     }
 
@@ -137,6 +140,12 @@ impl<'a> HeaderData<'a> {
     #[must_use]
     pub fn with_status_indicator(mut self, frame: Option<&'static str>) -> Self {
         self.status_indicator_frame = frame;
+        self
+    }
+
+    #[must_use]
+    pub fn with_model_accent(mut self, color: Option<Color>) -> Self {
+        self.model_accent = color;
         self
     }
 
@@ -460,6 +469,7 @@ impl<'a> HeaderWidget<'a> {
     fn metadata_spans(&self, max_width: usize) -> Vec<Span<'static>> {
         let workspace = self.data.workspace_name.trim();
         let model = self.data.model.trim();
+        let model_style = Style::default().fg(self.data.model_accent.unwrap_or(palette::TEXT_HINT));
 
         if max_width < 4 || (workspace.is_empty() && model.is_empty()) {
             return Vec::new();
@@ -468,7 +478,7 @@ impl<'a> HeaderWidget<'a> {
         if workspace.is_empty() {
             return vec![Span::styled(
                 Self::truncate_to_width(model, max_width),
-                Style::default().fg(palette::TEXT_HINT),
+                model_style,
             )];
         }
 
@@ -487,7 +497,7 @@ impl<'a> HeaderWidget<'a> {
                     Style::default().fg(palette::TEXT_SECONDARY),
                 ),
                 Span::styled(" · ", Style::default().fg(palette::TEXT_HINT)),
-                Span::styled(model.to_string(), Style::default().fg(palette::TEXT_HINT)),
+                Span::styled(model.to_string(), model_style),
             ];
         }
 
@@ -517,10 +527,7 @@ impl<'a> HeaderWidget<'a> {
                 Style::default().fg(palette::TEXT_SECONDARY),
             ),
             Span::styled(" · ", Style::default().fg(palette::TEXT_HINT)),
-            Span::styled(
-                Self::truncate_to_width(model, model_budget),
-                Style::default().fg(palette::TEXT_HINT),
-            ),
+            Span::styled(Self::truncate_to_width(model, model_budget), model_style),
         ]
     }
 
@@ -602,7 +609,7 @@ mod tests {
     use super::{HeaderData, HeaderWidget, Renderable};
     use crate::palette;
     use crate::tui::app::AppMode;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     fn render_header(data: HeaderData<'_>, width: u16) -> String {
         let widget = HeaderWidget::new(data);
@@ -611,6 +618,14 @@ mod tests {
         widget.render(area, &mut buf);
 
         (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+    }
+
+    fn render_header_buffer(data: HeaderData<'_>, width: u16) -> Buffer {
+        let widget = HeaderWidget::new(data);
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        buf
     }
 
     #[test]
@@ -631,6 +646,26 @@ mod tests {
         assert!(rendered.contains("deepseek-v4-pro"));
         assert!(!rendered.contains("Plan"));
         assert!(!rendered.contains("Yolo"));
+    }
+
+    #[test]
+    fn header_uses_model_accent_on_model_label() {
+        let accent = Color::Rgb(152, 112, 224);
+        let buf = render_header_buffer(
+            HeaderData::new(
+                AppMode::Agent,
+                "qwen3-coder",
+                "codewhale-tui",
+                false,
+                palette::DEEPSEEK_INK,
+            )
+            .with_model_accent(Some(accent)),
+            72,
+        );
+        let rendered = (0..72).map(|x| buf[(x, 0)].symbol()).collect::<String>();
+        let idx = rendered.find("qwen3-coder").expect("model label visible") as u16;
+
+        assert_eq!(buf[(idx, 0)].fg, accent);
     }
 
     #[test]

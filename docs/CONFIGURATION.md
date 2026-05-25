@@ -359,6 +359,12 @@ Common settings keys:
 - `background_color` (`#RRGGBB`, `RRGGBB`, or `default`): optional main TUI
   background color applied to the root, header, transcript, and footer
   surfaces while preserving panel contrast.
+- Model family accents are built in for shared client identity: DeepSeek,
+  Anthropic, OpenAI, Google, Meta, Mistral, Qwen, Grok, Cohere, GptOss,
+  Inferencer, and Unknown each have an inspired, non-brand-exact palette with
+  `accent`, `accent_dim`, `thinking`, and `tool_call` slots. The current TUI
+  uses the family `accent` for the active model label; per-user palette
+  overrides are not a config surface yet.
 - `cost_currency` (`usd`, `cny`; default `usd`): currency used by the footer,
   context panel, `/cost`, `/tokens`, and long-turn notification summaries. The
   aliases `rmb` and `yuan` normalize to `cny`.

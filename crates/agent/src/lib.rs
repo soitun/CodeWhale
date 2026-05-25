@@ -3,6 +3,190 @@ use std::collections::HashMap;
 use codewhale_config::ProviderKind;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ModelFamily {
+    DeepSeek,
+    Anthropic,
+    OpenAI,
+    Google,
+    Meta,
+    Mistral,
+    Qwen,
+    Grok,
+    Cohere,
+    GptOss,
+    Inferencer,
+    Unknown,
+}
+
+impl ModelFamily {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "deepseek",
+            Self::Anthropic => "anthropic",
+            Self::OpenAI => "openai",
+            Self::Google => "google",
+            Self::Meta => "meta",
+            Self::Mistral => "mistral",
+            Self::Qwen => "qwen",
+            Self::Grok => "grok",
+            Self::Cohere => "cohere",
+            Self::GptOss => "gpt-oss",
+            Self::Inferencer => "inferencer",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelFamilyPalette {
+    pub accent: (u8, u8, u8),
+    pub accent_dim: (u8, u8, u8),
+    pub thinking: (u8, u8, u8),
+    pub tool_call: (u8, u8, u8),
+}
+
+impl ModelFamilyPalette {
+    #[must_use]
+    pub const fn for_family(family: ModelFamily) -> Self {
+        match family {
+            ModelFamily::DeepSeek => Self {
+                accent: (72, 140, 220),
+                accent_dim: (36, 76, 132),
+                thinking: (52, 104, 148),
+                tool_call: (80, 170, 198),
+            },
+            ModelFamily::Anthropic => Self {
+                accent: (198, 116, 76),
+                accent_dim: (112, 66, 48),
+                thinking: (146, 102, 68),
+                tool_call: (214, 154, 112),
+            },
+            ModelFamily::OpenAI => Self {
+                accent: (82, 176, 150),
+                accent_dim: (44, 98, 88),
+                thinking: (70, 128, 112),
+                tool_call: (118, 206, 176),
+            },
+            ModelFamily::Google => Self {
+                accent: (86, 154, 228),
+                accent_dim: (62, 92, 142),
+                thinking: (224, 160, 72),
+                tool_call: (92, 180, 116),
+            },
+            ModelFamily::Meta => Self {
+                accent: (74, 132, 214),
+                accent_dim: (42, 70, 128),
+                thinking: (94, 148, 200),
+                tool_call: (104, 186, 222),
+            },
+            ModelFamily::Mistral => Self {
+                accent: (214, 122, 54),
+                accent_dim: (118, 70, 42),
+                thinking: (174, 104, 58),
+                tool_call: (232, 158, 86),
+            },
+            ModelFamily::Qwen => Self {
+                accent: (152, 112, 224),
+                accent_dim: (78, 60, 134),
+                thinking: (126, 94, 174),
+                tool_call: (188, 146, 238),
+            },
+            ModelFamily::Grok => Self {
+                accent: (184, 190, 198),
+                accent_dim: (92, 98, 106),
+                thinking: (132, 138, 148),
+                tool_call: (216, 220, 224),
+            },
+            ModelFamily::Cohere => Self {
+                accent: (230, 112, 136),
+                accent_dim: (126, 58, 76),
+                thinking: (176, 86, 110),
+                tool_call: (238, 150, 166),
+            },
+            ModelFamily::GptOss => Self {
+                accent: (92, 196, 176),
+                accent_dim: (48, 110, 100),
+                thinking: (76, 150, 138),
+                tool_call: (128, 224, 204),
+            },
+            ModelFamily::Inferencer => Self {
+                accent: (144, 164, 188),
+                accent_dim: (74, 88, 108),
+                thinking: (112, 130, 154),
+                tool_call: (164, 188, 214),
+            },
+            ModelFamily::Unknown => Self {
+                accent: (150, 160, 174),
+                accent_dim: (72, 82, 96),
+                thinking: (112, 122, 136),
+                tool_call: (176, 188, 202),
+            },
+        }
+    }
+}
+
+#[must_use]
+pub fn model_family(model_id: &str) -> ModelFamily {
+    let normalized = model_id.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return ModelFamily::Unknown;
+    }
+
+    let compact = normalized.replace(['_', '.', ':', '/', '\\'], "-");
+    let family_markers = [
+        (ModelFamily::GptOss, &["gpt-oss", "gptoss"][..]),
+        (ModelFamily::DeepSeek, &["deepseek", "deep-seek"]),
+        (ModelFamily::Anthropic, &["claude", "anthropic"]),
+        (ModelFamily::Google, &["gemini", "gemma", "google"]),
+        (
+            ModelFamily::Meta,
+            &["llama", "codellama", "meta-llama", "meta"],
+        ),
+        (ModelFamily::Mistral, &["mistral", "mixtral", "codestral"]),
+        (ModelFamily::Qwen, &["qwen", "qwq", "qvq"]),
+        (ModelFamily::Grok, &["grok", "x-ai", "xai"]),
+        (ModelFamily::Cohere, &["cohere", "command-r", "command-a"]),
+        (
+            ModelFamily::OpenAI,
+            &["gpt-5", "gpt-4", "gpt-3", "gpt4", "gpt3", "o1", "o3", "o4"][..],
+        ),
+    ];
+
+    for (family, markers) in family_markers {
+        if markers
+            .iter()
+            .any(|marker| normalized.contains(marker) || compact.contains(marker))
+        {
+            return family;
+        }
+    }
+
+    let inferencer_markers = [
+        "openrouter",
+        "groq",
+        "together",
+        "cerebras",
+        "fireworks",
+        "deepinfra",
+        "novita",
+        "replicate",
+        "nvidia-nim",
+        "sglang",
+        "vllm",
+        "ollama",
+    ];
+    if inferencer_markers
+        .iter()
+        .any(|marker| normalized.contains(marker) || compact.contains(marker))
+    {
+        return ModelFamily::Inferencer;
+    }
+
+    ModelFamily::Unknown
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
@@ -325,6 +509,71 @@ fn preserve_requested_model_id_case(mut model: ModelInfo, requested: &str) -> Mo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_family_maps_representative_model_ids() {
+        let cases = [
+            ("deepseek-v4-pro", ModelFamily::DeepSeek),
+            ("deepseek/deepseek-v4-flash", ModelFamily::DeepSeek),
+            ("anthropic/claude-opus-4-7", ModelFamily::Anthropic),
+            ("claude-3-5-sonnet", ModelFamily::Anthropic),
+            ("openai/gpt-5.4", ModelFamily::OpenAI),
+            ("gpt-4.1-mini", ModelFamily::OpenAI),
+            ("google/gemini-3.1-pro", ModelFamily::Google),
+            ("gemini-2.5-pro", ModelFamily::Google),
+            ("meta-llama/llama-3.3-70b-instruct", ModelFamily::Meta),
+            ("llama3.3:70b", ModelFamily::Meta),
+            ("mistralai/mistral-large", ModelFamily::Mistral),
+            ("qwen/qwen3-coder", ModelFamily::Qwen),
+            ("x-ai/grok-4", ModelFamily::Grok),
+            ("cohere/command-r-plus", ModelFamily::Cohere),
+            ("openai/gpt-oss-120b", ModelFamily::GptOss),
+            ("gpt-oss:20b", ModelFamily::GptOss),
+            ("openrouter/auto", ModelFamily::Inferencer),
+            ("unknown-model", ModelFamily::Unknown),
+        ];
+
+        for (model_id, expected) in cases {
+            assert_eq!(model_family(model_id), expected, "{model_id}");
+        }
+    }
+
+    #[test]
+    fn routed_ids_prefer_underlying_family_over_gateway() {
+        let cases = [
+            (
+                "openrouter/meta-llama/llama-3.3-70b-instruct",
+                ModelFamily::Meta,
+            ),
+            ("groq/openai/gpt-oss-120b", ModelFamily::GptOss),
+            ("together/qwen/qwen3-coder", ModelFamily::Qwen),
+            (
+                "fireworks/deepseek-ai/deepseek-v4-pro",
+                ModelFamily::DeepSeek,
+            ),
+            ("deepinfra/google/gemini-3.1-pro", ModelFamily::Google),
+        ];
+
+        for (model_id, expected) in cases {
+            assert_eq!(model_family(model_id), expected, "{model_id}");
+        }
+    }
+
+    #[test]
+    fn model_family_palettes_are_stable_and_distinct() {
+        assert_eq!(
+            ModelFamilyPalette::for_family(ModelFamily::DeepSeek).accent,
+            (72, 140, 220)
+        );
+        assert_eq!(
+            ModelFamilyPalette::for_family(ModelFamily::Qwen).tool_call,
+            (188, 146, 238)
+        );
+        assert_ne!(
+            ModelFamilyPalette::for_family(ModelFamily::DeepSeek).accent,
+            ModelFamilyPalette::for_family(ModelFamily::Anthropic).accent
+        );
+    }
 
     #[test]
     fn deepseek_v4_pro_alias_stays_deepseek_by_default() {
