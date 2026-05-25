@@ -63,6 +63,19 @@ use super::{LlmClient, StreamEventBox};
 /// the mock does not require `MessageStart` to be present.
 pub type CannedTurn = Vec<StreamEvent>;
 
+/// One queued mock response step.
+pub enum FauxStep {
+    Canned(CannedTurn),
+    /// Build the mock response from the live outgoing request.
+    ///
+    /// Use this for request-shape assertions that must happen at the trait
+    /// boundary. In particular, DeepSeek V4 thinking-mode tool calls require
+    /// every follow-up request to replay the assistant turn's
+    /// `reasoning_content`; dropping it caused HTTP 400 regressions in
+    /// v0.4.9-v0.5.1.
+    Factory(Box<dyn Fn(&MessageRequest) -> CannedTurn + Send + Sync>),
+}
+
 /// A queue-driven mock LLM client.
 ///
 /// The mock holds a FIFO queue of canned response turns. Each call to
@@ -75,7 +88,7 @@ pub type CannedTurn = Vec<StreamEvent>;
 /// can assert on the outgoing payload (e.g. that prior `reasoning_content` is
 /// preserved across turns).
 pub struct MockLlmClient {
-    canned: Mutex<VecDeque<CannedTurn>>,
+    canned: Mutex<VecDeque<FauxStep>>,
     captured_requests: Mutex<Vec<MessageRequest>>,
     calls: AtomicUsize,
     provider_name: &'static str,
@@ -90,8 +103,14 @@ impl MockLlmClient {
     /// Construct a mock that will replay the given canned turns in order.
     #[must_use]
     pub fn new(canned: Vec<CannedTurn>) -> Self {
+        Self::from_steps(canned.into_iter().map(FauxStep::Canned).collect())
+    }
+
+    /// Construct a mock that will replay or evaluate the given steps in order.
+    #[must_use]
+    pub fn from_steps(steps: Vec<FauxStep>) -> Self {
         Self {
-            canned: Mutex::new(canned.into()),
+            canned: Mutex::new(steps.into()),
             captured_requests: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             provider_name: "mock",
@@ -119,7 +138,15 @@ impl MockLlmClient {
         self.canned
             .lock()
             .expect("MockLlmClient.canned mutex poisoned")
-            .push_back(turn);
+            .push_back(FauxStep::Canned(turn));
+    }
+
+    /// Push a factory step onto the back of the queue.
+    pub fn push_factory(&self, factory: Box<dyn Fn(&MessageRequest) -> CannedTurn + Send + Sync>) {
+        self.canned
+            .lock()
+            .expect("MockLlmClient.canned mutex poisoned")
+            .push_back(FauxStep::Factory(factory));
     }
 
     /// Push a canned non-streaming `MessageResponse`. Consumed by
@@ -175,11 +202,18 @@ impl MockLlmClient {
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn pop_turn(&self) -> Option<CannedTurn> {
-        self.canned
+    fn pop_turn(&self, request: &MessageRequest) -> Option<CannedTurn> {
+        let step = self
+            .canned
             .lock()
             .expect("MockLlmClient.canned mutex poisoned")
-            .pop_front()
+            .pop_front();
+
+        match step {
+            Some(FauxStep::Canned(turn)) => Some(turn),
+            Some(FauxStep::Factory(factory)) => Some(factory(request)),
+            None => None,
+        }
     }
 
     fn pop_message(&self) -> Option<MessageResponse> {
@@ -207,7 +241,7 @@ impl LlmClient for MockLlmClient {
         }
 
         // Fallback: synthesize a MessageResponse from the next streaming turn.
-        let Some(turn) = self.pop_turn() else {
+        let Some(turn) = self.pop_turn(&request) else {
             return Err(anyhow!(
                 "MockLlmClient: create_message called but no canned response queued (request #{})",
                 self.calls.load(Ordering::SeqCst)
@@ -220,7 +254,7 @@ impl LlmClient for MockLlmClient {
     async fn create_message_stream(&self, request: MessageRequest) -> Result<StreamEventBox> {
         self.record_request(&request);
 
-        let Some(turn) = self.pop_turn() else {
+        let Some(turn) = self.pop_turn(&request) else {
             return Err(anyhow!(
                 "MockLlmClient: create_message_stream called but no canned turn queued (call #{})",
                 self.calls.load(Ordering::SeqCst)
