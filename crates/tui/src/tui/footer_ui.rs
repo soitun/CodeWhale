@@ -461,7 +461,8 @@ pub(crate) fn render_footer_from(
         Vec::new()
     };
     let agents = if has(S::Agents) {
-        let mut spans = crate::tui::widgets::footer_agents_chip(running_agent_count(app), app.ui_locale);
+        let mut spans =
+            crate::tui::widgets::footer_agents_chip(running_agent_count(app), app.ui_locale);
         spans.extend(crate::tui::widgets::footer_shell_chip(app));
         spans
     } else {

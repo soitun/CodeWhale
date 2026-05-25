@@ -7,13 +7,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use codewhale_tools::{ToolCapability, ToolError, ToolResult};
 
-use crate::tui::app::GoalState;
-use crate::tools::spec::{ApprovalRequirement, ToolSpec};
 use crate::tools::ToolContext;
+use crate::tools::spec::{ApprovalRequirement, ToolSpec};
+use crate::tui::app::GoalState;
 
 /// Shared goal state — same Arc<Mutex<>> used by App.goal.
 pub type SharedGoalState = Arc<Mutex<GoalState>>;
@@ -65,11 +65,7 @@ impl ToolSpec for CreateGoalTool {
         ApprovalRequirement::Auto
     }
 
-    async fn execute(
-        &self,
-        input: Value,
-        _context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
         let objective = input["objective"].as_str().unwrap_or("");
         if objective.trim().is_empty() {
             return Ok(ToolResult::error("Goal objective cannot be empty."));
@@ -143,9 +139,13 @@ impl ToolSpec for GetGoalTool {
         let elapsed = goal.goal_started_at.map(|t| {
             let d = t.elapsed();
             let secs = d.as_secs();
-            if secs < 60 { format!("{secs}s") }
-            else if secs < 3600 { format!("{}m{}s", secs/60, secs%60) }
-            else { format!("{}h{}m", secs/3600, (secs%3600)/60) }
+            if secs < 60 {
+                format!("{secs}s")
+            } else if secs < 3600 {
+                format!("{}m{}s", secs / 60, secs % 60)
+            } else {
+                format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+            }
         });
         let snapshot = json!({
             "objective": goal.goal_objective,
@@ -154,7 +154,8 @@ impl ToolSpec for GetGoalTool {
             "tokens_used": 0,
             "elapsed": elapsed,
         });
-        Ok(ToolResult::json(&snapshot).unwrap_or_else(|_| ToolResult::success(snapshot.to_string())))
+        Ok(ToolResult::json(&snapshot)
+            .unwrap_or_else(|_| ToolResult::success(snapshot.to_string())))
     }
 }
 
@@ -210,27 +211,31 @@ impl ToolSpec for UpdateGoalTool {
         ApprovalRequirement::Auto
     }
 
-    async fn execute(
-        &self,
-        input: Value,
-        _context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
         let status = input["status"].as_str().unwrap_or("");
         let mut goal = self.goal_state.lock().unwrap();
         if goal.goal_objective.is_none() && status != "active" {
-            return Ok(ToolResult::error("No active goal to update. Use create_goal first."));
+            return Ok(ToolResult::error(
+                "No active goal to update. Use create_goal first.",
+            ));
         }
         match status {
             "complete" => {
                 goal.goal_completed = true;
                 let evidence = input["evidence"].as_str().unwrap_or("");
-                let note = if evidence.is_empty() { String::new() } else { format!(" Evidence: {evidence}") };
+                let note = if evidence.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Evidence: {evidence}")
+                };
                 Ok(ToolResult::success(format!("Goal marked complete.{note}")))
             }
             "paused" => {
                 goal.goal_completed = false;
                 let obj = goal.goal_objective.as_deref().unwrap_or("unknown");
-                Ok(ToolResult::success(format!("Goal \"{obj}\" paused. It will not auto-continue until resumed.")))
+                Ok(ToolResult::success(format!(
+                    "Goal \"{obj}\" paused. It will not auto-continue until resumed."
+                )))
             }
             "active" => {
                 if let Some(new_obj) = input["objective"].as_str() {
@@ -239,10 +244,14 @@ impl ToolSpec for UpdateGoalTool {
                     Ok(ToolResult::success(format!("Goal updated: \"{new_obj}\"")))
                 } else {
                     goal.goal_completed = false;
-                    Ok(ToolResult::success("Goal resumed. Continuation will resume on the next idle turn."))
+                    Ok(ToolResult::success(
+                        "Goal resumed. Continuation will resume on the next idle turn.",
+                    ))
                 }
             }
-            other => Ok(ToolResult::error(format!("Unknown goal status: '{other}'. Use active, complete, or paused."))),
+            other => Ok(ToolResult::error(format!(
+                "Unknown goal status: '{other}'. Use active, complete, or paused."
+            ))),
         }
     }
 }

@@ -135,6 +135,10 @@ distinct set of commands (`auth`, `config`, `model`, `thread`, `sandbox`,
 `app-server`, `mcp-server`, `completion`) and forwards plain prompts to
 `codewhale-tui`.
 
+> **Provider catalog:** See [PROVIDERS.md](PROVIDERS.md) for a complete list of
+> supported providers, their canonical names, API base URLs, model ID formats,
+> and auth methods.
+
 ## Profiles
 
 You can define multiple profiles in the same file:

@@ -119,6 +119,34 @@ pub struct AvailableModel {
     pub created: Option<u64>,
 }
 
+/// Structured balance/credits info returned by a provider's billing endpoint.
+///
+/// Fields are provider-agnostic; only the fields that a provider actually
+/// returns are populated. Callers should check `provider` and `is_available`
+/// before interpreting the monetary fields.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ProviderBalance {
+    /// Which provider this balance came from.
+    pub provider: ApiProvider,
+    /// Whether the provider reports the balance endpoint as available.
+    /// `None` when the provider doesn't expose an `is_available` field
+    /// (e.g. OpenRouter).
+    pub is_available: Option<bool>,
+    /// ISO 4217 currency code (e.g. `"CNY"`, `"USD"`).
+    pub currency: Option<String>,
+    /// Total balance as a formatted string from the provider (may include
+    /// locale-specific formatting).
+    pub total_balance: Option<String>,
+    /// Topped-up / purchased balance.
+    pub topped_up_balance: Option<String>,
+    /// Granted / promotional balance.
+    pub granted_balance: Option<String>,
+    /// Total credits purchased (OpenRouter).
+    pub total_credits: Option<f64>,
+    /// Total usage in credits (OpenRouter).
+    pub total_usage: Option<f64>,
+}
+
 /// Client for DeepSeek's OpenAI-compatible APIs.
 #[must_use]
 pub struct DeepSeekClient {
