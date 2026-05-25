@@ -1,12 +1,8 @@
 //! Balance: query the active provider's account balance or credit status.
 //!
-//! Supported providers (balance endpoints verified against official docs):
-//! - DeepSeek:  GET https://api.deepseek.com/user/balance
-//! - OpenRouter: GET https://openrouter.ai/api/v1/credits (management key required)
-//! - Novita AI:  Get User Balance (Basic APIs)
-//!
-//! Unsupported providers return a clear message. Wireup to async HTTP
-//! dispatch is pending — this module currently returns a placeholder.
+//! Provider-specific network dispatch is still pending. Until that lands, keep
+//! this command explicit about being a scaffold so users do not mistake it for
+//! a live balance lookup.
 
 use crate::config::ApiProvider;
 use crate::tui::app::App;
@@ -17,23 +13,16 @@ use super::CommandResult;
 pub fn balance(app: &mut App) -> CommandResult {
     let provider = app.api_provider;
     match provider {
-        ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-            CommandResult::message(format!(
-                "Balance check sent to {} — results will appear shortly.",
-                provider.display_name()
-            ))
-        }
-        ApiProvider::Openrouter => {
-            CommandResult::message(format!(
-                "Balance check sent to {} — results will appear shortly.",
-                provider.display_name()
-            ))
-        }
-        _ => {
-            CommandResult::message(format!(
-                "Balance check is not yet supported for {}.",
-                provider.display_name()
-            ))
-        }
+        ApiProvider::Deepseek
+        | ApiProvider::DeepseekCN
+        | ApiProvider::Openrouter
+        | ApiProvider::Novita => CommandResult::message(format!(
+            "Balance check for {} is planned, but provider balance network dispatch is not wired in this build yet.",
+            provider.display_name()
+        )),
+        _ => CommandResult::message(format!(
+            "Balance check is not supported for {} yet. Check the provider dashboard for account balance details.",
+            provider.display_name()
+        )),
     }
 }
