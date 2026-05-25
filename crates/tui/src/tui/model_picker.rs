@@ -311,7 +311,7 @@ impl ModalView for ModelPickerView {
                 Span::styled(" Enter ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::raw("apply "),
                 Span::styled(" Esc ", Style::default().fg(palette::TEXT_MUTED)),
-                Span::raw("cancel "),
+                Span::raw("close/appl "),
             ]))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
