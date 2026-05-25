@@ -11,6 +11,7 @@ use crate::models::SystemPrompt;
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
 use crate::tui::app::AppMode;
 use crate::tui::approval::ApprovalMode;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -383,6 +384,33 @@ pub const COMPACT_TEMPLATE: &str = include_str!("prompts/compact.md");
 /// because imperatives get re-read as directives in later sessions and
 /// can override the user's current request (#725).
 pub const MEMORY_GUIDANCE: &str = include_str!("prompts/memory_guidance.md");
+
+const CORE_DISCOVERY_TOOLS: &[&str] = &["grep_files", "file_search"];
+const CORE_GIT_INSPECTION_TOOLS: &[&str] = &["git_status", "git_diff"];
+const CORE_VERIFICATION_TOOLS: &[&str] = &["run_tests"];
+
+fn render_core_tool_taxonomy_block() -> String {
+    let groups: &[(&[&str], &str)] = &[
+        (CORE_DISCOVERY_TOOLS, "discovery"),
+        (CORE_GIT_INSPECTION_TOOLS, "git inspection"),
+        (CORE_VERIFICATION_TOOLS, "verification"),
+    ];
+
+    let mut block = String::from("## Tool Taxonomy\n\n");
+    for (idx, (tools, purpose)) in groups.iter().enumerate() {
+        if idx > 0 {
+            block.push(' ');
+        }
+        let tool_list = tools
+            .iter()
+            .map(|tool| format!("`{tool}`"))
+            .collect::<Vec<_>>()
+            .join("/");
+        write!(&mut block, "Use {tool_list} for {purpose}.")
+            .expect("writing to String should not fail");
+    }
+    block
+}
 
 // ── Legacy prompt constants (kept for backwards compatibility) ────────
 
@@ -1872,6 +1900,16 @@ mod tests {
     fn legacy_constants_still_available() {
         // Verify the legacy .txt constant still compiles and contains expected content
         assert!(AGENT_PROMPT.lines().next().is_some());
+    }
+
+    #[test]
+    fn agent_prompts_start_with_generated_tool_taxonomy() {
+        let taxonomy = render_core_tool_taxonomy_block();
+        assert!(AGENT_MODE.starts_with(&taxonomy));
+        assert!(AGENT_PROMPT.starts_with(&taxonomy));
+        assert!(taxonomy.contains("`grep_files`/`file_search`"));
+        assert!(taxonomy.contains("`git_status`/`git_diff`"));
+        assert!(taxonomy.contains("`run_tests`"));
     }
 
     // ── Cache-prefix stability harness (#263 step 2) ───────────────────────

@@ -1,3 +1,7 @@
+## Tool Taxonomy
+
+Use `grep_files`/`file_search` for discovery. Use `git_status`/`git_diff` for git inspection. Use `run_tests` for verification.
+
 ## Mode: Agent
 
 You are running in Agent mode — autonomous task execution with tool access.
