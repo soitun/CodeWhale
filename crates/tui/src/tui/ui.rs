@@ -1,11 +1,12 @@
 //! TUI event loop and rendering logic for `DeepSeek` CLI.
 
 use std::fmt::Write as _;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -26,6 +27,7 @@ use crossterm::event::{
 };
 use ratatui::{
     Frame, Terminal,
+    buffer::{Buffer, Cell},
     layout::{Constraint, Direction, Layout, Rect, Size},
     prelude::Widget,
     style::Style,
@@ -5893,13 +5895,15 @@ fn draw_app_frame_inner(
 ) -> Result<()> {
     terminal.backend_mut().set_palette_mode(app.ui_theme.mode);
     terminal.backend_mut().set_theme(app.theme_id, app.ui_theme);
-    // DEC 2026 wrapping is on by default but can be turned off for
-    // terminals that mishandle it (Ptyxis 50.x + VTE 0.84.x flashes the
-    // whole viewport on every wrapped frame instead of deferring as the
-    // standard requires). Settings::synchronized_output_enabled resolves
-    // the user's setting against the Ptyxis env auto-detect.
     let wrap_in_sync_update = app.synchronized_output_enabled;
-    if wrap_in_sync_update {
+    // Normal frames are wrapped by the backend's draw/flush boundary so the
+    // DEC 2026 envelope sits exactly around ratatui's diff output. Full
+    // repaints still start the envelope here because they include viewport
+    // reset bytes before `Terminal::draw` begins.
+    terminal
+        .backend_mut()
+        .set_synchronized_output(wrap_in_sync_update && !full_repaint);
+    if full_repaint && wrap_in_sync_update {
         let _ = terminal.backend_mut().write_all(BEGIN_SYNC_UPDATE);
     }
 
@@ -5912,16 +5916,99 @@ fn draw_app_frame_inner(
             terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
             terminal.clear()?;
         }
-        terminal.draw(|f| render(f, app))?;
+        let frame = terminal.draw(|f| render(f, app))?;
+        log_render_debug_frame(&frame.buffer, frame.area, frame.count, full_repaint);
         Ok(())
     })();
 
     // Always end the synchronized update, regardless of success or failure.
-    if wrap_in_sync_update {
+    if full_repaint && wrap_in_sync_update {
         let _ = terminal.backend_mut().write_all(END_SYNC_UPDATE);
     }
     let _ = terminal.backend_mut().flush();
     result
+}
+
+fn log_render_debug_frame(buffer: &Buffer, area: Rect, frame_count: usize, full_repaint: bool) {
+    static LOGGER: OnceLock<Mutex<Option<RenderDebugLogger>>> = OnceLock::new();
+    let logger = LOGGER.get_or_init(|| Mutex::new(RenderDebugLogger::open()));
+    let Ok(mut logger) = logger.lock() else {
+        return;
+    };
+    if let Some(logger) = logger.as_mut() {
+        let _ = logger.log_frame(buffer, area, frame_count, full_repaint);
+    }
+}
+
+struct RenderDebugLogger {
+    file: File,
+    previous_area: Option<Rect>,
+    previous_cells: Vec<Cell>,
+}
+
+impl RenderDebugLogger {
+    fn open() -> Option<Self> {
+        if std::env::var("CODEWHALE_TUI_DEBUG").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let log_dir = dirs::home_dir()?.join(".deepseek").join("logs");
+        std::fs::create_dir_all(&log_dir).ok()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join("tui-render.log"))
+            .ok()?;
+        Some(Self {
+            file,
+            previous_area: None,
+            previous_cells: Vec::new(),
+        })
+    }
+
+    fn log_frame(
+        &mut self,
+        buffer: &Buffer,
+        area: Rect,
+        frame_count: usize,
+        full_repaint: bool,
+    ) -> io::Result<()> {
+        let cells = buffer.content();
+        let area_changed = self.previous_area != Some(area);
+        let mut first_changed = None;
+        let changed = if area_changed || self.previous_cells.len() != cells.len() {
+            if !cells.is_empty() {
+                first_changed = Some(0);
+            }
+            cells.len()
+        } else {
+            let mut changed = 0usize;
+            for (idx, (next, prev)) in cells.iter().zip(self.previous_cells.iter()).enumerate() {
+                if next != prev {
+                    changed += 1;
+                    first_changed.get_or_insert(idx);
+                }
+            }
+            changed
+        };
+
+        write!(
+            self.file,
+            "frame={frame_count} area={}x{}+{},{} full_repaint={full_repaint} changed={changed}",
+            area.width, area.height, area.x, area.y
+        )?;
+        write!(self.file, " area_changed={area_changed}")?;
+        if let Some(idx) = first_changed {
+            let width = area.width.max(1);
+            let x = area.x + (idx as u16 % width);
+            let y = area.y + (idx as u16 / width);
+            write!(self.file, " first_changed={x},{y}")?;
+        }
+        writeln!(self.file)?;
+        self.previous_area = Some(area);
+        self.previous_cells.clear();
+        self.previous_cells.extend_from_slice(cells);
+        Ok(())
+    }
 }
 
 /// Pull the latest snapshot of cells / revisions / render options into the

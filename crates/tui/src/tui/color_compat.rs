@@ -16,6 +16,9 @@ use ratatui::{
 
 use crate::palette::{self, ColorDepth, PaletteMode, ThemeId, UiTheme};
 
+const BEGIN_SYNC_UPDATE: &[u8] = b"\x1b[?2026h";
+const END_SYNC_UPDATE: &[u8] = b"\x1b[?2026l";
+
 #[derive(Debug)]
 pub(crate) struct ColorCompatBackend<W: Write> {
     inner: CrosstermBackend<W>,
@@ -38,6 +41,8 @@ pub(crate) struct ColorCompatBackend<W: Write> {
     /// Forcing the expected size prevents ratatui's internal `autoresize` from
     /// shrinking the viewport back to the stale dimension inside `draw()`.
     forced_size: Option<Size>,
+    synchronized_output_enabled: bool,
+    synchronized_output_active: bool,
 }
 
 impl<W: Write> ColorCompatBackend<W> {
@@ -53,6 +58,8 @@ impl<W: Write> ColorCompatBackend<W> {
             // to a community preset.
             active_ui_theme: UiTheme::detect(),
             forced_size: None,
+            synchronized_output_enabled: false,
+            synchronized_output_active: false,
         }
     }
 
@@ -71,6 +78,26 @@ impl<W: Write> ColorCompatBackend<W> {
     pub(crate) fn set_theme(&mut self, theme_id: ThemeId, ui_theme: UiTheme) {
         self.theme_id = theme_id;
         self.active_ui_theme = ui_theme;
+    }
+
+    pub(crate) fn set_synchronized_output(&mut self, enabled: bool) {
+        self.synchronized_output_enabled = enabled;
+    }
+
+    fn begin_synchronized_output(&mut self) -> io::Result<()> {
+        if self.synchronized_output_enabled && !self.synchronized_output_active {
+            self.inner.write_all(BEGIN_SYNC_UPDATE)?;
+            self.synchronized_output_active = true;
+        }
+        Ok(())
+    }
+
+    fn end_synchronized_output(&mut self) -> io::Result<()> {
+        if self.synchronized_output_active {
+            self.inner.write_all(END_SYNC_UPDATE)?;
+            self.synchronized_output_active = false;
+        }
+        Ok(())
     }
 }
 
@@ -91,6 +118,7 @@ impl<W: Write> Backend for ColorCompatBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        self.begin_synchronized_output()?;
         let adapted = content
             .map(|(x, y, cell)| {
                 let mut cell = cell.clone();
@@ -148,6 +176,7 @@ impl<W: Write> Backend for ColorCompatBackend<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.end_synchronized_output()?;
         Backend::flush(&mut self.inner)
     }
 }
@@ -249,6 +278,25 @@ mod tests {
         let output = String::from_utf8_lossy(&capture.borrow()).to_string();
         assert!(!output.contains("38;2;"), "{output:?}");
         assert!(!output.contains("48;2;"), "{output:?}");
+    }
+
+    #[test]
+    fn synchronized_output_wraps_backend_draw_until_flush() {
+        let writer = SharedWriter::default();
+        let capture = writer.0.clone();
+        let mut backend = ColorCompatBackend::new(writer, ColorDepth::TrueColor, PaletteMode::Dark);
+        backend.set_synchronized_output(true);
+        let cell = Cell::new("x");
+
+        backend.draw(std::iter::once((0, 0, &cell))).unwrap();
+        let after_draw = String::from_utf8_lossy(&capture.borrow()).to_string();
+        assert!(after_draw.contains("\x1b[?2026h"), "{after_draw:?}");
+        assert!(!after_draw.contains("\x1b[?2026l"), "{after_draw:?}");
+
+        Backend::flush(&mut backend).unwrap();
+        let after_flush = String::from_utf8_lossy(&capture.borrow()).to_string();
+        assert!(after_flush.contains("\x1b[?2026h"), "{after_flush:?}");
+        assert!(after_flush.contains("\x1b[?2026l"), "{after_flush:?}");
     }
 
     #[test]
