@@ -620,6 +620,7 @@ secrets or permission to merge to `main`.
 
 | Doc | Topic |
 |---|---|
+| [GUIDE.md](docs/GUIDE.md) | User guide: getting started, modes, shortcuts, sessions, sub-agents |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Codebase internals |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Full config reference |
 | [MODES.md](docs/MODES.md) | Plan / Agent / YOLO modes |

@@ -1,191 +1,374 @@
 # CodeWhale User Guide
 
-A practical walkthrough for getting the most out of CodeWhale — a DeepSeek-first
-agentic terminal for coding with open-weight models.
+A practical guide to getting productive with CodeWhale — the DeepSeek-first
+agentic terminal for open-source coding models. This covers the interactive
+TUI, not the one-shot CLI or automation paths. For those, see the
+[README](../README.md) and [Runtime API](RUNTIME_API.md).
 
-## Getting Started
+## 1. Getting started
+
+### Install
+
+Pick one path. All of them put `codewhale` (dispatcher) and `codewhale-tui`
+(runtime) on your `PATH`. The short alias `codew` works everywhere.
 
 ```bash
-# Install (pick one)
-npm install -g codewhale                          # npm
-cargo install codewhale-cli --locked --force      # Cargo (need both)
-cargo install codewhale-tui --locked --force
-brew install deepseek-tui                         # Homebrew
+# npm (Node.js wrapper)
+npm install -g codewhale
 
-# Set your API key
-export DEEPSEEK_API_KEY="sk-..."
-codewhale auth set --provider deepseek            # or save to config
-codewhale doctor                                  # verify setup
+# Cargo (Rust 1.88+)
+cargo install codewhale-cli --locked
+cargo install codewhale-tui --locked
 
-# Launch
+# Homebrew (macOS)
+brew tap Hmbown/deepseek-tui
+brew install deepseek-tui
+```
+
+### First launch
+
+```bash
 codewhale
-codewhale --model auto                            # auto-routing
-codewhale -p "Fix the failing test in src/lib.rs" # one-shot
 ```
 
-## Key Features at a Glance
+CodeWhale prompts for your [DeepSeek API key](https://platform.deepseek.com/api_keys)
+on first launch. The key is saved to `~/.codewhale/config.toml`. You can also
+set it ahead of time:
 
-| Feature | What it does |
+```bash
+codewhale auth set --provider deepseek
+# or
+export DEEPSEEK_API_KEY="your-key"
+```
+
+Run `codewhale doctor` to verify connectivity.
+
+## 2. Key concepts
+
+CodeWhale is an **agentic terminal**: it can read your files, search your
+codebase, run shell commands, edit code, and apply patches — all with
+structured tools the model chooses. Every tool use is visible in the
+transcript and most are gated behind an approval prompt.
+
+| Concept | What it means |
 |---|---|
-| **Model auto-routing** | `--model auto` picks the right model + thinking level per turn |
-| **Thinking-mode streaming** | See DeepSeek reasoning blocks in real time |
-| **Three modes** | Plan (read-only), Agent (interactive approval), YOLO (auto-approved) |
-| **Sub-agents** | Dispatch parallel workers for file ops, search, review, and verification |
-| **Session save/resume** | Checkpoint long sessions and fork conversations |
-| **MCP protocol** | Connect external tools via Model Context Protocol |
-| **RLM sessions** | Persistent Python REPL for batch analysis over large files |
-| **Skills system** | Installable instruction packs from GitHub |
-| **1M-token context** | Prefix-cache-aware cost tracking and optional compaction |
+| **Turn** | One prompt → model response cycle. The model may use many tools inside one turn. |
+| **Session** | A saved conversation. Survives restart. Resumable, forkable, exportable. |
+| **Tools** | Structured actions: `read_file`, `grep_files`, `exec_shell`, `edit_file`, `apply_patch`, etc. |
+| **Sub-agent** | A background child agent launched with `agent_open`. Runs independently. |
+| **Skill** | A reusable instruction file (`SKILL.md`). Activated with `/skill`. |
+| **RLM** | Persistent Python REPL session for data exploration and batch processing. |
+| **Checklist** | Granular progress tracking inside a turn. The model uses `checklist_write`. |
 
-## The Three Modes
+## 3. The TUI layout
 
-### Plan Mode
-Read-only exploration. The agent can read files, search code, and browse the web
-but cannot edit, run commands, or modify state. Use for understanding a codebase
-before committing to changes.
-
-```bash
-codewhale --mode plan
-# or inside a session: /mode plan
+```
+┌──────────────────────────────────────────────────┬──────────────┐
+│  Header: session title, model, mode, token count  │              │
+├──────────────────────────────────────────────────┤   Sidebar    │
+│                                                  │  Work/Tasks/ │
+│              Transcript pane                     │  Agents/     │
+│  (scrollable, selectable, yankable)              │  Context     │
+│                                                  │              │
+├──────────────────────────────────────────────────┤              │
+│  Status area: live tool calls, queued drafts     │              │
+├──────────────────────────────────────────────────┤              │
+│  Composer: type a message or /slash-command       │              │
+└──────────────────────────────────────────────────┴──────────────┘
 ```
 
-### Agent Mode
-Interactive with per-action approval. The agent proposes tool calls (edits,
-shell commands, git operations) and you approve or deny each one. This is the
-default mode and the safest for sensitive work.
+- **Transcript**: scroll with arrows/`j`/`k`, select with `v`, yank with `y`.
+  Press `Esc` to return focus to the composer.
+- **Sidebar**: toggle with `Ctrl-Shift-E`. Cycle panels with `Tab` when
+  focused. Use `Alt-1` through `Alt-4` or `Alt-0` to jump directly.
+- **Composer**: type messages, `/slash commands`, or `@file` mentions.
+  `Alt-Enter` inserts a newline.
 
-```bash
-codewhale                          # default is agent mode
-```
+## 4. Modes
 
-### YOLO Mode
-Auto-approved. All tool calls execute without prompting. Use when you trust the
-workspace state and want uninterrupted work — the agent runs until the task is
-done or you interrupt.
+Press `Tab` to cycle modes: **Plan → Agent → YOLO**. Press `Shift-Tab` to
+cycle reasoning effort: **off → high → max**.
 
-```bash
-codewhale --yolo
-```
+| Mode | Behavior | Tools | Approvals |
+|---|---|---|---|
+| **Plan** 🔍 | Design-first. Explore, read, plan. No changes. | Read-only | — |
+| **Agent** 🤖 | Multi-step tool use with approval gates. | All | Shell & paid tools |
+| **YOLO** ⚡ | Auto-approve everything. Trusted repos only. | All | None |
 
-## Model Auto-Routing
+Modes are separate from model routing. `Tab` cycles modes; `/model auto`
+controls model and thinking selection. See [MODES.md](MODES.md) for details.
 
-Use `/model auto` or `--model auto` to let CodeWhale decide how much reasoning
-power each turn needs. A cheap routing call (Fin) inspects your request and
-picks:
+You can also override approval behavior at runtime with `/config` → edit
+`approval_mode`: `suggest` (default), `auto`, or `never`.
 
-- **Model**: `deepseek-v4-flash` (fast) or `deepseek-v4-pro` (deep reasoning)
+## 5. Model routing
+
+CodeWhale is DeepSeek-first. The default models are `deepseek-v4-pro` and
+`deepseek-v4-flash`.
+
+### Auto-routing (`/model auto`)
+
+When model is set to `auto`, CodeWhale makes a small routing call before each
+turn using **Fin** — a low-latency `deepseek-v4-flash` path with thinking off.
+Fin decides:
+
+- **Model**: `deepseek-v4-flash` or `deepseek-v4-pro`
 - **Thinking**: `off`, `high`, or `max`
 
-Short lookups stay on Flash with thinking off. Architecture, debugging, and
-security review move up to Pro with higher thinking. You can also lock to a
-fixed model:
+Short/simple turns stay cheap on Flash. Complex coding, debugging, or
+architecture work escalates to Pro with appropriate reasoning depth.
+
+### Manual control
 
 ```bash
-/model deepseek-v4-pro          # force Pro for this session
-/model deepseek-v4-flash        # force Flash
-Shift + Tab                     # cycle thinking: off → high → max
+# CLI flags
+codewhale --model deepseek-v4-flash "summarize this"
+codewhale --model deepseek-v4-pro --thinking high "design a migration"
+
+# Inside the TUI
+/model deepseek-v4-pro
+/model auto
 ```
 
-## Slash Commands
+### Other providers
 
-Type `/` in the composer to see the command palette. Essential commands:
+CodeWhale supports multiple API providers: NVIDIA NIM, OpenRouter, AtlasCloud,
+Wanjie Ark, Novita, Fireworks, SGLang, vLLM, Ollama, and generic OpenAI-compatible
+endpoints. Use `/provider` to switch or `codewhale --provider <name>` at launch.
+
+## 6. Slash commands
+
+Type `/` in the composer to open the command palette, or `Ctrl-K` to search
+commands by name. Here are the most useful ones:
+
+### Essential
 
 | Command | Action |
 |---|---|
-| `/help` | Show all commands |
-| `/model auto` | Enable auto-routing |
-| `/mode plan` | Switch to Plan mode |
-| `/yolo` | Switch to YOLO mode |
-| `/sessions` | Open session picker (Ctrl+R) |
-| `/save` | Save current session |
-| `/compact` | Compress context to free space |
-| `/theme` | Switch color theme |
+| `/help` | Searchable help overlay |
+| `/model <name>` | Switch model |
+| `/mode <plan\|agent\|yolo>` | Switch TUI mode |
+| `/provider <name>` | Switch API provider |
+| `/config` | Open the settings editor |
+| `/theme <name>` | Switch colour theme |
+
+### Sessions
+
+| Command | Action |
+|---|---|
+| `/save [path]` | Save current session |
+| `/sessions` | Browse and resume past sessions |
+| `/rename <title>` | Rename current session |
+| `/fork` | Branch session into a sibling |
+| `/compact` | Summarise long context to save tokens |
+| `/export [path]` | Export session to a file |
+| `/load [path]` | Load a session from a file |
+
+### Work management
+
+| Command | Action |
+|---|---|
+| `/goal <objective>` | Set a session objective with optional token budget |
+| `/subagents` | List running sub-agents |
+| `/agent [N] <task>` | Launch a sub-agent (N = count for parallel work) |
+| `/task add <prompt>` | Create a durable background task |
+| `/jobs` | Manage background shell jobs |
+| `/queue` | Manage queued follow-up drafts |
+| `/stash` | Stash and recover composer drafts |
+
+### Code & workspace
+
+| Command | Action |
+|---|---|
+| `/init` | Scaffold project config |
+| `/workspace [path]` | Show or switch workspace |
+| `/diff` | Show working-tree diff |
+| `/undo` | Revert last tool edit or turn |
+| `/retry` | Resend the last user prompt |
+| `/review <target>` | Run a structured code review |
+| `/restore [N]` | Restore files from side-git snapshots |
+| `/lsp [on\|off]` | Toggle LSP diagnostics |
+
+### Skills & tools
+
+| Command | Action |
+|---|---|
 | `/skills` | List installed skills |
-| `/balance` | Check provider balance (coming soon) |
-| `/doctor` | Run setup diagnostics |
-| `/voice` | Voice input via STT helper |
-| `/quit` | Exit |
+| `/skill <name>` | Activate a skill |
+| `/skill install github:<owner>/<repo>` | Install community skill |
+| `/mcp` | Configure MCP servers |
+| `/rlm [N] <input>` | Open a recursive Python REPL session |
 
-## Sessions
+### Info & debug
 
-CodeWhale saves your conversation automatically. Key session commands:
+| Command | Action |
+|---|---|
+| `/cost` | Show session token cost |
+| `/balance` | Query provider account balance |
+| `/tokens` | Show token counts |
+| `/context` | Show current context window usage |
+| `/system` | Show the active system prompt |
+| `/status` | Show session/runtime status |
+| `/cache` | Inspect prefix-cache telemetry |
+| `/home` | Dashboard overview |
+| `/links` | DeepSeek platform links |
+| `/feedback` | Send feedback or bug report |
 
-- **Ctrl+R** — open session picker to resume, fork, or rename past sessions
-- **`/save`** — save the current session to disk
-- **`--continue` / `-c`** — resume your most recent session for this workspace
-- **Fork** — copy a session into a new branch to explore alternatives
+Full catalog: [KEYBINDINGS.md](KEYBINDINGS.md).
 
-Sessions live in `~/.codewhale/sessions/` (or `~/.deepseek/sessions/` for
-legacy installs). The session picker shows titles, timestamps, and parent
-lineage for forked sessions.
+## 7. Sessions
 
-## Sub-Agents (Brother Whales)
+Sessions are saved conversations that survive restarts.
 
-Sub-agents run in parallel — like a concurrent task queue. Use them when you
-need to:
+### Save and resume
 
-- Search multiple directories at once
-- Run independent file operations
-- Delegate verification to a reviewer
-- Offload long-running analysis
-
-The parent agent stays responsive while children work. When a sub-agent
-finishes, its findings appear in the transcript with a summary card. Finished
-sub-agents show their whale-species name in the sidebar.
+CodeWhale auto-saves after each turn. You can also save manually:
 
 ```text
-agent_open → child starts working (whale name: "Blue")
-agent_open → second child starts (whale name: "Beluga")
-... parent continues working ...
-<subagent.done> Blue finished: "Found 3 matches in src/"
-<subagent.done> Beluga finished: "Tests pass, 0 failures"
+/save                     # save with auto-generated title
+/save my-feature-review   # save with a custom name
 ```
 
-## RLM Sessions
+Resume from the TUI:
 
-For large files, batch classification, or structured analysis, use RLM
-(Recursive Language Model) sessions:
+- `Ctrl-R` opens the session picker
+- `/sessions` does the same
+- `codewhale resume --last` from the CLI
+- `codewhale --continue` / `-c` resumes the most recent session in the current workspace
 
-- **`rlm_open`** — load a file, URL, or session object into a Python REPL
-- **`rlm_eval`** — run Python code against the loaded context
-- **`rlm_session_objects`** — list symbolic session:// refs for inspection
-- **`rlm_close`** — tear down the session
+### Fork
 
-RLM keeps large payloads out of the main transcript. Use helpers like `peek`,
-`search`, `chunk`, and `sub_query_batch` for efficient analysis.
+`/fork` creates a sibling copy of the current session, preserving the parent
+lineage. This is the safe way to explore an alternative direction without
+overwriting the original conversation.
 
-## Tips
+### Compact
 
-### Keep Context Lean
-- Suggest `/compact` when context passes 60% (check the footer)
-- Use RLM for large-file analysis instead of repeated reads
-- Close sub-agents when their work is integrated
+Long sessions consume context window. `/compact` asks the model to summarise
+the conversation so far, freeing token budget for new work. Compaction
+preserves key decisions, task state, and recent context.
 
-### Prefix-Cache Economics
-- DeepSeek caches shared prefixes at 128-token granularity (~90% discount)
-- Prefer appending to existing messages over editing old ones
-- The cache-hit chip in the footer turns red below 40% — time to consolidate
+### Export and load
 
-### Keyboard Shortcuts
-| Key | Action |
+```text
+/export ~/Desktop/session-export.md    # save to a portable file
+/load ~/Desktop/session-export.md      # restore from a file
+```
+
+## 8. Sub-agents
+
+Sub-agents are background child instances that run independently. The parent
+launches one with a focused task and can continue working while it runs.
+
+The model orchestrates sub-agents through three tools:
+
+- **`agent_open`**: launch a child with a task and a role
+- **`agent_eval`**: wait for and fetch the child's result
+- **`agent_close`**: cancel a running child
+
+### Roles
+
+| Role | Stance | Typical use |
+|---|---|---|
+| `general` | Flexible, follows parent instructions | Multi-step tasks |
+| `explore` | Read-only, maps code fast | "Find every call site of X" |
+| `plan` | Analyse and produce strategy | "Design the migration" |
+| `review` | Read-and-grade with severity | "Audit this PR" |
+| `implementer` | Land a specific change | "Rewrite bar.rs::Foo::bar" |
+| `verifier` | Run tests, report outcome | "Run cargo test --workspace" |
+
+See [SUBAGENTS.md](SUBAGENTS.md) for the full taxonomy and context-forking
+behaviour.
+
+## 9. Tips
+
+### Workflow
+
+- **Start in Plan mode** for unfamiliar code. Let the model explore and
+  propose before making changes.
+- **Use `/goal`** to keep a session objective visible in the Work sidebar.
+- **Stash drafts** with `Ctrl-S` when you're interrupted mid-thought.
+  Recover with `/stash pop`.
+- **Queue follow-ups** with `Tab` while a turn is running. The queued
+  message becomes the next prompt automatically.
+- **Use `@file` mentions** to attach specific files or directories to
+  your prompt. Frecency ranking means files you often reference float up.
+- **Fork before large experiments**: `/fork` gives you a safe branch of
+  the conversation without risking the main session.
+
+### Cost control
+
+- Use `--model auto` or `/model auto` to let Fin route simple turns to
+  the cheaper Flash model.
+- Watch `/cost` to track cumulative token spend.
+- `/compact` when a session gets long — it saves tokens on every
+  subsequent turn.
+- Set a token budget with `/goal "fix auth bug" budget: 50000` to cap
+  the session.
+
+### Keyboard efficiency
+
+| Shortcut | What it does |
 |---|---|
-| Ctrl+R | Session picker |
-| Shift+Tab | Cycle thinking level |
-| Ctrl+C | Cancel / interrupt |
-| Ctrl+D | Quit |
-| Enter | Send message |
-| Escape | Dismiss picker/modal |
+| `F1` | Help overlay |
+| `Ctrl-K` | Command palette |
+| `Ctrl-R` | Session picker |
+| `Ctrl-S` | Stash current draft |
+| `Alt-R` | Search prompt history |
+| `Ctrl-O` | Activity detail / reasoning timeline |
+| `Ctrl-L` | Refresh screen |
+| `Esc` | Cancel / dismiss / back |
 
-### Cost Tracking
-The footer shows per-turn and session-level token usage with cost estimates.
-The cache-hit chip tells you how stable your prefix is. CNY display activates
-automatically when the session locale is `zh-Hans`.
+### Shell integration
 
-## Next Steps
+The model uses `exec_shell` for build, test, format, and lint commands.
+Dedicated tools (`read_file`, `grep_files`, `edit_file`, `apply_patch`)
+are preferred over shell equivalents — they return structured output and
+avoid platform-specific escaping.
 
-- [Architecture overview](ARCHITECTURE.md) — codebase internals
-- [Configuration reference](CONFIGURATION.md) — every setting explained
-- [MCP integration](MCP.md) — connect external tools
-- [Sub-agents deep dive](SUBAGENTS.md) — role taxonomy and lifecycle
-- [Keybindings catalog](KEYBINDINGS.md) — full shortcut reference
-- [RLM branching roadmap](RLM_BRANCHING_ROADMAP.md) — future RLM features
+## 10. Where to go next
+
+| Document | Topic |
+|---|---|
+| [KEYBINDINGS.md](KEYBINDINGS.md) | Every keyboard shortcut, by context |
+| [MODES.md](MODES.md) | Plan / Agent / YOLO in depth |
+| [CONFIGURATION.md](CONFIGURATION.md) | Full config reference |
+| [SUBAGENTS.md](SUBAGENTS.md) | Sub-agent role taxonomy |
+| [MEMORY.md](MEMORY.md) | Persistent user memory |
+| [MCP.md](MCP.md) | Model Context Protocol integration |
+| [INSTALL.md](INSTALL.md) | Platform-specific install notes |
+| [DOCKER.md](DOCKER.md) | Docker images and volumes |
+| [TOOL_SURFACE.md](TOOL_SURFACE.md) | Every tool and its niche |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Codebase internals |
+
+## FAQ
+
+### What's the difference between CodeWhale and the old `deepseek-tui`?
+
+CodeWhale is the renamed, current product. The old `deepseek-tui` name,
+npm package, Cargo crates, and `~/.deepseek/` config directory are
+backward-compatible during the rename transition. New installs should use
+`codewhale` and `~/.codewhale/`. See [REBRAND.md](REBRAND.md).
+
+### Do `DEEPSEEK_*` environment variables still work?
+
+Yes. `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, and other `DEEPSEEK_*`
+variables are unchanged. CodeWhale remains DeepSeek-first.
+
+### Can I use models other than DeepSeek?
+
+Yes, through provider adapters: NVIDIA NIM, OpenRouter, AtlasCloud,
+Wanjie Ark, Novita, Fireworks, SGLang, vLLM, Ollama, and generic
+OpenAI-compatible endpoints. DeepSeek models remain the default and
+best-tested path.
+
+### How do I cancel a running turn?
+
+Press `Esc`. Cancellation is a stack: first it closes menus/modals, then
+cancels the active turn, then clears the composer. `Ctrl-C` also cancels
+and is a faster path when a turn is running.
+
+### Where are sessions stored?
+
+`~/.codewhale/sessions/`. Legacy sessions in `~/.deepseek/sessions/` are
+still discoverable. Session files are JSON — portable and inspectable.
