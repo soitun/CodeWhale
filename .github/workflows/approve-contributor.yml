@@ -1,0 +1,210 @@
+name: Approve contributor
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR'
+      }}
+    steps:
+      - name: Add contributor to allowlist via PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const command = (context.payload.comment.body || '').trim().toLowerCase();
+            const scopeByCommand = new Map([
+              ['lgtm', 'pr'],
+              ['lgtmi', 'issue'],
+            ]);
+            const scope = scopeByCommand.get(command);
+            if (!scope) return;
+
+            const target = await getTarget();
+            if (!target.login) {
+              core.warning('Could not resolve the issue or PR author to approve.');
+              return;
+            }
+
+            const allowlistPath = '.github/APPROVED_CONTRIBUTORS';
+            const defaultBranch = context.payload.repository.default_branch;
+            const baseRef = `heads/${defaultBranch}`;
+            const safeLogin = target.login.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'contributor';
+            const branch = `automation/approve-${safeLogin}`;
+
+            const base = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: baseRef,
+            });
+
+            await ensureBranch(branch, base.data.object.sha);
+
+            const current = await readAllowlist(allowlistPath, branch, defaultBranch);
+            const nextContent = updateAllowlist(current.content, target.login, scope);
+
+            if (nextContent === current.content) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: `@${target.login} is already approved for ${scope === 'pr' ? 'pull requests' : 'issues'}.`,
+              });
+              return;
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path: allowlistPath,
+              message: `chore: approve @${target.login} for ${scope} contributions`,
+              content: Buffer.from(nextContent, 'utf8').toString('base64'),
+              branch,
+              sha: current.sha,
+              committer: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+              },
+              author: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+              },
+            });
+
+            const existingPr = await findExistingPullRequest(branch);
+            const title = `chore: approve @${target.login} for ${scope} contributions`;
+            const body = [
+              `Adds @${target.login} to \`.github/APPROVED_CONTRIBUTORS\` for ${scope === 'pr' ? 'pull request' : 'issue'} contributions.`,
+              '',
+              `Triggered by maintainer comment \`${command}\` on #${context.payload.issue.number}.`,
+            ].join('\n');
+
+            if (existingPr) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: `Allowlist update PR is open: ${existingPr.html_url}`,
+              });
+              return;
+            }
+
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              head: branch,
+              base: defaultBranch,
+              body,
+              maintainer_can_modify: true,
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: `Opened allowlist update PR: ${pr.data.html_url}`,
+            });
+
+            async function getTarget() {
+              const issue = context.payload.issue;
+              if (issue.pull_request) {
+                const pr = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: issue.number,
+                });
+                return { login: pr.data.user?.login || '' };
+              }
+              return { login: issue.user?.login || '' };
+            }
+
+            async function ensureBranch(name, sha) {
+              try {
+                await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${name}`,
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/heads/${name}`,
+                  sha,
+                });
+              }
+            }
+
+            async function readAllowlist(path, branch, fallbackBranch) {
+              for (const ref of [branch, fallbackBranch]) {
+                try {
+                  const response = await github.rest.repos.getContent({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    path,
+                    ref,
+                  });
+                  return {
+                    content: Buffer.from(response.data.content, response.data.encoding).toString('utf8'),
+                    sha: response.data.sha,
+                  };
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+              return { content: '', sha: undefined };
+            }
+
+            function updateAllowlist(content, login, scope) {
+              const lines = content.split(/\r?\n/);
+              const wanted = login.toLowerCase();
+              let changed = false;
+              let found = false;
+              const next = lines.map(line => {
+                const withoutComment = line.replace(/#.*/, '').trim();
+                if (!withoutComment) return line;
+                const [entryLogin, ...scopeParts] = withoutComment.split(/\s+/);
+                if ((entryLogin || '').toLowerCase() !== wanted) return line;
+
+                found = true;
+                const scopes = new Set(scopeParts.join(' ').split(/[,\s]+/).filter(Boolean).map(s => s.toLowerCase()));
+                if (scopeParts.length === 0 || scopes.has('all') || scopes.has(scope)) return line;
+                scopes.add(scope);
+                changed = true;
+                return `${entryLogin} ${[...scopes].sort().join(',')}`;
+              });
+
+              if (!found) {
+                if (next.length > 0 && next[next.length - 1] !== '') next.push('');
+                next.push(`${login} ${scope}`);
+                changed = true;
+              }
+
+              if (!changed) return content;
+              return `${next.join('\n').replace(/\n*$/, '')}\n`;
+            }
+
+            async function findExistingPullRequest(branch) {
+              const prs = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${branch}`,
+                base: defaultBranch,
+                per_page: 10,
+              });
+              return prs.data[0] || null;
+            }

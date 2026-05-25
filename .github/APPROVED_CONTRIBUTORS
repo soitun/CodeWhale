@@ -1,0 +1,12 @@
+# Approved external contributors for the contribution gate.
+#
+# Format:
+#   <github-login> <scope>[,<scope>]
+#
+# Scopes:
+#   pr     may open pull requests
+#   issue  may open issues
+#
+# Repository owners, members, and collaborators bypass the gate automatically;
+# this file is for external contributors the maintainer has approved.
+Hmbown pr,issue

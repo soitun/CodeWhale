@@ -164,6 +164,18 @@ these crates, including the bottom-up build order.
 
 ## Submitting Changes
 
+CodeWhale uses a small contribution allowlist so a solo maintainer can keep
+review, security, and release work manageable. Unapproved external PRs and
+issues may be closed automatically with a pointer back to this guide.
+
+Maintainers can approve future access from GitHub comments:
+
+- `lgtm` approves the author for future pull requests.
+- `lgtmi` approves the author for future issues.
+
+Those approvals update `.github/APPROVED_CONTRIBUTORS` through a reviewable
+allowlist change.
+
 1. Create a feature branch from `main`:
    ```bash
    git checkout -b feat/your-feature

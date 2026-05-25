@@ -1,0 +1,83 @@
+name: Issue contribution gate
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close unapproved external issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            if (!issue || issue.pull_request) return;
+
+            const association = issue.author_association || 'NONE';
+            const trustedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            if (trustedAssociations.has(association)) return;
+
+            const author = issue.user?.login || '';
+            const approved = await isApproved(author, 'issue');
+            if (approved) return;
+
+            const contributingUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CONTRIBUTING.md`;
+            const body = [
+              `Thanks for opening this, @${author}.`,
+              '',
+              'CodeWhale is currently using a small issue allowlist so a solo maintainer can keep triage, security, and release work manageable.',
+              '',
+              `Please read [CONTRIBUTING.md](${contributingUrl}) before opening new issues. If this topic is a good fit for the project, the maintainer can approve future issue access by commenting \`lgtmi\` here. Once the allowlist update lands, the maintainer can reopen this issue or ask you to file it again.`,
+              '',
+              'Closing this for now to keep the issue tracker focused. Thank you for understanding.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body,
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'closed',
+              state_reason: 'not_planned',
+            });
+
+            async function isApproved(login, scope) {
+              if (!login) return false;
+              let content;
+              try {
+                const response = await github.rest.repos.getContent({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  path: '.github/APPROVED_CONTRIBUTORS',
+                  ref: context.payload.repository.default_branch,
+                });
+                content = Buffer.from(response.data.content, response.data.encoding).toString('utf8');
+              } catch (error) {
+                core.warning(`Could not read .github/APPROVED_CONTRIBUTORS: ${error.message}`);
+                return false;
+              }
+
+              const wanted = login.toLowerCase();
+              for (const rawLine of content.split(/\r?\n/)) {
+                const line = rawLine.replace(/#.*/, '').trim();
+                if (!line) continue;
+                const [entryLogin, ...scopeParts] = line.split(/\s+/);
+                if ((entryLogin || '').toLowerCase() !== wanted) continue;
+                if (scopeParts.length === 0) return true;
+                const scopes = new Set(scopeParts.join(' ').split(/[,\s]+/).filter(Boolean).map(s => s.toLowerCase()));
+                return scopes.has('all') || scopes.has(scope);
+              }
+              return false;
+            }
