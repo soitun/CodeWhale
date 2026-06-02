@@ -1092,6 +1092,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Openai
             | ApiProvider::Atlascloud
             | ApiProvider::WanjieArk
+            | ApiProvider::Arcee
             | ApiProvider::Moonshot
             | ApiProvider::Ollama => {}
             ApiProvider::NvidiaNim => {
@@ -1124,6 +1125,15 @@ pub(super) fn apply_reasoning_effort(
             }
             ApiProvider::XiaomiMimo => {
                 body["thinking"] = json!({ "type": "enabled" });
+            }
+            ApiProvider::Arcee => {
+                let value = match normalized.as_str() {
+                    "minimal" => "minimal",
+                    "low" => "low",
+                    "medium" | "mid" => "medium",
+                    _ => "high",
+                };
+                body["reasoning_effort"] = json!(value);
             }
             ApiProvider::Fireworks => {
                 body["reasoning_effort"] = json!("high");
@@ -1168,6 +1178,9 @@ pub(super) fn apply_reasoning_effort(
             }
             ApiProvider::XiaomiMimo => {
                 body["thinking"] = json!({ "type": "enabled" });
+            }
+            ApiProvider::Arcee => {
+                body["reasoning_effort"] = json!("high");
             }
             ApiProvider::Fireworks => {
                 body["reasoning_effort"] = json!("max");
@@ -2299,6 +2312,30 @@ mod tests {
             body.get("thinking").is_none(),
             "Fireworks strict-validates OpenAI-compatible requests and rejects top-level thinking"
         );
+    }
+
+    #[test]
+    fn reasoning_effort_uses_arcee_reasoning_effort_without_thinking_object() {
+        for (input, expected) in [
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("mid", "medium"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("max", "high"),
+        ] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(input), ApiProvider::Arcee);
+
+            assert_eq!(
+                body.get("reasoning_effort").and_then(Value::as_str),
+                Some(expected)
+            );
+            assert!(
+                body.get("thinking").is_none(),
+                "Arcee documents reasoning_effort rather than a DeepSeek thinking object"
+            );
+        }
     }
 
     #[test]

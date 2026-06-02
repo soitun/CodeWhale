@@ -404,6 +404,24 @@ impl Default for ModelRegistry {
                 supports_reasoning: true,
             },
             ModelInfo {
+                id: "trinity-mini".to_string(),
+                provider: ProviderKind::Arcee,
+                aliases: vec![
+                    "trinity".to_string(),
+                    "arcee-trinity".to_string(),
+                    "arcee-trinity-mini".to_string(),
+                ],
+                supports_tools: true,
+                supports_reasoning: false,
+            },
+            ModelInfo {
+                id: "trinity-large-preview".to_string(),
+                provider: ProviderKind::Arcee,
+                aliases: vec!["arcee-trinity-large-preview".to_string()],
+                supports_tools: true,
+                supports_reasoning: false,
+            },
+            ModelInfo {
                 id: "kimi-k2.6".to_string(),
                 provider: ProviderKind::Moonshot,
                 aliases: vec![
@@ -553,6 +571,16 @@ impl ModelRegistry {
                     fallback_chain,
                 };
             }
+            if provider_hint == Some(ProviderKind::Arcee)
+                && let Some(model) = arcee_passthrough_model(name)
+            {
+                return ModelResolution {
+                    requested: Some(name.to_string()),
+                    resolved: model,
+                    used_fallback: false,
+                    fallback_chain,
+                };
+            }
             if let Some(idx) = self.alias_map.get(&normalize(name)) {
                 return ModelResolution {
                     requested: Some(name.to_string()),
@@ -624,6 +652,22 @@ fn atlascloud_passthrough_model(requested: &str) -> Option<ModelInfo> {
         aliases: Vec::new(),
         supports_tools: true,
         supports_reasoning: true,
+    })
+}
+
+fn arcee_passthrough_model(requested: &str) -> Option<ModelInfo> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    let supports_reasoning = requested.to_ascii_lowercase().contains("thinking");
+
+    Some(ModelInfo {
+        id: requested.to_string(),
+        provider: ProviderKind::Arcee,
+        aliases: Vec::new(),
+        supports_tools: true,
+        supports_reasoning,
     })
 }
 
@@ -802,6 +846,36 @@ mod tests {
         assert_eq!(resolved.resolved.provider, ProviderKind::Siliconflow);
         assert_eq!(resolved.resolved.id, "deepseek-ai/DeepSeek-V4-Pro");
         assert!(resolved.resolved.supports_reasoning);
+    }
+
+    #[test]
+    fn arcee_default_uses_direct_trinity_mini_model_id() {
+        let registry = ModelRegistry::default();
+        let resolved = registry.resolve(None, Some(ProviderKind::Arcee));
+
+        assert_eq!(resolved.resolved.provider, ProviderKind::Arcee);
+        assert_eq!(resolved.resolved.id, "trinity-mini");
+    }
+
+    #[test]
+    fn arcee_trinity_alias_resolves_to_direct_provider_not_openrouter() {
+        let registry = ModelRegistry::default();
+        let resolved = registry.resolve(Some("trinity"), Some(ProviderKind::Arcee));
+
+        assert_eq!(resolved.resolved.provider, ProviderKind::Arcee);
+        assert_eq!(resolved.resolved.id, "trinity-mini");
+        assert!(!resolved.resolved.supports_reasoning);
+    }
+
+    #[test]
+    fn arcee_provider_hint_preserves_explicit_future_model_id() {
+        let registry = ModelRegistry::default();
+        let resolved = registry.resolve(Some("trinity-large-thinking"), Some(ProviderKind::Arcee));
+
+        assert_eq!(resolved.resolved.provider, ProviderKind::Arcee);
+        assert_eq!(resolved.resolved.id, "trinity-large-thinking");
+        assert!(resolved.resolved.supports_reasoning);
+        assert!(!resolved.used_fallback);
     }
 
     #[test]

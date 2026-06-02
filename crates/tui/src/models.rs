@@ -240,7 +240,8 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
 
 fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
     match model_lower {
-        "arcee-ai/trinity-large-thinking" => Some(262_144),
+        "trinity-mini" | "trinity-large-preview" => Some(128_000),
+        "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" => Some(262_144),
         "google/gemma-4-31b-it"
         | "google/gemma-4-31b-it:free"
         | "google/gemma-4-26b-a4b-it"
@@ -269,7 +270,9 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         return Some(384_000);
     }
     match lower.as_str() {
-        "arcee-ai/trinity-large-thinking" | "moonshotai/kimi-k2.6" => Some(262_144),
+        "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" | "moonshotai/kimi-k2.6" => {
+            Some(262_144)
+        }
         "minimax/minimax-m3" => Some(524_288),
         "qwen/qwen3.6-35b-a3b" | "qwen/qwen3.6-27b" => Some(262_140),
         "xiaomi/mimo-v2.5-pro" | "xiaomi/mimo-v2.5" | "mimo-v2.5-pro" | "mimo-v2.5" => {
@@ -291,6 +294,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     matches!(
         lower.as_str(),
         "arcee-ai/trinity-large-thinking"
+            | "trinity-large-thinking"
             | "google/gemma-4-31b-it"
             | "google/gemma-4-31b-it:free"
             | "google/gemma-4-26b-a4b-it"
@@ -498,6 +502,7 @@ mod tests {
     fn recent_openrouter_large_models_have_static_windows() {
         for (model, expected_window) in [
             ("arcee-ai/trinity-large-thinking", 262_144),
+            ("trinity-large-thinking", 262_144),
             (concat!("qwen/", "qwen3.6-35b-a3b"), 262_144),
             (concat!("xiaomi/", "mimo-v2.5-pro"), 1_000_000),
             ("mimo-v2.5-pro", 1_000_000),
@@ -512,9 +517,21 @@ mod tests {
     }
 
     #[test]
+    fn arcee_direct_models_have_static_windows_without_reasoning_flag() {
+        for model in ["trinity-mini", "trinity-large-preview"] {
+            assert_eq!(context_window_for_model(model), Some(128_000));
+            assert!(!model_supports_reasoning(model));
+        }
+    }
+
+    #[test]
     fn recent_openrouter_large_models_have_known_output_caps() {
         assert_eq!(
             max_output_tokens_for_model("arcee-ai/trinity-large-thinking"),
+            Some(262_144)
+        );
+        assert_eq!(
+            max_output_tokens_for_model("trinity-large-thinking"),
             Some(262_144)
         );
         assert_eq!(

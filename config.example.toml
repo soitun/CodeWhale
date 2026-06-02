@@ -14,12 +14,12 @@
 # this file — keeping both stored at once means `/provider deepseek` and
 # `/provider nvidia-nim` (or `--provider openai`, `--provider wanjie-ark`,
 # `--provider volcengine`, `--provider xiaomi-mimo`, `--provider fireworks`,
-# `--provider siliconflow`, `/provider moonshot`, `/provider sglang`,
+# `--provider siliconflow`, `/provider arcee`, `/provider moonshot`, `/provider sglang`,
 # `/provider vllm`, `/provider ollama`) toggle without having to re-enter keys. Top-level
 # `api_key` / `base_url` are
 # still read as DeepSeek defaults when `[providers.deepseek]` is absent
 # (backward compatibility).
-provider = "deepseek" # deepseek | deepseek-cn | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | xiaomi-mimo | novita | fireworks | siliconflow | moonshot | sglang | vllm | ollama
+provider = "deepseek" # deepseek | deepseek-cn | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | xiaomi-mimo | novita | fireworks | siliconflow | arcee | moonshot | sglang | vllm | ollama
 api_key = "YOUR_DEEPSEEK_API_KEY" # must be non-empty
 base_url = "https://api.deepseek.com/beta"
 # provider = "deepseek-cn"                       # legacy alias (official host is still https://api.deepseek.com)
@@ -49,10 +49,12 @@ base_url = "https://api.deepseek.com/beta"
 #   mimo-v2.5-tts-voicedesign       ? Xiaomi MiMo voice-design TTS model ID
 #   mimo-v2.5-tts-voiceclone        ? Xiaomi MiMo voice-clone TTS model ID
 #   accounts/fireworks/models/deepseek-v4-pro — Fireworks AI Pro model ID
-#   deepseek-ai/DeepSeek-V4-Pro    — SiliconFlow hosted Pro model ID
-#   deepseek-ai/DeepSeek-V4-Flash  — SiliconFlow hosted Flash model ID
-#   deepseek-ai/DeepSeek-V4-Pro    — SGLang self-hosted Pro model ID
-#   deepseek-ai/DeepSeek-V4-Flash  — SGLang self-hosted Flash model ID
+#   deepseek-ai/DeepSeek-V4-Pro      — SiliconFlow hosted Pro model ID
+#   deepseek-ai/DeepSeek-V4-Flash    — SiliconFlow hosted Flash model ID
+#   trinity-mini                     — default direct Arcee AI API model ID
+#   trinity-large-preview            — direct Arcee AI API model ID
+#   deepseek-ai/DeepSeek-V4-Pro      — SGLang self-hosted Pro model ID
+#   deepseek-ai/DeepSeek-V4-Flash    — SGLang self-hosted Flash model ID
 default_text_model = "deepseek-v4-pro"
 
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -225,7 +227,7 @@ max_subagents = 10 # optional (1-20)
 # Providers can be stored at once; `provider = "..."` (top of file) or
 # `/provider deepseek` / `/provider nvidia-nim` / `--provider openai` /
 # `--provider wanjie-ark` / `/provider volcengine` / `/provider fireworks` /
-# `--provider siliconflow` / `/provider moonshot`
+# `--provider siliconflow` / `/provider arcee` / `/provider moonshot`
 # switches between them without having to re-enter keys. Env vars override anything set here:
 #   DeepSeek: DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 #   NIM:      NVIDIA_API_KEY (or NVIDIA_NIM_API_KEY), NIM_BASE_URL
@@ -238,6 +240,7 @@ max_subagents = 10 # optional (1-20)
 #   Novita:     NOVITA_API_KEY, NOVITA_BASE_URL, NOVITA_MODEL
 #   Fireworks:  FIREWORKS_API_KEY, FIREWORKS_BASE_URL
 #   SiliconFlow: SILICONFLOW_API_KEY, SILICONFLOW_BASE_URL, SILICONFLOW_MODEL
+#   Arcee:      ARCEE_API_KEY, ARCEE_BASE_URL, ARCEE_MODEL
 #   Moonshot/Kimi: MOONSHOT_API_KEY (or KIMI_API_KEY), MOONSHOT_BASE_URL, MOONSHOT_MODEL
 #   SGLang:    SGLANG_BASE_URL, SGLANG_MODEL, optional SGLANG_API_KEY
 #   vLLM:      VLLM_BASE_URL, VLLM_MODEL, optional VLLM_API_KEY
@@ -330,6 +333,12 @@ max_subagents = 10 # optional (1-20)
 # api_key = "YOUR_SILICONFLOW_API_KEY"
 # base_url = "https://api.siliconflow.com/v1"
 # model = "deepseek-ai/DeepSeek-V4-Pro"     # or deepseek-ai/DeepSeek-V4-Flash
+
+# Arcee AI direct OpenAI-compatible endpoint (https://docs.arcee.ai)
+[providers.arcee]
+# api_key = "YOUR_ARCEE_API_KEY"
+# base_url = "https://api.arcee.ai/api/v1"
+# model = "trinity-mini"                    # or trinity-large-preview
 
 # Moonshot/Kimi OpenAI-compatible endpoint (https://platform.moonshot.ai)
 [providers.moonshot]

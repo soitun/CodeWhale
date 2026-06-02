@@ -6,7 +6,7 @@ limited to provider IDs, config keys, auth paths, base URLs, model resolution,
 and capability metadata that the code already knows about.
 
 DeepSeek remains the first-class default provider. NVIDIA NIM, OpenRouter,
-Volcengine Ark, Xiaomi MiMo, Novita, Fireworks, SiliconFlow, generic
+Volcengine Ark, Xiaomi MiMo, Novita, Fireworks, SiliconFlow, Arcee AI, generic
 OpenAI-compatible endpoints, self-hosted runtimes, and Moonshot/Kimi are
 additive routes for running the same terminal harness against other hosted or
 local model endpoints. Hugging Face Inference Providers are a planned additive
@@ -30,8 +30,8 @@ Sources to keep in sync:
 The canonical provider IDs are:
 
 `deepseek`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`,
-`openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `moonshot`,
-`sglang`, `vllm`, and `ollama`.
+`openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`,
+`moonshot`, `sglang`, `vllm`, and `ollama`.
 
 Use any of these surfaces to select a provider:
 
@@ -122,6 +122,7 @@ endpoint.
 | `novita` | `[providers.novita]` | `NOVITA_API_KEY` | `NOVITA_BASE_URL`; default `https://api.novita.ai/v1` | `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash` | OpenAI-compatible hosted route for DeepSeek model IDs. Use config or `CODEWHALE_MODEL` / `DEEPSEEK_MODEL` for model overrides. |
 | `fireworks` | `[providers.fireworks]` | `FIREWORKS_API_KEY` | `FIREWORKS_BASE_URL`; default `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/deepseek-v4-pro` | OpenAI-compatible hosted route. Use config or `CODEWHALE_MODEL` / `DEEPSEEK_MODEL` for model overrides. |
 | `siliconflow` | `[providers.siliconflow]` | `SILICONFLOW_API_KEY` | `SILICONFLOW_BASE_URL`; default `https://api.siliconflow.com/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | OpenAI-compatible hosted route. Official docs use the `.com` endpoint; users who need the regional endpoint can set `https://api.siliconflow.cn/v1` explicitly. `SILICONFLOW_MODEL` is accepted. Reasoning aliases `deepseek-reasoner` and `deepseek-r1` map to Pro; `deepseek-chat` and `deepseek-v3` map to Flash. |
+| `arcee` | `[providers.arcee]` | `ARCEE_API_KEY` | `ARCEE_BASE_URL`; default `https://api.arcee.ai/api/v1` | `trinity-mini`, `trinity-large-preview` | Arcee AI direct OpenAI-compatible route. `ARCEE_MODEL` is accepted. OpenRouter's `arcee-ai/trinity-large-thinking` remains an OpenRouter model ID; direct Arcee uses bare model IDs such as `trinity-mini`. |
 | `moonshot` | `[providers.moonshot]` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` | `MOONSHOT_BASE_URL`, `KIMI_BASE_URL`; default `https://api.moonshot.ai/v1` | `kimi-k2.6`; Kimi Code path uses `kimi-for-coding` at `https://api.kimi.com/coding/v1` | Moonshot/Kimi route. `MOONSHOT_MODEL`, `KIMI_MODEL_NAME`, and `KIMI_MODEL` are accepted. `[providers.moonshot] auth_mode = "kimi_oauth"` reads Kimi CLI OAuth credentials when present. |
 | `sglang` | `[providers.sglang]` | Optional `SGLANG_API_KEY` | `SGLANG_BASE_URL`; default `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted OpenAI-compatible route. Localhost deployments commonly omit auth. `SGLANG_MODEL` is accepted. |
 | `vllm` | `[providers.vllm]` | Optional `VLLM_API_KEY` | `VLLM_BASE_URL`; default `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted vLLM OpenAI-compatible route. Localhost deployments commonly omit auth. `VLLM_MODEL` is accepted. |
@@ -172,6 +173,7 @@ endpoint when the endpoint supports model listing.
 | `novita` | `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash` | yes | yes |
 | `fireworks` | `accounts/fireworks/models/deepseek-v4-pro` | yes | yes |
 | `siliconflow` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | yes | yes |
+| `arcee` | `trinity-mini`, `trinity-large-preview`; provider-hinted custom model IDs pass through | yes | no for documented direct API models |
 | `moonshot` | `kimi-k2.6` | yes | yes |
 | `sglang` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | yes | yes |
 | `vllm` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | yes | yes |
@@ -201,6 +203,7 @@ All shipped providers use the Chat Completions request payload mode today.
 | OpenRouter, Novita, Fireworks, SiliconFlow, SGLang, and vLLM V4 model IDs | 1,000,000 | 384,000 | yes | no | not documented in code |
 | Xiaomi MiMo models | 1,000,000 | 128,000 | yes | no | not documented in code |
 | Wanjie Ark `reasoner` / `r1` model IDs | 128,000 | 4,096 | yes | no | not documented in code |
+| Direct Arcee API models (`trinity-mini`, `trinity-large-preview`) | 128,000 | 4,096 | no in doctor capability metadata | no | not documented in code |
 | Generic `openai`, AtlasCloud, and Moonshot/Kimi | 128,000 | 4,096 | no in doctor capability metadata | no | not documented in code |
 | Ollama | 8,192 | 4,096 | no | no | not documented in code |
 | Other recognized DeepSeek model IDs | 128,000 unless the model name carries an explicit `Nk` hint | 4,096 | no unless V4/reasoner logic matches | DeepSeek/NIM only | DeepSeek beta only |

@@ -90,6 +90,9 @@ pub const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference
 pub const DEFAULT_SILICONFLOW_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_SILICONFLOW_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_SILICONFLOW_BASE_URL: &str = "https://api.siliconflow.com/v1";
+pub const DEFAULT_ARCEE_MODEL: &str = "trinity-mini";
+pub const ARCEE_TRINITY_LARGE_PREVIEW_MODEL: &str = "trinity-large-preview";
+pub const DEFAULT_ARCEE_BASE_URL: &str = "https://api.arcee.ai/api/v1";
 pub const DEFAULT_MOONSHOT_MODEL: &str = "kimi-k2.6";
 pub const DEFAULT_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
 pub const DEFAULT_KIMI_CODE_MODEL: &str = "kimi-for-coding";
@@ -135,6 +138,7 @@ pub enum ApiProvider {
     Novita,
     Fireworks,
     Siliconflow,
+    Arcee,
     Moonshot,
     Sglang,
     Vllm,
@@ -163,6 +167,7 @@ impl ApiProvider {
             "novita" => Some(Self::Novita),
             "fireworks" | "fireworks-ai" => Some(Self::Fireworks),
             "siliconflow" | "silicon-flow" | "silicon_flow" => Some(Self::Siliconflow),
+            "arcee" | "arcee-ai" | "arcee_ai" => Some(Self::Arcee),
             "moonshot" | "moonshot-ai" | "kimi" | "kimi-k2" => Some(Self::Moonshot),
             "sglang" | "sg-lang" => Some(Self::Sglang),
             "vllm" | "v-llm" => Some(Self::Vllm),
@@ -186,6 +191,7 @@ impl ApiProvider {
             Self::Novita => "novita",
             Self::Fireworks => "fireworks",
             Self::Siliconflow => "siliconflow",
+            Self::Arcee => "arcee",
             Self::Moonshot => "moonshot",
             Self::Sglang => "sglang",
             Self::Vllm => "vllm",
@@ -209,6 +215,7 @@ impl ApiProvider {
             Self::Novita => "Novita AI",
             Self::Fireworks => "Fireworks AI",
             Self::Siliconflow => "SiliconFlow",
+            Self::Arcee => "Arcee AI",
             Self::Moonshot => "Moonshot/Kimi",
             Self::Sglang => "SGLang",
             Self::Vllm => "vLLM",
@@ -231,6 +238,7 @@ impl ApiProvider {
             Self::Novita,
             Self::Fireworks,
             Self::Siliconflow,
+            Self::Arcee,
             Self::Moonshot,
             Self::Sglang,
             Self::Vllm,
@@ -336,6 +344,20 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             context_window: 8192,
             max_output: 4096,
             thinking_supported: false,
+            cache_telemetry_supported: false,
+            request_payload_mode: RequestPayloadMode::ChatCompletions,
+            alias_deprecation: None,
+        };
+    }
+
+    if matches!(provider, ApiProvider::Arcee) {
+        return ProviderCapability {
+            provider,
+            resolved_model: resolved_model.to_string(),
+            context_window: crate::models::context_window_for_model(resolved_model)
+                .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
+            max_output: crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096),
+            thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
             alias_deprecation: None,
@@ -574,6 +596,20 @@ fn canonical_xiaomi_mimo_model_id(model: &str) -> Option<&'static str> {
     }
 }
 
+fn canonical_arcee_model_id(model: &str) -> Option<&'static str> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let normalized = normalized.replace(['_', ' '], "-");
+    match normalized.as_str() {
+        "trinity" | "arcee-trinity" | "arcee-trinity-mini" | DEFAULT_ARCEE_MODEL => {
+            Some(DEFAULT_ARCEE_MODEL)
+        }
+        "arcee-trinity-large-preview" | ARCEE_TRINITY_LARGE_PREVIEW_MODEL => {
+            Some(ARCEE_TRINITY_LARGE_PREVIEW_MODEL)
+        }
+        _ => None,
+    }
+}
+
 /// Normalize a model selected through the TUI for the active provider.
 ///
 /// Official DeepSeek endpoints require bare model IDs. Provider-prefixed
@@ -596,6 +632,12 @@ pub fn normalize_model_name_for_provider(provider: ApiProvider, model: &str) -> 
         && let Some(canonical) = canonical_xiaomi_mimo_model_id(model)
     {
         return Some(canonical.to_string());
+    }
+
+    if matches!(provider, ApiProvider::Arcee) {
+        return canonical_arcee_model_id(model)
+            .map(ToString::to_string)
+            .or_else(|| normalize_custom_model_id(model));
     }
 
     let normalized = normalize_model_name(model)?;
@@ -663,6 +705,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Siliconflow => {
             vec![DEFAULT_SILICONFLOW_MODEL, DEFAULT_SILICONFLOW_FLASH_MODEL]
         }
+        ApiProvider::Arcee => vec![DEFAULT_ARCEE_MODEL, ARCEE_TRINITY_LARGE_PREVIEW_MODEL],
         ApiProvider::Moonshot => vec![DEFAULT_MOONSHOT_MODEL],
         ApiProvider::WanjieArk => vec![DEFAULT_WANJIE_ARK_MODEL],
         ApiProvider::Sglang => vec![DEFAULT_SGLANG_MODEL, DEFAULT_SGLANG_FLASH_MODEL],
@@ -1764,6 +1807,8 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub siliconflow: ProviderConfig,
     #[serde(default)]
+    pub arcee: ProviderConfig,
+    #[serde(default)]
     pub moonshot: ProviderConfig,
     #[serde(default)]
     pub sglang: ProviderConfig,
@@ -1923,6 +1968,7 @@ impl Config {
             ApiProvider::Novita => "providers.novita",
             ApiProvider::Fireworks => "providers.fireworks",
             ApiProvider::Siliconflow => "providers.siliconflow",
+            ApiProvider::Arcee => "providers.arcee",
             ApiProvider::Moonshot => "providers.moonshot",
             ApiProvider::Sglang => "providers.sglang",
             ApiProvider::Vllm => "providers.vllm",
@@ -1944,7 +1990,7 @@ impl Config {
             && ApiProvider::parse(provider).is_none()
         {
             anyhow::bail!(
-                "Invalid provider '{provider}': expected deepseek, deepseek-cn, nvidia-nim, openai, atlascloud, wanjie-ark, openrouter, xiaomi-mimo, novita, fireworks, siliconflow, moonshot, sglang, vllm, or ollama."
+                "Invalid provider '{provider}': expected deepseek, deepseek-cn, nvidia-nim, openai, atlascloud, wanjie-ark, volcengine, openrouter, xiaomi-mimo, novita, fireworks, siliconflow, arcee, moonshot, sglang, vllm, or ollama."
             );
         }
         if let Some(ref key) = self.api_key
@@ -2068,6 +2114,7 @@ impl Config {
             ApiProvider::Novita => &providers.novita,
             ApiProvider::Fireworks => &providers.fireworks,
             ApiProvider::Siliconflow => &providers.siliconflow,
+            ApiProvider::Arcee => &providers.arcee,
             ApiProvider::Moonshot => &providers.moonshot,
             ApiProvider::Sglang => &providers.sglang,
             ApiProvider::Vllm => &providers.vllm,
@@ -2161,6 +2208,7 @@ impl Config {
             ApiProvider::Novita => DEFAULT_NOVITA_MODEL,
             ApiProvider::Fireworks => DEFAULT_FIREWORKS_MODEL,
             ApiProvider::Siliconflow => DEFAULT_SILICONFLOW_MODEL,
+            ApiProvider::Arcee => DEFAULT_ARCEE_MODEL,
             ApiProvider::Moonshot => DEFAULT_MOONSHOT_MODEL,
             ApiProvider::Sglang => DEFAULT_SGLANG_MODEL,
             ApiProvider::Vllm => DEFAULT_VLLM_MODEL,
@@ -2196,6 +2244,7 @@ impl Config {
             | ApiProvider::Novita
             | ApiProvider::Fireworks
             | ApiProvider::Siliconflow
+            | ApiProvider::Arcee
             | ApiProvider::Moonshot
             | ApiProvider::Sglang
             | ApiProvider::Vllm
@@ -2215,6 +2264,7 @@ impl Config {
                 ApiProvider::Novita => DEFAULT_NOVITA_BASE_URL,
                 ApiProvider::Fireworks => DEFAULT_FIREWORKS_BASE_URL,
                 ApiProvider::Siliconflow => DEFAULT_SILICONFLOW_BASE_URL,
+                ApiProvider::Arcee => DEFAULT_ARCEE_BASE_URL,
                 ApiProvider::Moonshot => {
                     if self
                         .provider_config()
@@ -2267,6 +2317,7 @@ impl Config {
             ApiProvider::Novita => "novita",
             ApiProvider::Fireworks => "fireworks",
             ApiProvider::Siliconflow => "siliconflow",
+            ApiProvider::Arcee => "arcee",
             ApiProvider::Moonshot => "moonshot",
             ApiProvider::Sglang => "sglang",
             ApiProvider::Vllm => "vllm",
@@ -2366,6 +2417,10 @@ impl Config {
             ApiProvider::Siliconflow => anyhow::bail!(
                 "SiliconFlow API key not found. Run 'codewhale auth set --provider siliconflow', \
                  set SILICONFLOW_API_KEY, or add [providers.siliconflow] api_key in ~/.codewhale/config.toml."
+            ),
+            ApiProvider::Arcee => anyhow::bail!(
+                "Arcee AI API key not found. Run 'codewhale auth set --provider arcee', \
+                 set ARCEE_API_KEY, or add [providers.arcee] api_key in ~/.codewhale/config.toml."
             ),
             ApiProvider::Moonshot => anyhow::bail!(
                 "Moonshot/Kimi API key not found. Run 'codewhale auth set --provider moonshot', \
@@ -3038,6 +3093,13 @@ fn apply_env_overrides(config: &mut Config) {
                     .siliconflow
                     .base_url = Some(value);
             }
+            ApiProvider::Arcee => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .arcee
+                    .base_url = Some(value);
+            }
             ApiProvider::Moonshot => {
                 config
                     .providers
@@ -3179,6 +3241,16 @@ fn apply_env_overrides(config: &mut Config) {
             .siliconflow
             .base_url = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::Arcee)
+        && let Ok(value) = std::env::var("ARCEE_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .arcee
+            .base_url = Some(value);
+    }
     if matches!(config.api_provider(), ApiProvider::Moonshot)
         && let Ok(value) =
             std::env::var("MOONSHOT_BASE_URL").or_else(|_| std::env::var("KIMI_BASE_URL"))
@@ -3234,6 +3306,7 @@ fn apply_env_overrides(config: &mut Config) {
             ApiProvider::Novita => &mut providers.novita,
             ApiProvider::Fireworks => &mut providers.fireworks,
             ApiProvider::Siliconflow => &mut providers.siliconflow,
+            ApiProvider::Arcee => &mut providers.arcee,
             ApiProvider::Moonshot => &mut providers.moonshot,
             ApiProvider::Sglang => &mut providers.sglang,
             ApiProvider::Vllm => &mut providers.vllm,
@@ -3325,6 +3398,16 @@ fn apply_env_overrides(config: &mut Config) {
             .siliconflow
             .model = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::Arcee)
+        && let Ok(value) = std::env::var("ARCEE_MODEL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .arcee
+            .model = Some(value);
+    }
     if let Some(value) = codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
         .ok()
         .or_else(|| {
@@ -3361,6 +3444,7 @@ fn apply_env_overrides(config: &mut Config) {
                 ApiProvider::Novita => &mut providers.novita,
                 ApiProvider::Fireworks => &mut providers.fireworks,
                 ApiProvider::Siliconflow => &mut providers.siliconflow,
+                ApiProvider::Arcee => &mut providers.arcee,
                 ApiProvider::Moonshot => &mut providers.moonshot,
                 ApiProvider::Sglang => &mut providers.sglang,
                 ApiProvider::Vllm => &mut providers.vllm,
@@ -3673,6 +3757,7 @@ fn default_base_url_for_provider(provider: ApiProvider) -> &'static str {
         ApiProvider::Novita => DEFAULT_NOVITA_BASE_URL,
         ApiProvider::Fireworks => DEFAULT_FIREWORKS_BASE_URL,
         ApiProvider::Siliconflow => DEFAULT_SILICONFLOW_BASE_URL,
+        ApiProvider::Arcee => DEFAULT_ARCEE_BASE_URL,
         ApiProvider::Moonshot => DEFAULT_MOONSHOT_BASE_URL,
         ApiProvider::Sglang => DEFAULT_SGLANG_BASE_URL,
         ApiProvider::Vllm => DEFAULT_VLLM_BASE_URL,
@@ -3951,6 +4036,7 @@ fn merge_providers(
             novita: merge_provider_config(base.novita, override_cfg.novita),
             fireworks: merge_provider_config(base.fireworks, override_cfg.fireworks),
             siliconflow: merge_provider_config(base.siliconflow, override_cfg.siliconflow),
+            arcee: merge_provider_config(base.arcee, override_cfg.arcee),
             moonshot: merge_provider_config(base.moonshot, override_cfg.moonshot),
             sglang: merge_provider_config(base.sglang, override_cfg.sglang),
             vllm: merge_provider_config(base.vllm, override_cfg.vllm),
@@ -4382,6 +4468,7 @@ pub fn active_provider_has_env_api_key(config: &Config) -> bool {
         ApiProvider::Siliconflow => {
             std::env::var("SILICONFLOW_API_KEY").is_ok_and(|k| !k.trim().is_empty())
         }
+        ApiProvider::Arcee => std::env::var("ARCEE_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
         ApiProvider::Moonshot => {
             std::env::var("MOONSHOT_API_KEY").is_ok_and(|k| !k.trim().is_empty())
                 || std::env::var("KIMI_API_KEY").is_ok_and(|k| !k.trim().is_empty())
@@ -4418,6 +4505,7 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         ApiProvider::Novita => "NOVITA_API_KEY",
         ApiProvider::Fireworks => "FIREWORKS_API_KEY",
         ApiProvider::Siliconflow => "SILICONFLOW_API_KEY",
+        ApiProvider::Arcee => "ARCEE_API_KEY",
         ApiProvider::Moonshot => "MOONSHOT_API_KEY",
         ApiProvider::Sglang => "SGLANG_API_KEY",
         ApiProvider::Vllm => "VLLM_API_KEY",
@@ -4521,6 +4609,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Novita => "providers.novita",
         ApiProvider::Fireworks => "providers.fireworks",
         ApiProvider::Siliconflow => "providers.siliconflow",
+        ApiProvider::Arcee => "providers.arcee",
         ApiProvider::Moonshot => "providers.moonshot",
         ApiProvider::Sglang => "providers.sglang",
         ApiProvider::Vllm => "providers.vllm",
@@ -4561,6 +4650,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Novita => "novita",
         ApiProvider::Fireworks => "fireworks",
         ApiProvider::Siliconflow => "siliconflow",
+        ApiProvider::Arcee => "arcee",
         ApiProvider::Moonshot => "moonshot",
         ApiProvider::Sglang => "sglang",
         ApiProvider::Vllm => "vllm",
@@ -4654,6 +4744,7 @@ fn provider_config_key(provider: ApiProvider) -> Result<&'static str> {
         ApiProvider::Novita => Ok("novita"),
         ApiProvider::Fireworks => Ok("fireworks"),
         ApiProvider::Siliconflow => Ok("siliconflow"),
+        ApiProvider::Arcee => Ok("arcee"),
         ApiProvider::Moonshot => Ok("moonshot"),
         ApiProvider::Sglang => Ok("sglang"),
         ApiProvider::Vllm => Ok("vllm"),
@@ -5180,6 +5271,9 @@ mod tests {
         siliconflow_api_key: Option<OsString>,
         siliconflow_base_url: Option<OsString>,
         siliconflow_model: Option<OsString>,
+        arcee_api_key: Option<OsString>,
+        arcee_base_url: Option<OsString>,
+        arcee_model: Option<OsString>,
         moonshot_api_key: Option<OsString>,
         moonshot_base_url: Option<OsString>,
         moonshot_model: Option<OsString>,
@@ -5259,6 +5353,9 @@ mod tests {
             let siliconflow_api_key_prev = env::var_os("SILICONFLOW_API_KEY");
             let siliconflow_base_url_prev = env::var_os("SILICONFLOW_BASE_URL");
             let siliconflow_model_prev = env::var_os("SILICONFLOW_MODEL");
+            let arcee_api_key_prev = env::var_os("ARCEE_API_KEY");
+            let arcee_base_url_prev = env::var_os("ARCEE_BASE_URL");
+            let arcee_model_prev = env::var_os("ARCEE_MODEL");
             let moonshot_api_key_prev = env::var_os("MOONSHOT_API_KEY");
             let moonshot_base_url_prev = env::var_os("MOONSHOT_BASE_URL");
             let moonshot_model_prev = env::var_os("MOONSHOT_MODEL");
@@ -5333,6 +5430,9 @@ mod tests {
                 env::remove_var("SILICONFLOW_API_KEY");
                 env::remove_var("SILICONFLOW_BASE_URL");
                 env::remove_var("SILICONFLOW_MODEL");
+                env::remove_var("ARCEE_API_KEY");
+                env::remove_var("ARCEE_BASE_URL");
+                env::remove_var("ARCEE_MODEL");
                 env::remove_var("MOONSHOT_API_KEY");
                 env::remove_var("MOONSHOT_BASE_URL");
                 env::remove_var("MOONSHOT_MODEL");
@@ -5407,6 +5507,9 @@ mod tests {
                 siliconflow_api_key: siliconflow_api_key_prev,
                 siliconflow_base_url: siliconflow_base_url_prev,
                 siliconflow_model: siliconflow_model_prev,
+                arcee_api_key: arcee_api_key_prev,
+                arcee_base_url: arcee_base_url_prev,
+                arcee_model: arcee_model_prev,
                 moonshot_api_key: moonshot_api_key_prev,
                 moonshot_base_url: moonshot_base_url_prev,
                 moonshot_model: moonshot_model_prev,
@@ -5496,6 +5599,9 @@ mod tests {
                 Self::restore_var("SILICONFLOW_API_KEY", self.siliconflow_api_key.take());
                 Self::restore_var("SILICONFLOW_BASE_URL", self.siliconflow_base_url.take());
                 Self::restore_var("SILICONFLOW_MODEL", self.siliconflow_model.take());
+                Self::restore_var("ARCEE_API_KEY", self.arcee_api_key.take());
+                Self::restore_var("ARCEE_BASE_URL", self.arcee_base_url.take());
+                Self::restore_var("ARCEE_MODEL", self.arcee_model.take());
                 Self::restore_var("MOONSHOT_API_KEY", self.moonshot_api_key.take());
                 Self::restore_var("MOONSHOT_BASE_URL", self.moonshot_base_url.take());
                 Self::restore_var("MOONSHOT_MODEL", self.moonshot_model.take());
@@ -6600,6 +6706,25 @@ api_key = "old-openrouter-key"
         ] {
             assert_eq!(
                 normalize_model_name_for_provider(ApiProvider::Openrouter, alias).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_model_name_for_provider_maps_arcee_direct_aliases() {
+        for (alias, expected) in [
+            ("trinity", DEFAULT_ARCEE_MODEL),
+            ("arcee-trinity", DEFAULT_ARCEE_MODEL),
+            ("arcee-trinity-mini", DEFAULT_ARCEE_MODEL),
+            (
+                "arcee-trinity-large-preview",
+                ARCEE_TRINITY_LARGE_PREVIEW_MODEL,
+            ),
+            ("TRINITY_LARGE_PREVIEW", ARCEE_TRINITY_LARGE_PREVIEW_MODEL),
+        ] {
+            assert_eq!(
+                normalize_model_name_for_provider(ApiProvider::Arcee, alias).as_deref(),
                 Some(expected)
             );
         }
@@ -7813,6 +7938,102 @@ model = "qwen2.5-coder:7b"
     }
 
     #[test]
+    fn arcee_provider_uses_direct_defaults() -> Result<()> {
+        let _lock = lock_test_env();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-arcee-defaults-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&temp_root)?;
+        let _guard = EnvGuard::new(&temp_root);
+
+        unsafe {
+            env::set_var("CODEWHALE_PROVIDER", "arcee");
+            env::set_var("ARCEE_API_KEY", "arcee-env-key");
+        }
+
+        let config = Config::load(None, None)?;
+        assert_eq!(config.api_provider(), ApiProvider::Arcee);
+        assert_eq!(config.deepseek_api_key()?, "arcee-env-key");
+        assert_eq!(config.deepseek_base_url(), DEFAULT_ARCEE_BASE_URL);
+        assert_eq!(config.default_model(), DEFAULT_ARCEE_MODEL);
+        Ok(())
+    }
+
+    #[test]
+    fn arcee_env_overrides_key_base_url_and_model() -> Result<()> {
+        let _lock = lock_test_env();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-arcee-env-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&temp_root)?;
+        let _guard = EnvGuard::new(&temp_root);
+
+        unsafe {
+            env::set_var("CODEWHALE_PROVIDER", "arcee");
+            env::set_var("ARCEE_API_KEY", "arcee-env-key");
+            env::set_var("ARCEE_BASE_URL", "https://arcee-mirror.example/api/v1");
+            env::set_var("ARCEE_MODEL", "arcee-trinity-large-preview");
+        }
+
+        let config = Config::load(None, None)?;
+        assert_eq!(config.api_provider(), ApiProvider::Arcee);
+        assert_eq!(config.deepseek_api_key()?, "arcee-env-key");
+        assert_eq!(
+            config.deepseek_base_url(),
+            "https://arcee-mirror.example/api/v1"
+        );
+        assert_eq!(config.default_model(), "arcee-trinity-large-preview");
+        Ok(())
+    }
+
+    #[test]
+    fn arcee_provider_table_configures_direct_route() -> Result<()> {
+        let _lock = lock_test_env();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-arcee-table-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let config_dir = temp_root.join(".deepseek");
+        fs::create_dir_all(&config_dir)?;
+        let _guard = EnvGuard::new(&temp_root);
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+provider = "arcee"
+
+[providers.arcee]
+api_key = "arcee-file-key"
+base_url = "https://api.arcee.ai/api/v1"
+model = "arcee-trinity-large-preview"
+"#,
+        )?;
+
+        let config = Config::load(None, None)?;
+        assert_eq!(config.api_provider(), ApiProvider::Arcee);
+        assert_eq!(config.deepseek_api_key()?, "arcee-file-key");
+        assert_eq!(config.deepseek_base_url(), DEFAULT_ARCEE_BASE_URL);
+        assert_eq!(config.default_model(), ARCEE_TRINITY_LARGE_PREVIEW_MODEL);
+        Ok(())
+    }
+
+    #[test]
     fn siliconflow_cn_base_url_env_normalizes_model_aliases() -> Result<()> {
         let _lock = lock_test_env();
         let nanos = SystemTime::now()
@@ -8751,6 +8972,22 @@ model = "deepseek-ai/deepseek-v4-pro"
             assert_eq!(cap.context_window, expected_window);
             assert_eq!(cap.max_output, expected_output);
             assert!(cap.thinking_supported);
+            assert!(!cap.cache_telemetry_supported);
+            assert_eq!(
+                cap.request_payload_mode,
+                RequestPayloadMode::ChatCompletions
+            );
+        }
+    }
+
+    #[test]
+    fn provider_capability_arcee_direct_models_use_api_docs_shape() {
+        for model in [DEFAULT_ARCEE_MODEL, ARCEE_TRINITY_LARGE_PREVIEW_MODEL] {
+            let cap = provider_capability(ApiProvider::Arcee, model);
+
+            assert_eq!(cap.context_window, 128_000);
+            assert_eq!(cap.max_output, 4096);
+            assert!(!cap.thinking_supported);
             assert!(!cap.cache_telemetry_supported);
             assert_eq!(
                 cap.request_payload_mode,

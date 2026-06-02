@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added Arcee AI as a direct OpenAI-compatible provider with `[providers.arcee]`,
+  `ARCEE_API_KEY` / `ARCEE_BASE_URL` / `ARCEE_MODEL`, `trinity-mini` as the
+  default model, and `trinity-large-preview` as the documented direct API model.
+  OpenRouter's `arcee-ai/trinity-large-thinking` route remains separate.
+
 ## [0.8.50] - 2026-06-02
 
 ### Added
