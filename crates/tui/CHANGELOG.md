@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.52] - 2026-06-03
+
+### Added
+
+- **SiliconFlow China region provider.** Added the `siliconflow-CN` provider
+  variant for the China regional endpoint, sharing the existing
+  `[providers.siliconflow]` credentials and `SILICONFLOW_API_KEY` slot
+  instead of creating a second credential namespace (#2588, #2615).
+- **Multimodal `/attach` image forwarding.** Attached images are now sent as
+  OpenAI-compatible `image_url` content blocks so multimodal providers can
+  actually see image attachments (#2584, #2587, #2607).
+- **Sub-agent lifecycle hooks and runtime metadata.** Sub-agent spawn/complete
+  hook events, mode-change runtime messages, mode metadata on turns, localized
+  context-inspector strings, and drag-to-resize sidebar width are included in
+  this release slice.
+
+### Fixed
+
+- **Sub-agents now auto-cancel after stale heartbeats.** Running sub-agents
+  track manager-visible progress and are auto-cancelled after the configurable
+  `[subagents] heartbeat_timeout_secs` window (default 300s), releasing their
+  concurrency slot and unblocking parent turns that would otherwise wait
+  forever (#2603, #2614, #2620).
+- **SiliconFlow-CN no longer breaks main.** Filled the missing CLI provider
+  exhaustiveness arms and removed the duplicate/unreachable TUI config arms
+  left by the #2615 landing; direct auth now stores the China-region variant in
+  the shared SiliconFlow provider table (#2616, #2618, #2619).
+- **v0.8.51 image-attach closure corrected.** The `/attach` multimodal fix
+  landed after the v0.8.51 tag, so this release is the first version that
+  actually contains it for users installing from the published release line
+  (#2584, #2607).
+- **Legacy SSE MCP reconnects are retryable again.** Closed or reset
+  `POST /messages` requests on stale legacy SSE sessions now trigger the same
+  reconnect-and-retry path as closed SSE streams, removing a release-gate flake
+  and matching the intended recovery behavior (#2597).
+
+### Community
+
+Thanks to **@xyuai** (#2587), **@IcedOranges** (#2584), **@BH8GCJ** (#2588),
+**@shenjackyuanjie** (#2618, #2619), **@idling11** (#2606, #2616),
+**@AresNing** (#2578), **@gordonlu**, **@encyc**, and **@simuusang** (#2603,
+#2620) for reports, patches, retesting, and release-stabilization signals that
+shaped this pass.
+
 ## [0.8.51] - 2026-06-02
 
 ### Added
@@ -66,10 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Assistant turns no longer leave an orphaned role glyph (the stray "blue dot")
   when a turn streams only whitespace between reasoning and a tool call.
-- Scrolling the mouse wheel over the right-hand sidebar no longer leaks into
-  the transcript scroll.
-- The sidebar hover tooltip now appears only for truncated lines, sits below
-  the cursor, and uses a neutral surface color instead of the warning-orange
+- Scrolling the mouse wheel over the right-hand sidebar no longer leaks into the
+  transcript scroll.
+- The sidebar hover tooltip now appears only for truncated lines, sits below the
+  cursor, and uses a neutral surface color instead of the warning-orange
   highlight that overlapped neighbouring rows.
 - Corrected the README's description of the Constitution (Article VII is the
   hierarchy itself; Article II's truth duty overrides even a user request) to
@@ -77,6 +121,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repaired release-blocking unit and integration tests left failing by the
   cycle-removal and compaction-threshold refactors (relay instruction,
   model-reject message, compaction budget, mock-LLM threshold helper).
+- Fixed DEC private-mode CSI fragment leakage into composer text after
+  terminal resets, restoring clean prompt editing (#2592).
+- The engine now recovers from turn-level panics instead of killing the
+  main event loop, keeping the session alive through transient failures
+  (#2583, #1269).
+- Deeply nested files are now discoverable via @-mention and Ctrl+P file
+  picker; the default walk depth was relaxed to handle monorepo layouts (#2488).
+- Command-palette selection stays visible when scrolling through long lists
+  instead of scrolling off-screen (#2590).
+- exec_shell child processes now inherit .NET/NuGet and Windows app-data
+  environment variables, fixing toolchain resolution on Windows (#1857).
+- A warning is emitted when shell/sandbox config keys are nested under
+  unknown top-level sections instead of being silently ignored (#2589).
+- Diff-render now preserves leading whitespace in patch content lines,
+  fixing an extra-space regression in PR previews (#2591). Thanks @zlh124.
+- Model selection from the /model command now persists per-provider across
+  restarts, with a warning when persistence fails.
+
+### Community
+
+Thanks to **@zlh124** (#2591) and **@reidliu41** (#2601) for the fixes
+harvested into this release. Thanks also to **@idling11** (#2602),
+**@gordonlu** (#2585), **@cyq1017** (#2593), **@xyuai** (#2587, #2584),
+and **@IcedOranges** (#2584) for reports, drafts, and investigations
+that shaped this release cycle.
 
 ## [0.8.50] - 2026-06-02
 
@@ -5304,7 +5373,8 @@ Welcome — and thank you.
 - Hooks system and config profiles
 - Example skills and launch assets
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.51...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.52...HEAD
+[0.8.52]: https://github.com/Hmbown/CodeWhale/compare/v0.8.51...v0.8.52
 [0.8.51]: https://github.com/Hmbown/CodeWhale/compare/v0.8.50...v0.8.51
 [0.8.50]: https://github.com/Hmbown/CodeWhale/compare/v0.8.49...v0.8.50
 [0.8.49]: https://github.com/Hmbown/CodeWhale/compare/v0.8.48...v0.8.49

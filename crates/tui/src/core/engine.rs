@@ -46,7 +46,7 @@ use crate::tools::spec::RuntimeToolServices;
 use crate::tools::spec::{ApprovalRequirement, ToolError, ToolResult};
 use crate::tools::subagent::{
     Mailbox, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext, SubAgentResult,
-    SubAgentRuntime, SubAgentStatus, SubAgentType, new_shared_subagent_manager,
+    SubAgentRuntime, SubAgentStatus, SubAgentType, new_shared_subagent_manager_with_timeout,
     resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
@@ -314,6 +314,10 @@ pub struct EngineConfig {
     /// once at engine construction, then threaded onto every
     /// `SubAgentRuntime` the engine builds (#1806, #1808).
     pub subagent_api_timeout: Duration,
+    /// No-progress heartbeat timeout for live sub-agents. Used by the manager
+    /// and parent wait loop to auto-cancel stuck children before they exhaust
+    /// the sub-agent slot pool indefinitely (#2614).
+    pub subagent_heartbeat_timeout: Duration,
     /// Native tools that should stay in the model-visible catalog even when
     /// they are outside the small default core surface (#2076).
     pub tools_always_load: HashSet<String>,
@@ -371,6 +375,9 @@ impl Default for EngineConfig {
             search_api_key: None,
             subagent_api_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
+            ),
+            subagent_heartbeat_timeout: Duration::from_secs(
+                crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
             ),
             tools_always_load: HashSet::new(),
             prefer_bwrap: false,
@@ -642,8 +649,11 @@ impl Engine {
             crate::prefix_cache::PrefixStabilityManager::new_unpinned()
         });
 
-        let subagent_manager =
-            new_shared_subagent_manager(config.workspace.clone(), config.max_subagents);
+        let subagent_manager = new_shared_subagent_manager_with_timeout(
+            config.workspace.clone(),
+            config.max_subagents,
+            config.subagent_heartbeat_timeout,
+        );
         let shell_manager = config
             .runtime_services
             .shell_manager

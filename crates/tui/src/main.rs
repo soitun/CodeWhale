@@ -2000,7 +2000,8 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
                     "FIREWORKS_API_KEY",
                     "codewhale auth set --provider fireworks --api-key \"...\"",
                 ),
-                crate::config::ApiProvider::Siliconflow | crate::config::ApiProvider::SiliconflowCn => (
+                crate::config::ApiProvider::Siliconflow
+                | crate::config::ApiProvider::SiliconflowCn => (
                     "SILICONFLOW_API_KEY",
                     "codewhale auth set --provider siliconflow --api-key \"...\"",
                 ),
@@ -2044,7 +2045,8 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
                     crate::config::ApiProvider::XiaomiMimo => "xiaomi_mimo",
                     crate::config::ApiProvider::Novita => "novita",
                     crate::config::ApiProvider::Fireworks => "fireworks",
-                    crate::config::ApiProvider::Siliconflow | crate::config::ApiProvider::SiliconflowCn => "siliconflow",
+                    crate::config::ApiProvider::Siliconflow
+                    | crate::config::ApiProvider::SiliconflowCn => "siliconflow",
                     crate::config::ApiProvider::Arcee => "arcee",
                     crate::config::ApiProvider::Moonshot => "moonshot",
                     crate::config::ApiProvider::Sglang => "sglang",
@@ -5709,6 +5711,9 @@ async fn run_exec_agent(
         runtime_services: crate::tools::spec::RuntimeToolServices::default(),
         subagent_model_overrides: config.subagent_model_overrides(),
         subagent_api_timeout: std::time::Duration::from_secs(config.subagent_api_timeout_secs()),
+        subagent_heartbeat_timeout: std::time::Duration::from_secs(
+            config.subagent_heartbeat_timeout_secs(),
+        ),
         prefer_bwrap: config.prefer_bwrap.unwrap_or(false),
         memory_enabled: config.memory_enabled(),
         memory_path: config.memory_path(),

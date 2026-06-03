@@ -32,6 +32,13 @@ pub const MIN_SUBAGENT_API_TIMEOUT_SECS: u64 = 1;
 /// keeps a misconfigured per-step timeout from masking real model/network
 /// hangs forever.
 pub const MAX_SUBAGENT_API_TIMEOUT_SECS: u64 = 1800;
+/// Default wall-clock interval without manager-visible sub-agent progress
+/// before a running child can be auto-cancelled to release its slot (#2614).
+pub const DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 300;
+/// Minimum accepted `[subagents] heartbeat_timeout_secs`.
+pub const MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
+/// Maximum accepted `[subagents] heartbeat_timeout_secs` (1 hour).
+pub const MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 3600;
 pub const DEFAULT_TEXT_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/beta";
 pub const DEFAULT_NVIDIA_NIM_MODEL: &str = "deepseek-ai/deepseek-v4-pro";
@@ -178,10 +185,10 @@ impl ApiProvider {
             "novita" => Some(Self::Novita),
             "fireworks" | "fireworks-ai" => Some(Self::Fireworks),
             "siliconflow" | "silicon-flow" | "silicon_flow" => Some(Self::Siliconflow),
-            "siliconflow-cn" | "siliconflow-CN"
-            | "silicon-flow-cn" | "silicon-flow-CN"
-            | "silicon_flow_cn" | "silicon_flow_CN"
-            | "siliconflow-china" => Some(Self::SiliconflowCn),
+            "siliconflow-cn" | "siliconflow-CN" | "silicon-flow-cn" | "silicon-flow-CN"
+            | "silicon_flow_cn" | "silicon_flow_CN" | "siliconflow-china" => {
+                Some(Self::SiliconflowCn)
+            }
             "arcee" | "arcee-ai" | "arcee_ai" => Some(Self::Arcee),
             "moonshot" | "moonshot-ai" | "kimi" | "kimi-k2" => Some(Self::Moonshot),
             "sglang" | "sg-lang" => Some(Self::Sglang),
@@ -697,7 +704,10 @@ pub fn normalize_model_name_for_provider(provider: ApiProvider, model: &str) -> 
         }
         return Some(canonical.to_string());
     }
-    if matches!(provider, ApiProvider::Siliconflow | ApiProvider::SiliconflowCn) {
+    if matches!(
+        provider,
+        ApiProvider::Siliconflow | ApiProvider::SiliconflowCn
+    ) {
         let provider_model = model_for_provider(provider, normalized.clone());
         if provider_model != normalized {
             return Some(provider_model);
@@ -1419,6 +1429,12 @@ pub struct SubagentsConfig {
     /// (1..=1800). Zero or unset uses the legacy 120s default (#1806, #1808).
     #[serde(default)]
     pub api_timeout_secs: Option<u64>,
+    /// Wall-clock timeout for a running sub-agent that stops making
+    /// manager-visible progress. Defaults to 5 minutes and is kept above the
+    /// per-step API timeout so slow but legitimate model calls are not
+    /// cancelled before their request timeout can fire (#2614).
+    #[serde(default)]
+    pub heartbeat_timeout_secs: Option<u64>,
 }
 
 /// `[auto]` table — knobs for the `--model auto` / `/model auto` router.
@@ -2311,7 +2327,8 @@ impl Config {
             | ApiProvider::XiaomiMimo
             | ApiProvider::Novita
             | ApiProvider::Fireworks
-            | ApiProvider::Siliconflow | ApiProvider::SiliconflowCn
+            | ApiProvider::Siliconflow
+            | ApiProvider::SiliconflowCn
             | ApiProvider::Arcee
             | ApiProvider::Moonshot
             | ApiProvider::Sglang
@@ -2332,7 +2349,6 @@ impl Config {
                 ApiProvider::Novita => DEFAULT_NOVITA_BASE_URL,
                 ApiProvider::Fireworks => DEFAULT_FIREWORKS_BASE_URL,
                 ApiProvider::Siliconflow => DEFAULT_SILICONFLOW_BASE_URL,
-            ApiProvider::SiliconflowCn => DEFAULT_SILICONFLOW_CN_BASE_URL,
                 ApiProvider::SiliconflowCn => DEFAULT_SILICONFLOW_CN_BASE_URL,
                 ApiProvider::Arcee => DEFAULT_ARCEE_BASE_URL,
                 ApiProvider::Moonshot => {
@@ -2387,8 +2403,7 @@ impl Config {
             ApiProvider::Novita => "novita",
             ApiProvider::Fireworks => "fireworks",
             ApiProvider::Siliconflow => "siliconflow",
-            ApiProvider::SiliconflowCn => "siliconflow-CN",
-            ApiProvider::SiliconflowCn => "siliconflow-CN",
+            ApiProvider::SiliconflowCn => "siliconflow",
             ApiProvider::Arcee => "arcee",
             ApiProvider::Moonshot => "moonshot",
             ApiProvider::Sglang => "sglang",
@@ -2656,6 +2671,35 @@ impl Config {
             return DEFAULT_SUBAGENT_API_TIMEOUT_SECS;
         }
         raw.clamp(MIN_SUBAGENT_API_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS)
+    }
+
+    /// Resolved no-progress heartbeat timeout for running sub-agents.
+    ///
+    /// Reads `[subagents] heartbeat_timeout_secs` and clamps to
+    /// `[MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS]`.
+    /// `None` or `0` resolve to the default 300 seconds. The final value is
+    /// also kept at least 30 seconds above `subagent_api_timeout_secs()` so a
+    /// configured long model request is not pre-empted by heartbeat cleanup.
+    #[must_use]
+    pub fn subagent_heartbeat_timeout_secs(&self) -> u64 {
+        let raw = self
+            .subagents
+            .as_ref()
+            .and_then(|cfg| cfg.heartbeat_timeout_secs)
+            .unwrap_or(DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS);
+        let configured = if raw == 0 {
+            DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
+        } else {
+            raw.clamp(
+                MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+                MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+            )
+        };
+        let min_for_api = self.subagent_api_timeout_secs().saturating_add(30).clamp(
+            MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+            MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+        );
+        configured.max(min_for_api)
     }
 
     /// Raw sub-agent model override map. Values are validated at spawn time
@@ -3303,8 +3347,10 @@ fn apply_env_overrides(config: &mut Config) {
             .fireworks
             .base_url = Some(value);
     }
-    if matches!(config.api_provider(), ApiProvider::Siliconflow | ApiProvider::SiliconflowCn)
-        && let Ok(value) = std::env::var("SILICONFLOW_BASE_URL")
+    if matches!(
+        config.api_provider(),
+        ApiProvider::Siliconflow | ApiProvider::SiliconflowCn
+    ) && let Ok(value) = std::env::var("SILICONFLOW_BASE_URL")
         && !value.trim().is_empty()
     {
         config
@@ -3460,8 +3506,10 @@ fn apply_env_overrides(config: &mut Config) {
             .moonshot
             .model = Some(value);
     }
-    if matches!(config.api_provider(), ApiProvider::Siliconflow | ApiProvider::SiliconflowCn)
-        && let Ok(value) = std::env::var("SILICONFLOW_MODEL")
+    if matches!(
+        config.api_provider(),
+        ApiProvider::Siliconflow | ApiProvider::SiliconflowCn
+    ) && let Ok(value) = std::env::var("SILICONFLOW_MODEL")
         && !value.trim().is_empty()
     {
         config
@@ -3829,8 +3877,7 @@ fn default_base_url_for_provider(provider: ApiProvider) -> &'static str {
         ApiProvider::Novita => DEFAULT_NOVITA_BASE_URL,
         ApiProvider::Fireworks => DEFAULT_FIREWORKS_BASE_URL,
         ApiProvider::Siliconflow => DEFAULT_SILICONFLOW_BASE_URL,
-            ApiProvider::SiliconflowCn => DEFAULT_SILICONFLOW_CN_BASE_URL,
-                ApiProvider::SiliconflowCn => DEFAULT_SILICONFLOW_CN_BASE_URL,
+        ApiProvider::SiliconflowCn => DEFAULT_SILICONFLOW_CN_BASE_URL,
         ApiProvider::Arcee => DEFAULT_ARCEE_BASE_URL,
         ApiProvider::Moonshot => DEFAULT_MOONSHOT_BASE_URL,
         ApiProvider::Sglang => DEFAULT_SGLANG_BASE_URL,
@@ -3841,7 +3888,9 @@ fn default_base_url_for_provider(provider: ApiProvider) -> &'static str {
 }
 
 fn base_url_is_custom_for_provider(provider: ApiProvider, base_url: &str) -> bool {
-    if (provider == ApiProvider::Siliconflow || provider == ApiProvider::SiliconflowCn) && siliconflow_base_url_is_official(base_url) {
+    if (provider == ApiProvider::Siliconflow || provider == ApiProvider::SiliconflowCn)
+        && siliconflow_base_url_is_official(base_url)
+    {
         return false;
     }
     normalize_base_url(base_url) != normalize_base_url(default_base_url_for_provider(provider))
@@ -3922,12 +3971,14 @@ fn model_for_provider(provider: ApiProvider, normalized: String) -> String {
             // Flash not yet available on Fireworks; fall through to normalized name
             "accounts/fireworks/models/deepseek-v4-flash".to_string()
         }
-        (ApiProvider::Siliconflow, "deepseek-v4-pro" | "deepseek-reasoner" | "deepseek-r1") => {
-            DEFAULT_SILICONFLOW_MODEL.to_string()
-        }
-        (ApiProvider::Siliconflow, "deepseek-v4-flash" | "deepseek-chat" | "deepseek-v3") => {
-            DEFAULT_SILICONFLOW_FLASH_MODEL.to_string()
-        }
+        (
+            ApiProvider::Siliconflow | ApiProvider::SiliconflowCn,
+            "deepseek-v4-pro" | "deepseek-reasoner" | "deepseek-r1",
+        ) => DEFAULT_SILICONFLOW_MODEL.to_string(),
+        (
+            ApiProvider::Siliconflow | ApiProvider::SiliconflowCn,
+            "deepseek-v4-flash" | "deepseek-chat" | "deepseek-v3",
+        ) => DEFAULT_SILICONFLOW_FLASH_MODEL.to_string(),
         (ApiProvider::Sglang, "deepseek-v4-pro") => DEFAULT_SGLANG_MODEL.to_string(),
         (ApiProvider::Sglang, "deepseek-v4-flash") => DEFAULT_SGLANG_FLASH_MODEL.to_string(),
         (ApiProvider::Vllm, "deepseek-v4-pro") => DEFAULT_VLLM_MODEL.to_string(),
@@ -4758,8 +4809,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Novita => "novita",
         ApiProvider::Fireworks => "fireworks",
         ApiProvider::Siliconflow => "siliconflow",
-            ApiProvider::SiliconflowCn => "siliconflow-CN",
-            ApiProvider::SiliconflowCn => "siliconflow-CN",
+        ApiProvider::SiliconflowCn => "siliconflow",
         ApiProvider::Arcee => "arcee",
         ApiProvider::Moonshot => "moonshot",
         ApiProvider::Sglang => "sglang",
@@ -4854,7 +4904,7 @@ fn provider_config_key(provider: ApiProvider) -> Result<&'static str> {
         ApiProvider::Novita => Ok("novita"),
         ApiProvider::Fireworks => Ok("fireworks"),
         ApiProvider::Siliconflow => Ok("siliconflow"),
-            ApiProvider::SiliconflowCn => Ok("siliconflow-CN"),
+        ApiProvider::SiliconflowCn => Ok("siliconflow"),
         ApiProvider::Arcee => Ok("arcee"),
         ApiProvider::Moonshot => Ok("moonshot"),
         ApiProvider::Sglang => Ok("sglang"),
@@ -5854,6 +5904,64 @@ mod tests {
     }
 
     #[test]
+    fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
+        assert_eq!(
+            Config::default().subagent_heartbeat_timeout_secs(),
+            DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
+        );
+
+        let zero = Config {
+            subagents: Some(SubagentsConfig {
+                heartbeat_timeout_secs: Some(0),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            zero.subagent_heartbeat_timeout_secs(),
+            DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
+        );
+
+        let low = Config {
+            subagents: Some(SubagentsConfig {
+                api_timeout_secs: Some(1),
+                heartbeat_timeout_secs: Some(1),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            low.subagent_heartbeat_timeout_secs(),
+            MIN_SUBAGENT_API_TIMEOUT_SECS + 30
+        );
+
+        let follows_long_api_timeout = Config {
+            subagents: Some(SubagentsConfig {
+                api_timeout_secs: Some(900),
+                heartbeat_timeout_secs: Some(300),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            follows_long_api_timeout.subagent_heartbeat_timeout_secs(),
+            930
+        );
+
+        let high = Config {
+            subagents: Some(SubagentsConfig {
+                heartbeat_timeout_secs: Some(MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS + 60),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            high.subagent_heartbeat_timeout_secs(),
+            MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
     fn save_api_key_writes_config_file_under_cfg_test() -> Result<()> {
         // `save_api_key` writes to the shared user config file. This
         // pins the boring v0.8.8 setup path and avoids platform
@@ -6809,7 +6917,17 @@ api_key = "old-openrouter-key"
             Some(DEFAULT_SILICONFLOW_MODEL)
         );
         assert_eq!(
+            normalize_model_name_for_provider(ApiProvider::SiliconflowCn, "deepseek-reasoner")
+                .as_deref(),
+            Some(DEFAULT_SILICONFLOW_MODEL)
+        );
+        assert_eq!(
             normalize_model_name_for_provider(ApiProvider::Siliconflow, "deepseek-chat").as_deref(),
+            Some(DEFAULT_SILICONFLOW_FLASH_MODEL)
+        );
+        assert_eq!(
+            normalize_model_name_for_provider(ApiProvider::SiliconflowCn, "deepseek-chat")
+                .as_deref(),
             Some(DEFAULT_SILICONFLOW_FLASH_MODEL)
         );
         assert_eq!(
@@ -8243,14 +8361,14 @@ model = "arcee-trinity-large-preview"
 
         // Safety: test-only environment mutation guarded by a global mutex.
         unsafe {
-            env::set_var("CODEWHALE_PROVIDER", "siliconflow");
+            env::set_var("CODEWHALE_PROVIDER", "siliconflow-CN");
             env::set_var("SILICONFLOW_API_KEY", "sf-env-key");
             env::set_var("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1");
             env::set_var("SILICONFLOW_MODEL", "deepseek-reasoner");
         }
 
         let config = Config::load(None, None)?;
-        assert_eq!(config.api_provider(), ApiProvider::Siliconflow);
+        assert_eq!(config.api_provider(), ApiProvider::SiliconflowCn);
         assert_eq!(config.deepseek_api_key()?, "sf-env-key");
         assert_eq!(config.deepseek_base_url(), "https://api.siliconflow.cn/v1");
         assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_MODEL);
@@ -8921,6 +9039,23 @@ api_key = "moonshot-platform-key"
                 .and_then(|t| t.get("api_key"))
                 .and_then(toml::Value::as_str),
             Some("sglang-saved-key")
+        );
+        save_api_key_for(ApiProvider::SiliconflowCn, "sf-cn-saved-key")?;
+        let contents = fs::read_to_string(&path)?;
+        let parsed: toml::Value = toml::from_str(&contents)?;
+        assert_eq!(
+            parsed
+                .get("providers")
+                .and_then(|p| p.get("siliconflow"))
+                .and_then(|t| t.get("api_key"))
+                .and_then(toml::Value::as_str),
+            Some("sf-cn-saved-key")
+        );
+        assert!(
+            parsed
+                .get("providers")
+                .and_then(|p| p.get("siliconflow-CN"))
+                .is_none()
         );
         Ok(())
     }
