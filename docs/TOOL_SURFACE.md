@@ -110,8 +110,13 @@ to the model, such as `mcp_<server>_<tool>`.
 | `task_cancel` | Cancel a queued or running durable task. Approval-required. |
 | `checklist_write` | Granular progress under the active thread/task. Checklist state is subordinate to the durable task. |
 | `checklist_add` / `checklist_update` / `checklist_list` | Single-item checklist operations. |
-| `todo_write` / `todo_add` / `todo_update` / `todo_list` | Compatibility aliases for the checklist tools. Existing sessions keep working, but new prompts should use `checklist_*`. |
 | `note` | One-off important fact for later. |
+
+The legacy `todo_write`, `todo_add`, `todo_update`, and `todo_list` names are
+hidden compatibility aliases for saved transcript replay. They remain callable
+by exact name, but they are not part of the model-visible catalog; compatibility
+results include `_deprecation.use_instead = checklist_*` and
+`_deprecation.removed_in = 0.9.0`.
 
 ### Verification gates and artifacts
 

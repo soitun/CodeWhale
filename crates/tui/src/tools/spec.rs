@@ -664,6 +664,14 @@ pub trait ToolSpec: Send + Sync {
         false
     }
 
+    /// Returns whether this tool should be advertised in the model-facing
+    /// catalog. Hidden compatibility tools remain registered and executable
+    /// by name so saved transcripts can replay without teaching new sessions
+    /// the deprecated spelling.
+    fn model_visible(&self) -> bool {
+        true
+    }
+
     /// Execute the tool with the given input and context.
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError>;
 }
