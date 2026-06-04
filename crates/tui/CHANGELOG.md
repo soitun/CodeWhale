@@ -97,14 +97,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-level folders visible in noisy large workspaces while the dynamic
   `<project_context_pack>` marker remains controlled by its own setting
   (#697, #1827).
+- Project context loading now uses a bounded process-local content-signature
+  cache for repeated hot-path loads. The cache covers workspace/parent
+  instructions, global AGENTS/WHALE fallbacks, repo constitution files,
+  generated-context targets, trust markers, and trust config paths, and it
+  stores post-load signatures so auto-generated context deletion/regeneration
+  stays correct (#2636).
 
 ### Community
 
 Thanks to **@cyq1017** for the restore-listing implementation (#2513) and
 pending-input delivery-mode label work (#2532, #2054),
 **@wywsoor** for the broader macOS/iTerm rollback UX report (#2494),
-**@HUQIANTAO** for the `web_run` lock-splitting work (#2502) and turn-metadata
-prefix-cache stability work (#2517), **@xyuai** for canonical CodeWhale
+**@HUQIANTAO** for the `web_run` lock-splitting work (#2502), turn-metadata
+prefix-cache stability work (#2517), and project-context cache direction
+(#2636), **@xyuai** for canonical CodeWhale
 settings-path migration work (#2730), **@gaord** for the runtime thread
 workspace update and completed-thread save APIs (#2640, #2639),
 **@shenjackyuanjie** for the

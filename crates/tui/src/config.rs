@@ -2936,6 +2936,20 @@ fn home_config_path() -> Option<PathBuf> {
     })
 }
 
+pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
+    if let Some(path) = env_config_path() {
+        return vec![path];
+    }
+
+    let Some(home) = effective_home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        home.join(".codewhale").join("config.toml"),
+        home.join(".deepseek").join("config.toml"),
+    ]
+}
+
 #[must_use]
 pub(crate) fn is_workspace_trusted(workspace: &Path) -> bool {
     let Some(config_path) = default_config_path() else {

@@ -624,7 +624,8 @@ Current v0.9 track credits:
 - **[shenjackyuanjie](https://github.com/shenjackyuanjie)** — HarmonyOS /
   OpenHarmony porting work and MatePad Edge validation trail (#2634)
 - **[HUQIANTAO](https://github.com/HUQIANTAO)** — `web_run` cache-state
-  lock-splitting and turn-metadata prefix-cache stability work (#2502, #2517)
+  lock-splitting, turn-metadata prefix-cache stability, and project-context
+  cache work (#2502, #2517, #2636)
 - **[idling11](https://github.com/idling11)** — PlanArtifact continuity and
   dense tool-call transcript collapse direction (#2733, #2738, #2692)
 - **[h3c-hexin](https://github.com/h3c-hexin)** — sub-agent model inheritance,
