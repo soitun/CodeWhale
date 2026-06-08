@@ -340,10 +340,10 @@ max_subagents = 10 # optional (1-20)
 # base_url = "https://openrouter.ai/api/v1"
 # model = "deepseek/deepseek-v4-pro"
 # Recent large model IDs also accepted here include arcee-ai/trinity-large-thinking,
-# xiaomi/mimo-v2.5-pro, qwen/qwen3.6-flash, qwen/qwen3.6-35b-a3b,
-# qwen/qwen3.6-max-preview, qwen/qwen3.6-27b, qwen/qwen3.6-plus,
-# google/gemma-4-31b-it, z-ai/glm-5.1, moonshotai/kimi-k2.6, and
-# nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free.
+# minimax/minimax-m3, minimax/minimax-2.7, xiaomi/mimo-v2.5-pro, qwen/qwen3.6-flash,
+# qwen/qwen3.6-35b-a3b, qwen/qwen3.6-max-preview, qwen/qwen3.6-27b, qwen/qwen3.6-plus,
+# qwen/qwen3.7-max, google/gemma-4-31b-it, z-ai/glm-5.1, moonshotai/kimi-k2.6,
+# nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free, and nvidia/nemotron-3-ultra.
 
 # Xiaomi MiMo OpenAI-compatible endpoint (https://platform.xiaomimimo.com)
 [providers.xiaomi_mimo]
@@ -418,6 +418,14 @@ max_subagents = 10 # optional (1-20)
 [providers.huggingface]
 # api_key = "YOUR_HF_TOKEN"
 # base_url = "https://router.huggingface.co/v1"
+# model = "deepseek-ai/DeepSeek-V4-Pro"     # or deepseek-ai/DeepSeek-V4-Flash
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# Together AI Provider (https://www.together.ai/)
+# Env var aliases: TOGETHER_API_KEY, TOGETHER_BASE_URL, TOGETHER_MODEL
+[providers.together]
+# api_key = "YOUR_TOGETHER_API_KEY"
+# base_url = "https://api.together.xyz/v1"
 # model = "deepseek-ai/DeepSeek-V4-Pro"     # or deepseek-ai/DeepSeek-V4-Flash
 
 # ─────────────────────────────────────────────────────────────────────────────────

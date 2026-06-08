@@ -47,6 +47,7 @@ const OPENROUTER_QWEN_3_6_35B_A3B_MODEL: &str = "qwen/qwen3.6-35b-a3b";
 const OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL: &str = "qwen/qwen3.6-max-preview";
 const OPENROUTER_QWEN_3_6_27B_MODEL: &str = "qwen/qwen3.6-27b";
 const OPENROUTER_QWEN_3_6_PLUS_MODEL: &str = "qwen/qwen3.6-plus";
+const OPENROUTER_QWEN_3_7_MAX_MODEL: &str = "qwen/qwen3.7-max";
 const OPENROUTER_TENCENT_HY3_PREVIEW_MODEL: &str = "tencent/hy3-preview";
 const OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL: &str = "xiaomi/mimo-v2.5-pro";
 const OPENROUTER_XIAOMI_MIMO_V2_5_MODEL: &str = "xiaomi/mimo-v2.5";
@@ -85,6 +86,9 @@ const DEFAULT_ARCEE_BASE_URL: &str = "https://api.arcee.ai/api/v1";
 const DEFAULT_HUGGINGFACE_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 const DEFAULT_HUGGINGFACE_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://router.huggingface.co/v1";
+const DEFAULT_TOGETHER_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
+const DEFAULT_TOGETHER_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+const DEFAULT_TOGETHER_BASE_URL: &str = "https://api.together.xyz/v1";
 const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
 const DEFAULT_VLLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 const DEFAULT_VLLM_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
@@ -135,10 +139,12 @@ pub enum ProviderKind {
     Ollama,
     #[serde(alias = "hugging-face", alias = "hugging_face", alias = "hf")]
     Huggingface,
+    #[serde(alias = "together-ai", alias = "together_ai")]
+    Together,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Deepseek,
         Self::NvidiaNim,
         Self::Openai,
@@ -157,6 +163,7 @@ impl ProviderKind {
         Self::Vllm,
         Self::Ollama,
         Self::Huggingface,
+        Self::Together,
     ];
 
     #[must_use]
@@ -180,6 +187,7 @@ impl ProviderKind {
             Self::Vllm => "vllm",
             Self::Ollama => "ollama",
             Self::Huggingface => "huggingface",
+            Self::Together => "together",
         }
     }
 
@@ -209,6 +217,7 @@ impl ProviderKind {
             "vllm" | "v-llm" => Some(Self::Vllm),
             "ollama" | "ollama-local" => Some(Self::Ollama),
             "huggingface" | "hugging-face" | "hugging_face" | "hf" => Some(Self::Huggingface),
+            "together" | "together-ai" | "together_ai" => Some(Self::Together),
             _ => None,
         }
     }
@@ -277,6 +286,8 @@ pub struct ProvidersToml {
     pub ollama: ProviderConfigToml,
     #[serde(default)]
     pub huggingface: ProviderConfigToml,
+    #[serde(default)]
+    pub together: ProviderConfigToml,
 }
 
 /// Sibling `permissions.toml` schema.
@@ -324,6 +335,7 @@ impl ProvidersToml {
             ProviderKind::Vllm => &self.vllm,
             ProviderKind::Ollama => &self.ollama,
             ProviderKind::Huggingface => &self.huggingface,
+            ProviderKind::Together => &self.together,
         }
     }
 
@@ -346,6 +358,7 @@ impl ProvidersToml {
             ProviderKind::Vllm => &mut self.vllm,
             ProviderKind::Ollama => &mut self.ollama,
             ProviderKind::Huggingface => &mut self.huggingface,
+            ProviderKind::Together => &mut self.together,
         }
     }
 }
@@ -1207,6 +1220,12 @@ impl ConfigToml {
             "providers.huggingface.http_headers" => {
                 serialize_http_headers(&self.providers.huggingface.http_headers)
             }
+            "providers.together.api_key" => self.providers.together.api_key.clone(),
+            "providers.together.base_url" => self.providers.together.base_url.clone(),
+            "providers.together.model" => self.providers.together.model.clone(),
+            "providers.together.http_headers" => {
+                serialize_http_headers(&self.providers.together.http_headers)
+            }
             _ => self.extras.get(key).map(toml::Value::to_string),
         }
     }
@@ -1458,6 +1477,18 @@ impl ConfigToml {
             "providers.huggingface.http_headers" => {
                 self.providers.huggingface.http_headers = parse_http_headers(value)?;
             }
+            "providers.together.api_key" => {
+                self.providers.together.api_key = Some(value.to_string());
+            }
+            "providers.together.base_url" => {
+                self.providers.together.base_url = Some(value.to_string());
+            }
+            "providers.together.model" => {
+                self.providers.together.model = Some(value.to_string());
+            }
+            "providers.together.http_headers" => {
+                self.providers.together.http_headers = parse_http_headers(value)?;
+            }
             _ => {
                 self.extras
                     .insert(key.to_string(), toml::Value::String(value.to_string()));
@@ -1577,6 +1608,10 @@ impl ConfigToml {
             "providers.huggingface.base_url" => self.providers.huggingface.base_url = None,
             "providers.huggingface.model" => self.providers.huggingface.model = None,
             "providers.huggingface.http_headers" => self.providers.huggingface.http_headers.clear(),
+            "providers.together.api_key" => self.providers.together.api_key = None,
+            "providers.together.base_url" => self.providers.together.base_url = None,
+            "providers.together.model" => self.providers.together.model = None,
+            "providers.together.http_headers" => self.providers.together.http_headers.clear(),
             _ => {
                 self.extras.remove(key);
             }
@@ -1959,6 +1994,7 @@ impl ConfigToml {
                 ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL.to_string(),
                 ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL.to_string(),
                 ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL.to_string(),
+                ProviderKind::Together => DEFAULT_TOGETHER_BASE_URL.to_string(),
             })
         };
         // CLI flag wins outright. Otherwise: config-file → injected secrets/env.
@@ -2251,6 +2287,14 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
             "deepseek-v4-flash" | "deepseek-v4flash" | "deepseek-chat" | "deepseek-reasoner"
             | "deepseek-r1" | "deepseek-v3" | "deepseek-v3.2",
         ) => DEFAULT_HUGGINGFACE_FLASH_MODEL.to_string(),
+        (ProviderKind::Together, "deepseek-v4-pro" | "deepseek-v4pro") => {
+            DEFAULT_TOGETHER_MODEL.to_string()
+        }
+        (
+            ProviderKind::Together,
+            "deepseek-v4-flash" | "deepseek-v4flash" | "deepseek-chat" | "deepseek-reasoner"
+            | "deepseek-r1" | "deepseek-v3" | "deepseek-v3.2",
+        ) => DEFAULT_TOGETHER_FLASH_MODEL.to_string(),
         _ => model.to_string(),
     }
 }
@@ -2342,6 +2386,9 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_QWEN_3_6_PLUS_MODEL | "qwen3.6-plus" | "qwen-3.6-plus" => {
             Some(OPENROUTER_QWEN_3_6_PLUS_MODEL)
         }
+        OPENROUTER_QWEN_3_7_MAX_MODEL | "qwen3.7-max" | "qwen-3.7-max" => {
+            Some(OPENROUTER_QWEN_3_7_MAX_MODEL)
+        }
         OPENROUTER_TENCENT_HY3_PREVIEW_MODEL | "hy3-preview" | "tencent-hy3-preview" => {
             Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL)
         }
@@ -2378,6 +2425,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Vllm => DEFAULT_VLLM_MODEL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_MODEL,
         ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_MODEL,
+        ProviderKind::Together => DEFAULT_TOGETHER_MODEL,
     }
 }
 
@@ -2401,6 +2449,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL,
         ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL,
+        ProviderKind::Together => DEFAULT_TOGETHER_BASE_URL,
     }
 }
 
@@ -3149,6 +3198,8 @@ struct EnvRuntimeOverrides {
     ollama_base_url: Option<String>,
     huggingface_base_url: Option<String>,
     huggingface_model: Option<String>,
+    together_base_url: Option<String>,
+    together_model: Option<String>,
 }
 
 impl EnvRuntimeOverrides {
@@ -3298,6 +3349,12 @@ impl EnvRuntimeOverrides {
                 .or_else(|_| std::env::var("HF_MODEL"))
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            together_base_url: std::env::var("TOGETHER_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            together_model: std::env::var("TOGETHER_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         }
     }
 
@@ -3324,6 +3381,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Vllm => self.vllm_base_url.clone(),
             ProviderKind::Ollama => self.ollama_base_url.clone(),
             ProviderKind::Huggingface => self.huggingface_base_url.clone(),
+            ProviderKind::Together => self.together_base_url.clone(),
         }
     }
 
@@ -3341,6 +3399,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Novita => self.novita_model.clone(),
             ProviderKind::Fireworks => self.fireworks_model.clone(),
             ProviderKind::Huggingface => self.huggingface_model.clone(),
+            ProviderKind::Together => self.together_model.clone(),
             _ => None,
         }?;
 

@@ -1204,7 +1204,8 @@ pub(super) fn apply_reasoning_effort(
             | ApiProvider::Siliconflow
             | ApiProvider::SiliconflowCn
             | ApiProvider::Sglang
-            | ApiProvider::Volcengine => {
+            | ApiProvider::Volcengine
+            | ApiProvider::Together => {
                 body["thinking"] = json!({ "type": "disabled" });
             }
             ApiProvider::Fireworks => {}
@@ -1246,10 +1247,10 @@ pub(super) fn apply_reasoning_effort(
                 body["reasoning_effort"] = json!("high");
                 body["thinking"] = json!({ "type": "enabled" });
             }
-            // OpenRouter/Novita: pass through the actual user-chosen value.
+            // OpenRouter/Novita/Together: pass through the actual user-chosen value.
             // OpenRouter's unified scale is none/minimal/low/medium/high/xhigh;
             // DeepSeek models hosted there accept those directly.
-            ApiProvider::Openrouter | ApiProvider::Novita => {
+            ApiProvider::Openrouter | ApiProvider::Novita | ApiProvider::Together => {
                 let value = match normalized.as_str() {
                     "low" | "minimal" => "low",
                     "medium" | "mid" => "medium",
@@ -1308,7 +1309,7 @@ pub(super) fn apply_reasoning_effort(
                 body["reasoning_effort"] = json!("max");
                 body["thinking"] = json!({ "type": "enabled" });
             }
-            ApiProvider::Openrouter | ApiProvider::Novita => {
+            ApiProvider::Openrouter | ApiProvider::Novita | ApiProvider::Together => {
                 body["reasoning_effort"] = json!("xhigh");
                 body["thinking"] = json!({ "type": "enabled" });
             }

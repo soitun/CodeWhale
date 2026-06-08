@@ -14,6 +14,7 @@ use super::{
     DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENROUTER_BASE_URL,
     DEFAULT_OPENROUTER_MODEL, DEFAULT_SGLANG_BASE_URL, DEFAULT_SGLANG_MODEL,
     DEFAULT_SILICONFLOW_BASE_URL, DEFAULT_SILICONFLOW_CN_BASE_URL, DEFAULT_SILICONFLOW_MODEL,
+    DEFAULT_TOGETHER_BASE_URL, DEFAULT_TOGETHER_MODEL,
     DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL, DEFAULT_VOLCENGINE_BASE_URL,
     DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL, DEFAULT_WANJIE_ARK_MODEL,
     DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL, ProviderKind,
@@ -274,6 +275,15 @@ provider!(
     ["HUGGINGFACE_API_KEY", "HF_TOKEN"],
     "huggingface"
 );
+provider!(
+    Together,
+    Together,
+    "Together AI",
+    DEFAULT_TOGETHER_BASE_URL,
+    DEFAULT_TOGETHER_MODEL,
+    ["TOGETHER_API_KEY"],
+    "together"
+);
 
 static DEEPSEEK: Deepseek = Deepseek;
 static NVIDIA_NIM: NvidiaNim = NvidiaNim;
@@ -293,8 +303,9 @@ static SGLANG: Sglang = Sglang;
 static VLLM: Vllm = Vllm;
 static OLLAMA: Ollama = Ollama;
 static HUGGINGFACE: Huggingface = Huggingface;
+static TOGETHER: Together = Together;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 18] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 19] = [
     &DEEPSEEK,
     &NVIDIA_NIM,
     &OPENAI,
@@ -313,6 +324,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 18] = [
     &VLLM,
     &OLLAMA,
     &HUGGINGFACE,
+    &TOGETHER,
 ];
 
 /// Return all built-in provider metadata entries in `ProviderKind::ALL` order.
@@ -359,5 +371,6 @@ pub fn provider_for_kind(kind: ProviderKind) -> &'static dyn Provider {
         ProviderKind::Vllm => &VLLM,
         ProviderKind::Ollama => &OLLAMA,
         ProviderKind::Huggingface => &HUGGINGFACE,
+        ProviderKind::Together => &TOGETHER,
     }
 }

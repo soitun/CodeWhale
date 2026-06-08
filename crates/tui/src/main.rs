@@ -2044,6 +2044,10 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
                     "HUGGINGFACE_API_KEY/HF_TOKEN",
                     "codewhale auth set --provider huggingface",
                 ),
+                crate::config::ApiProvider::Together => (
+                    "TOGETHER_API_KEY",
+                    "codewhale auth set --provider together --api-key \"...\"",
+                ),
                 crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN => {
                     ("DEEPSEEK_API_KEY", "codewhale auth set --provider deepseek")
                 }
@@ -2069,6 +2073,7 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
                     crate::config::ApiProvider::Vllm => "vllm",
                     crate::config::ApiProvider::Ollama => "ollama",
                     crate::config::ApiProvider::Huggingface => "huggingface",
+                    crate::config::ApiProvider::Together => "together",
                     crate::config::ApiProvider::Deepseek
                     | crate::config::ApiProvider::DeepseekCN => "deepseek",
                 }

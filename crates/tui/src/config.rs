@@ -75,6 +75,9 @@ pub const OPENROUTER_QWEN_3_6_35B_A3B_MODEL: &str = "qwen/qwen3.6-35b-a3b";
 pub const OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL: &str = "qwen/qwen3.6-max-preview";
 pub const OPENROUTER_QWEN_3_6_27B_MODEL: &str = "qwen/qwen3.6-27b";
 pub const OPENROUTER_QWEN_3_6_PLUS_MODEL: &str = "qwen/qwen3.6-plus";
+pub const OPENROUTER_QWEN_3_7_MAX_MODEL: &str = "qwen/qwen3.7-max";
+pub const OPENROUTER_MINIMAX_2_7_MODEL: &str = "minimax/minimax-2.7";
+pub const OPENROUTER_NEMOTRON_3_ULTRA_MODEL: &str = "nvidia/nemotron-3-ultra";
 pub const OPENROUTER_TENCENT_HY3_PREVIEW_MODEL: &str = "tencent/hy3-preview";
 pub const OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL: &str = "xiaomi/mimo-v2.5-pro";
 pub const OPENROUTER_XIAOMI_MIMO_V2_5_MODEL: &str = "xiaomi/mimo-v2.5";
@@ -88,6 +91,9 @@ pub const RECENT_OPENROUTER_LARGE_MODELS: &[&str] = &[
     OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL,
     OPENROUTER_QWEN_3_6_27B_MODEL,
     OPENROUTER_QWEN_3_6_PLUS_MODEL,
+    OPENROUTER_QWEN_3_7_MAX_MODEL,
+    OPENROUTER_MINIMAX_2_7_MODEL,
+    OPENROUTER_NEMOTRON_3_ULTRA_MODEL,
     OPENROUTER_KIMI_K2_6_MODEL,
     OPENROUTER_GLM_5_1_MODEL,
     OPENROUTER_TENCENT_HY3_PREVIEW_MODEL,
@@ -136,6 +142,8 @@ pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 pub const DEFAULT_HUGGINGFACE_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_HUGGINGFACE_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://router.huggingface.co/v1";
+pub const DEFAULT_TOGETHER_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
+pub const DEFAULT_TOGETHER_BASE_URL: &str = "https://api.together.xyz/v1";
 /// Legacy `deepseek-cn` provider alias.
 ///
 /// DeepSeek's official API host is the same worldwide. Keep this alias for
@@ -176,6 +184,7 @@ pub enum ApiProvider {
     Vllm,
     Ollama,
     Huggingface,
+    Together,
 }
 
 impl ApiProvider {
@@ -224,6 +233,7 @@ impl ApiProvider {
             "vllm" | "v-llm" => Some(Self::Vllm),
             "ollama" | "ollama-local" => Some(Self::Ollama),
             "huggingface" | "hugging-face" | "hugging_face" | "hf" => Some(Self::Huggingface),
+            "together" | "together-ai" | "together_ai" => Some(Self::Together),
             _ => None,
         }
     }
@@ -250,6 +260,7 @@ impl ApiProvider {
             Self::Vllm => "vllm",
             Self::Ollama => "ollama",
             Self::Huggingface => "huggingface",
+            Self::Together => "together",
         }
     }
 
@@ -276,6 +287,7 @@ impl ApiProvider {
             Self::Vllm => "vLLM",
             Self::Ollama => "Ollama",
             Self::Huggingface => "Hugging Face",
+            Self::Together => "Together AI",
         }
     }
 
@@ -301,6 +313,7 @@ impl ApiProvider {
             Self::Vllm,
             Self::Ollama,
             Self::Huggingface,
+            Self::Together,
         ]
     }
 }
@@ -616,6 +629,9 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_QWEN_3_6_PLUS_MODEL | "qwen3.6-plus" | "qwen-3.6-plus" => {
             Some(OPENROUTER_QWEN_3_6_PLUS_MODEL)
         }
+        OPENROUTER_QWEN_3_7_MAX_MODEL | "qwen3.7-max" | "qwen-3.7-max" => {
+            Some(OPENROUTER_QWEN_3_7_MAX_MODEL)
+        }
         OPENROUTER_TENCENT_HY3_PREVIEW_MODEL | "hy3-preview" | "tencent-hy3-preview" => {
             Some(OPENROUTER_TENCENT_HY3_PREVIEW_MODEL)
         }
@@ -800,6 +816,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Volcengine => vec![DEFAULT_VOLCENGINE_MODEL, DEFAULT_VOLCENGINE_FLASH_MODEL],
         ApiProvider::Ollama => Vec::new(),
         ApiProvider::Openai | ApiProvider::Atlascloud => OFFICIAL_DEEPSEEK_MODELS.to_vec(),
+        ApiProvider::Together => vec![DEFAULT_TOGETHER_MODEL],
     }
 }
 
@@ -1939,6 +1956,8 @@ pub struct ProvidersConfig {
     pub ollama: ProviderConfig,
     #[serde(default, alias = "hugging-face", alias = "hf")]
     pub huggingface: ProviderConfig,
+    #[serde(default, alias = "together-ai")]
+    pub together: ProviderConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2102,6 +2121,7 @@ impl Config {
             ApiProvider::Volcengine => "providers.volcengine",
             ApiProvider::Huggingface => "providers.huggingface",
             ApiProvider::NvidiaNim => "providers.nvidia_nim",
+            ApiProvider::Together => "providers.together",
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => return,
         };
         tracing::warn!(
@@ -2249,6 +2269,7 @@ impl Config {
             ApiProvider::Ollama => &providers.ollama,
             ApiProvider::Volcengine => &providers.volcengine,
             ApiProvider::Huggingface => &providers.huggingface,
+            ApiProvider::Together => &providers.together,
         })
     }
 
@@ -2273,6 +2294,7 @@ impl Config {
             ApiProvider::Ollama => &mut providers.ollama,
             ApiProvider::Volcengine => &mut providers.volcengine,
             ApiProvider::Huggingface => &mut providers.huggingface,
+            ApiProvider::Together => &mut providers.together,
         }
     }
 
@@ -2384,6 +2406,7 @@ impl Config {
             ApiProvider::Ollama => DEFAULT_OLLAMA_MODEL,
             ApiProvider::Volcengine => DEFAULT_VOLCENGINE_MODEL,
             ApiProvider::Huggingface => DEFAULT_HUGGINGFACE_MODEL,
+            ApiProvider::Together => DEFAULT_TOGETHER_MODEL,
         }
         .to_string()
     }
@@ -2419,9 +2442,10 @@ impl Config {
             | ApiProvider::Moonshot
             | ApiProvider::Sglang
             | ApiProvider::Vllm
-            | ApiProvider::Ollama
+            |             ApiProvider::Ollama
             | ApiProvider::Volcengine
-            | ApiProvider::Huggingface => None,
+            | ApiProvider::Huggingface
+            | ApiProvider::Together => None,
         };
         let configured_base_url = provider_base.or(root_base);
         let base = if provider == ApiProvider::XiaomiMimo {
@@ -2466,6 +2490,7 @@ impl Config {
                     ApiProvider::Ollama => DEFAULT_OLLAMA_BASE_URL,
                     ApiProvider::Volcengine => DEFAULT_VOLCENGINE_BASE_URL,
                     ApiProvider::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL,
+                    ApiProvider::Together => DEFAULT_TOGETHER_BASE_URL,
                 }
                 .to_string()
             })
@@ -2513,6 +2538,7 @@ impl Config {
             ApiProvider::Ollama => "ollama",
             ApiProvider::Volcengine => "volcengine",
             ApiProvider::Huggingface => "huggingface",
+            ApiProvider::Together => "together",
         };
 
         // 0. DeepSeek compatibility slot. The legacy top-level `api_key`
@@ -2651,6 +2677,10 @@ impl Config {
                  set MOONSHOT_API_KEY/KIMI_API_KEY, or add [providers.moonshot] api_key. \
                  For a Kimi Code plan key, set [providers.moonshot] base_url = \
                  \"https://api.kimi.com/coding/v1\" and model = \"kimi-for-coding\"."
+            ),
+            ApiProvider::Together => anyhow::bail!(
+                "Together AI API key not found. Run 'codewhale auth set --provider together', \
+                 set TOGETHER_API_KEY, or add [providers.together] api_key in ~/.codewhale/config.toml."
             ),
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
@@ -3451,6 +3481,13 @@ fn apply_env_overrides(config: &mut Config) {
                     .huggingface
                     .base_url = Some(value);
             }
+            ApiProvider::Together => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .together
+                    .base_url = Some(value);
+            }
         }
     }
     if matches!(config.api_provider(), ApiProvider::NvidiaNim)
@@ -3657,6 +3694,7 @@ fn apply_env_overrides(config: &mut Config) {
             ApiProvider::Ollama => &mut providers.ollama,
             ApiProvider::Volcengine => &mut providers.volcengine,
             ApiProvider::Huggingface => &mut providers.huggingface,
+            ApiProvider::Together => &mut providers.together,
         };
         let mut provider_headers = entry.http_headers.clone().unwrap_or_default();
         provider_headers.extend(headers);
@@ -3851,6 +3889,7 @@ fn apply_env_overrides(config: &mut Config) {
                 ApiProvider::Ollama => &mut providers.ollama,
                 ApiProvider::Volcengine => &mut providers.volcengine,
                 ApiProvider::Huggingface => &mut providers.huggingface,
+                ApiProvider::Together => &mut providers.together,
             };
             entry.model = Some(value);
         }
@@ -4173,6 +4212,7 @@ fn default_base_url_for_provider(provider: ApiProvider) -> &'static str {
         ApiProvider::Ollama => DEFAULT_OLLAMA_BASE_URL,
         ApiProvider::Volcengine => DEFAULT_VOLCENGINE_BASE_URL,
         ApiProvider::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL,
+        ApiProvider::Together => DEFAULT_TOGETHER_BASE_URL,
     }
 }
 
@@ -4594,6 +4634,7 @@ fn merge_providers(
             ollama: merge_provider_config(base.ollama, override_cfg.ollama),
             volcengine: merge_provider_config(base.volcengine, override_cfg.volcengine),
             huggingface: merge_provider_config(base.huggingface, override_cfg.huggingface),
+            together: merge_provider_config(base.together, override_cfg.together),
         }),
     }
 }
@@ -5080,6 +5121,9 @@ pub fn active_provider_has_env_api_key(config: &Config) -> bool {
                 || std::env::var("VOLCENGINE_ARK_API_KEY").is_ok_and(|k| !k.trim().is_empty())
                 || std::env::var("ARK_API_KEY").is_ok_and(|k| !k.trim().is_empty())
         }
+        ApiProvider::Together => {
+            std::env::var("TOGETHER_API_KEY").is_ok_and(|k| !k.trim().is_empty())
+        }
     }
 }
 
@@ -5106,6 +5150,7 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         ApiProvider::Siliconflow | ApiProvider::SiliconflowCn => "SILICONFLOW_API_KEY",
         ApiProvider::Arcee => "ARCEE_API_KEY",
         ApiProvider::Huggingface => "HUGGINGFACE_API_KEY",
+        ApiProvider::Together => "TOGETHER_API_KEY",
         ApiProvider::Moonshot => "MOONSHOT_API_KEY",
         ApiProvider::Sglang => "SGLANG_API_KEY",
         ApiProvider::Vllm => "VLLM_API_KEY",
@@ -5227,6 +5272,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Vllm => "providers.vllm",
         ApiProvider::Ollama => "providers.ollama",
         ApiProvider::Volcengine => "providers.volcengine",
+        ApiProvider::Together => "providers.together",
     };
 
     // Parse existing TOML (or start fresh) so we can edit the right table
@@ -5270,6 +5316,7 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
         ApiProvider::Vllm => "vllm",
         ApiProvider::Ollama => "ollama",
         ApiProvider::Volcengine => "volcengine",
+        ApiProvider::Together => "together",
     };
     let entry = providers
         .entry(key_inside.to_string())
@@ -5365,6 +5412,7 @@ fn provider_config_key(provider: ApiProvider) -> Result<&'static str> {
         ApiProvider::Sglang => Ok("sglang"),
         ApiProvider::Vllm => Ok("vllm"),
         ApiProvider::Ollama => Ok("ollama"),
+        ApiProvider::Together => Ok("together"),
     }
 }
 

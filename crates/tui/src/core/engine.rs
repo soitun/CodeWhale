@@ -614,6 +614,7 @@ impl Engine {
             ApiProvider::Vllm => "VLLM_API_KEY",
             ApiProvider::Ollama => "OLLAMA_API_KEY",
             ApiProvider::Huggingface => "HUGGINGFACE_API_KEY/HF_TOKEN",
+            ApiProvider::Together => "TOGETHER_API_KEY",
         };
 
         Some(format!(
