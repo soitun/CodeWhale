@@ -1263,7 +1263,7 @@ impl Runtime {
                 .await;
             self.hooks
                 .emit(HookEvent::GenericEventFrame {
-                    frame: error_frame.clone(),
+                    frame: Box::new(error_frame.clone()),
                 })
                 .await;
             return Ok(json!({
@@ -1300,7 +1300,7 @@ impl Runtime {
             if let Some(frame) = maybe_approval_frame {
                 self.hooks
                     .emit(HookEvent::GenericEventFrame {
-                        frame: frame.clone(),
+                        frame: Box::new(frame.clone()),
                     })
                     .await;
                 events.push(event_frame_payload(&frame));
@@ -1324,7 +1324,7 @@ impl Runtime {
         };
         self.hooks
             .emit(HookEvent::GenericEventFrame {
-                frame: start_frame.clone(),
+                frame: Box::new(start_frame.clone()),
             })
             .await;
         self.hooks
@@ -1348,7 +1348,7 @@ impl Runtime {
                 };
                 self.hooks
                     .emit(HookEvent::GenericEventFrame {
-                        frame: result_frame.clone(),
+                        frame: Box::new(result_frame.clone()),
                     })
                     .await;
                 self.hooks
@@ -1380,7 +1380,7 @@ impl Runtime {
                 };
                 self.hooks
                     .emit(HookEvent::GenericEventFrame {
-                        frame: error_frame.clone(),
+                        frame: Box::new(error_frame.clone()),
                     })
                     .await;
                 self.hooks
@@ -1426,18 +1426,18 @@ impl Runtime {
             };
             self.hooks
                 .emit(HookEvent::GenericEventFrame {
-                    frame: EventFrame::McpStartupUpdate {
+                    frame: Box::new(EventFrame::McpStartupUpdate {
                         update: codewhale_protocol::McpStartupUpdateEvent {
                             server_name: update.server_name,
                             status,
                         },
-                    },
+                    }),
                 })
                 .await;
         }
         self.hooks
             .emit(HookEvent::GenericEventFrame {
-                frame: EventFrame::McpStartupComplete {
+                frame: Box::new(EventFrame::McpStartupComplete {
                     summary: codewhale_protocol::McpStartupCompleteEvent {
                         ready: summary.ready.clone(),
                         failed: summary
@@ -1450,7 +1450,7 @@ impl Runtime {
                             .collect(),
                         cancelled: summary.cancelled.clone(),
                     },
-                },
+                }),
             })
             .await;
         summary
