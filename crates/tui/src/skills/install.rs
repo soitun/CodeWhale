@@ -39,6 +39,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -69,6 +70,7 @@ pub const DEFAULT_REGISTRY_URL: &str =
 /// Default per-skill size cap (5 MiB). Honored at unpack time so a malicious
 /// gzip bomb can't blow up RAM.
 pub const DEFAULT_MAX_SIZE_BYTES: u64 = 5 * 1024 * 1024;
+const SYNC_REGISTRY_CONCURRENCY: usize = 8;
 
 /// File written under each installed skill so [`update`] / [`uninstall`] can
 /// recover the original [`InstallSource`] without re-parsing user input.
@@ -587,12 +589,11 @@ pub async fn sync_registry(
         }
     };
 
-    let mut outcomes = Vec::new();
-
-    for (name, entry) in &doc.skills {
-        let outcome = sync_one_skill(name, entry, network, cache_dir, max_size).await;
-        outcomes.push(outcome);
-    }
+    let outcomes = stream::iter(doc.skills.iter())
+        .map(|(name, entry)| sync_one_skill(name, entry, network, cache_dir, max_size))
+        .buffered(SYNC_REGISTRY_CONCURRENCY)
+        .collect()
+        .await;
 
     Ok(SyncResult::Done { outcomes })
 }

@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded only after the workspace is trusted in user-owned config, matching the
   project-local MCP trust model while preserving the documented shell-command
   hook contract.
+- **Skill registry sync latency (#3139).** `/skills sync` now syncs registry
+  entries with bounded ordered concurrency, so network latency no longer stacks
+  one skill at a time while output order stays deterministic.
 - **SiliconFlow China provider config (#2893/#2895).** `siliconflow-CN`
   now reads its own `[providers.siliconflow_cn]` / `[providers.siliconflow-CN]`
   table and falls back to `[providers.siliconflow]` only for unset
