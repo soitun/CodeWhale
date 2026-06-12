@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `moonshotai/kimi-k2.7-code` registry row.
 - **Cursor-style activity metadata rows (#3146).** Dense successful tool-run
   summaries now render as a single muted `Explored ...` / `Updated metadata`
-  row while keeping keyboard/mouse expansion and detail inspection intact.
+  row, include short command-family labels for successful generic verifier
+  groups, and keep keyboard/mouse expansion and detail inspection intact.
 - **Provider-wait observability (#3095).** Footer stall reasons now name the
   active provider/model route, idle seconds vs stream budget, and whether a
   fanout plan is still at `0 running` or dispatch is pending. Structured

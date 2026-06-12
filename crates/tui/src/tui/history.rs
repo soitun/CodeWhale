@@ -908,6 +908,10 @@ fn tool_display_name(tool: &ToolCell) -> &str {
 
 fn classify_tool_run_activity(tool: &ToolCell) -> ToolRunActivity {
     let name = tool_display_name(tool);
+    classify_tool_name_activity(name)
+}
+
+fn classify_tool_name_activity(name: &str) -> ToolRunActivity {
     let normalized = name.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "read_file" | "list_dir" | "view_image" | "explore" => ToolRunActivity::File,
@@ -991,10 +995,13 @@ pub fn tool_run_summary(run: &ToolRun) -> String {
         clauses.push(format!("Explored {}", parts.join(", ")));
     }
     if activity.commands > 0 {
-        clauses.push(format!(
-            "ran {}",
-            counted(activity.commands, "command", "commands")
-        ));
+        let mut command_clause =
+            format!("ran {}", counted(activity.commands, "command", "commands"));
+        if let Some(families) = command_family_summary(run) {
+            command_clause.push_str(": ");
+            command_clause.push_str(&families);
+        }
+        clauses.push(command_clause);
     }
     if activity.edits > 0 {
         clauses.push(format!(
@@ -1018,6 +1025,23 @@ pub fn tool_run_summary(run: &ToolRun) -> String {
 
     let summary = clauses.join(", ");
     sentence_case_activity(summary)
+}
+
+fn command_family_summary(run: &ToolRun) -> Option<String> {
+    if run.activity.commands == 0 {
+        return None;
+    }
+
+    let mut families = Vec::new();
+    for family in &run.tool_families {
+        if classify_tool_name_activity(family) == ToolRunActivity::Command
+            && !families.iter().any(|existing| existing == family)
+        {
+            families.push(family.as_str());
+        }
+    }
+
+    (!families.is_empty()).then(|| families.join(", "))
 }
 
 fn counted(count: usize, singular: &str, plural: &str) -> String {
@@ -5980,6 +6004,30 @@ mod tests {
     }
 
     #[test]
+    fn detect_tool_runs_summarizes_safe_command_tools() {
+        let history = vec![
+            success_generic_tool("run_tests"),
+            success_generic_tool("run_verifiers"),
+            success_generic_tool("validate_data"),
+        ];
+
+        let runs = super::detect_tool_runs(&history, 3);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start, 0);
+        assert_eq!(runs[0].count, 3);
+        assert_eq!(runs[0].activity.commands, 3);
+        assert_eq!(
+            runs[0].tool_families,
+            vec!["run_tests", "run_verifiers", "validate_data"]
+        );
+        assert_eq!(
+            super::tool_run_summary(&runs[0]),
+            "Ran 3 commands: run_tests, run_verifiers, validate_data"
+        );
+    }
+
+    #[test]
     fn tool_run_summary_reports_compact_success_group() {
         let run = super::ToolRun {
             start: 4,
@@ -5995,6 +6043,29 @@ mod tests {
         let summary = super::tool_run_summary(&run);
 
         assert_eq!(summary, "Explored 4 files, 1 search");
+    }
+
+    #[test]
+    fn tool_run_summary_lists_only_command_families_for_command_clause() {
+        let run = super::ToolRun {
+            start: 4,
+            count: 4,
+            tool_families: vec![
+                "read_file".to_string(),
+                "run_tests".to_string(),
+                "validate_data".to_string(),
+            ],
+            activity: super::ToolRunActivitySummary {
+                files: 2,
+                commands: 2,
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(
+            super::tool_run_summary(&run),
+            "Explored 2 files, ran 2 commands: run_tests, validate_data"
+        );
     }
 
     #[test]
