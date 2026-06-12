@@ -3182,4 +3182,18 @@ mod tests {
             "Concise Output Discipline should be appended"
         );
     }
+
+    /// #2953 — the Calm overlay (calm.md) stays out of the default
+    /// model-prompt path to keep the static prefix slim. Voice and tone
+    /// guidance travels via the constitution preamble instead.
+    #[test]
+    fn default_prompt_does_not_include_calm_personality_overlay() {
+        let prompt = compose_prompt(Personality::Calm);
+        let calm_text = include_str!("prompts/personalities/calm.md");
+        let first_calm_line = calm_text.lines().find(|l| !l.is_empty()).unwrap_or("");
+        assert!(
+            !prompt.contains(first_calm_line),
+            "default agent prompt must not include calm.md overlay"
+        );
+    }
 }
