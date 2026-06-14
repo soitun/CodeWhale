@@ -400,6 +400,20 @@ fn picker_model_rows_for_app(app: &App) -> Vec<ModelPickerRow> {
         }
     }
 
+    if !app.model_ids_passthrough {
+        for id in model_registry::seeded_model_ids() {
+            if let Some(metadata) = model_registry::lookup(id) {
+                let provider = model_registry::serving_provider(metadata.provider);
+                push_model_row(
+                    &mut rows,
+                    id.to_string(),
+                    Some(provider),
+                    picker_model_hint(id),
+                );
+            }
+        }
+    }
+
     if let Some(model) = app
         .provider_models
         .get(app.api_provider.as_str())
@@ -810,6 +824,32 @@ mod tests {
     }
 
     #[test]
+    fn picker_lists_cross_provider_catalog_without_saved_entries() {
+        let (app, _lock) = create_test_app();
+        let mut view = ModelPickerView::new(&app);
+
+        let kimi_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| {
+                row.id == "kimi-k2.7-code"
+                    && row.provider == Some(crate::config::ApiProvider::Moonshot)
+            })
+            .expect("Moonshot catalog model should be discoverable without saved config");
+
+        view.selected_model_idx = kimi_idx;
+        match view.build_event() {
+            ViewEvent::ModelPickerApplied {
+                model, provider, ..
+            } => {
+                assert_eq!(model, "kimi-k2.7-code");
+                assert_eq!(provider, Some(crate::config::ApiProvider::Moonshot));
+            }
+            other => panic!("expected model picker event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn picker_initial_selection_matches_app_state() {
         let (mut app, _lock) = create_test_app();
         app.model = "deepseek-v4-flash".to_string();
@@ -909,12 +949,15 @@ mod tests {
         let mut view = ModelPickerView::new(&app);
         assert_eq!(view.resolved_effort(), ReasoningEffort::Off);
 
-        while view.resolved_provider() != Some(crate::config::ApiProvider::OpenaiCodex) {
-            assert!(
-                view.move_down(),
-                "saved Codex model row should be reachable"
-            );
-        }
+        let effort = view.resolved_effort();
+        view.selected_model_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| {
+                row.id == "gpt-5.5" && row.provider == Some(crate::config::ApiProvider::OpenaiCodex)
+            })
+            .expect("saved Codex model row should be reachable");
+        view.select_effort_for_current_model(effort);
 
         assert_eq!(view.resolved_model(), "gpt-5.5");
         assert_eq!(view.resolved_effort(), ReasoningEffort::Low);
@@ -1373,7 +1416,7 @@ mod tests {
         app.reasoning_effort = ReasoningEffort::High;
         let view = ModelPickerView::new(&app);
         assert!(view.show_custom_model_row);
-        assert_eq!(view.selected_model_idx, 3);
+        assert_eq!(view.selected_model_idx, view.visible_model_rows().len());
         assert_eq!(view.selected_effort_idx, 2);
         assert_eq!(view.resolved_model(), "deepseek-v4-pro-2026-04-XX");
         assert_eq!(view.resolved_effort(), ReasoningEffort::High);

@@ -73,6 +73,24 @@ pub enum ModelProvider {
     Other,
 }
 
+/// Default concrete provider that can serve a registry provider family.
+#[must_use]
+pub fn serving_provider(provider: ModelProvider) -> crate::config::ApiProvider {
+    match provider {
+        ModelProvider::DeepSeek => crate::config::ApiProvider::Deepseek,
+        ModelProvider::Anthropic => crate::config::ApiProvider::Anthropic,
+        ModelProvider::OpenAi => crate::config::ApiProvider::Openai,
+        ModelProvider::OpenAiCodex => crate::config::ApiProvider::OpenaiCodex,
+        ModelProvider::Moonshot => crate::config::ApiProvider::Moonshot,
+        ModelProvider::Zai => crate::config::ApiProvider::Zai,
+        ModelProvider::Minimax => crate::config::ApiProvider::Minimax,
+        ModelProvider::Qwen => crate::config::ApiProvider::Openrouter,
+        ModelProvider::Arcee => crate::config::ApiProvider::Arcee,
+        ModelProvider::XiaomiMimo => crate::config::ApiProvider::XiaomiMimo,
+        ModelProvider::Other => crate::config::ApiProvider::Openrouter,
+    }
+}
+
 /// One row of model facts, looked up in [`lookup`].
 ///
 /// All numeric fields are seeded from `crate::models` so they stay in lockstep
@@ -296,6 +314,47 @@ mod tests {
                 "registry supports_reasoning for {id} drifted from models.rs"
             );
         }
+    }
+
+    #[test]
+    fn serving_provider_maps_each_family() {
+        use crate::config::ApiProvider;
+
+        assert_eq!(
+            serving_provider(ModelProvider::DeepSeek),
+            ApiProvider::Deepseek
+        );
+        assert_eq!(
+            serving_provider(ModelProvider::Anthropic),
+            ApiProvider::Anthropic
+        );
+        assert_eq!(serving_provider(ModelProvider::OpenAi), ApiProvider::Openai);
+        assert_eq!(
+            serving_provider(ModelProvider::OpenAiCodex),
+            ApiProvider::OpenaiCodex
+        );
+        assert_eq!(
+            serving_provider(ModelProvider::Moonshot),
+            ApiProvider::Moonshot
+        );
+        assert_eq!(serving_provider(ModelProvider::Zai), ApiProvider::Zai);
+        assert_eq!(
+            serving_provider(ModelProvider::Minimax),
+            ApiProvider::Minimax
+        );
+        assert_eq!(
+            serving_provider(ModelProvider::Qwen),
+            ApiProvider::Openrouter
+        );
+        assert_eq!(serving_provider(ModelProvider::Arcee), ApiProvider::Arcee);
+        assert_eq!(
+            serving_provider(ModelProvider::XiaomiMimo),
+            ApiProvider::XiaomiMimo
+        );
+        assert_eq!(
+            serving_provider(ModelProvider::Other),
+            ApiProvider::Openrouter
+        );
     }
 
     #[test]
