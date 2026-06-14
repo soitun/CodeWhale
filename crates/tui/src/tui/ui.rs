@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use crate::resource_telemetry::{TokenThroughput, estimate_output_tokens_from_text};
 use anyhow::{Context, Result};
 // On Windows the push/pop helpers write the escapes directly; crossterm's
 // PushKeyboardEnhancementFlags / PopKeyboardEnhancementFlags commands are
@@ -1470,6 +1471,7 @@ async fn run_event_loop(
                         // assistant content always flows after work).
                         app.flush_active_cell();
                         current_streaming_text.clear();
+                        app.streaming_output_token_estimate = 0;
                         app.streaming_state.reset();
                         app.streaming_state.start_text(0, None);
                         app.streaming_message_index = None;
@@ -1486,6 +1488,8 @@ async fn run_event_loop(
                             app.flush_active_cell();
                         }
                         current_streaming_text.push_str(&sanitized);
+                        app.streaming_output_token_estimate =
+                            estimate_output_tokens_from_text(&current_streaming_text);
                         let index = ensure_streaming_assistant_history_cell(app);
                         app.streaming_state.push_content(0, &sanitized);
                         let committed = app.streaming_state.commit_text(0);
@@ -1786,12 +1790,15 @@ async fn run_event_loop(
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         app.dispatch_started_at = None;
                         current_streaming_text.clear();
+                        app.streaming_output_token_estimate = 0;
                         app.streaming_state.reset();
                         app.streaming_message_index = None;
                         app.streaming_thinking_active_entry = None;
                         let now = Instant::now();
                         app.turn_started_at = Some(now);
                         app.turn_last_activity_at = Some(now);
+                        app.session.last_output_throughput = None;
+                        app.streaming_output_token_estimate = 0;
                         app.provider_wait_incident_logged = false;
                         // Discoverability hint for users who don't know how
                         // to interrupt a long-running turn (#1367). Only
@@ -1866,6 +1873,7 @@ async fn run_event_loop(
                             app.turn_started_at.map(|t| t.elapsed()).unwrap_or_default();
                         app.turn_started_at = None;
                         app.turn_last_activity_at = None;
+                        app.streaming_output_token_estimate = 0;
                         // Roll the just-finished turn's elapsed time into the
                         // cumulative session work-time (#448 follow-up). The
                         // footer's `worked Nh Mm` chip reads this so the
@@ -1929,6 +1937,8 @@ async fn run_event_loop(
                         }
                         app.session.last_prompt_tokens = Some(usage.input_tokens);
                         app.session.last_completion_tokens = Some(usage.output_tokens);
+                        app.session.last_output_throughput =
+                            TokenThroughput::new(u64::from(usage.output_tokens), turn_elapsed);
                         app.session.last_prompt_cache_hit_tokens = usage.prompt_cache_hit_tokens;
                         app.session.last_prompt_cache_miss_tokens = usage.prompt_cache_miss_tokens;
                         app.session.last_reasoning_replay_tokens = usage.reasoning_replay_tokens;
@@ -5729,6 +5739,7 @@ async fn dispatch_user_message(
     }
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
+    app.session.last_output_throughput = None;
     app.session.last_prompt_cache_hit_tokens = None;
     app.session.last_prompt_cache_miss_tokens = None;
     app.session.last_reasoning_replay_tokens = None;
@@ -6300,6 +6311,7 @@ async fn switch_provider(
     } else {
         app.session.last_prompt_tokens = None;
         app.session.last_completion_tokens = None;
+        app.session.last_output_throughput = None;
     }
 
     let _ = engine_handle.send(Op::Shutdown).await;
@@ -6427,6 +6439,7 @@ async fn apply_provider_fallback_switch(
     } else {
         app.session.last_prompt_tokens = None;
         app.session.last_completion_tokens = None;
+        app.session.last_output_throughput = None;
     }
 
     let _ = engine_handle.send(Op::Shutdown).await;
@@ -6959,6 +6972,7 @@ async fn apply_command_result(
                         app.update_model_compaction_budget();
                         app.session.last_prompt_tokens = None;
                         app.session.last_completion_tokens = None;
+                        app.session.last_output_throughput = None;
                         // Rebuild the engine with the new config so API key/model/base URL take effect.
                         let _ = engine_handle.send(Op::Shutdown).await;
                         let engine_config = build_engine_config(app, config);
@@ -9006,6 +9020,7 @@ fn apply_loaded_session(app: &mut App, config: &Config, session: &SavedSession) 
         .max(total_restored_cny);
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
+    app.session.last_output_throughput = None;
     app.session.last_prompt_cache_hit_tokens = None;
     app.session.last_prompt_cache_miss_tokens = None;
     app.session.last_reasoning_replay_tokens = None;
@@ -10390,7 +10405,10 @@ pub(crate) fn selected_detail_footer_label(app: &App) -> Option<String> {
         } else {
             "raw"
         };
-        format!(" · {} {noun}", key_shortcuts::tool_details_shortcut_label())
+        format!(
+            " · {} {noun}",
+            key_shortcuts::tool_details_shortcut_hint_label()
+        )
     } else {
         String::new()
     };

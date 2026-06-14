@@ -6,6 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::core::coherence::CoherenceState;
 use crate::localization::{Locale, MessageId};
 use crate::palette;
+use crate::resource_telemetry::TokenThroughput;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tui::app::App;
 use crate::tui::format_helpers;
@@ -409,7 +410,7 @@ pub(crate) fn active_tool_status_label(app: &App) -> Option<String> {
     if active_foreground_shell_running(app) {
         parts.push("Ctrl+B shell".to_string());
     }
-    parts.push(key_shortcuts::tool_details_shortcut_label().to_string());
+    parts.push(key_shortcuts::tool_details_shortcut_hint_label().to_string());
     Some(parts.join(" \u{00B7} "))
 }
 
@@ -732,13 +733,36 @@ pub(crate) fn should_show_footer_cost(displayed_cost: f64) -> bool {
 /// Detailed cache stats live in the separate `cache` chip.
 pub(crate) fn footer_session_tokens_spans(app: &App) -> Vec<Span<'static>> {
     let session = &app.session;
-    if session.total_input_tokens == 0 && session.total_output_tokens == 0 {
+    let throughput = footer_output_throughput_label(app);
+    if session.total_input_tokens == 0 && session.total_output_tokens == 0 && throughput.is_none() {
         return Vec::new();
     }
     let total = u64::from(session.total_input_tokens)
         .saturating_add(u64::from(session.total_output_tokens));
-    let text = format!("tok {}", format_token_count_compact(total));
+    let mut text = if total == 0 {
+        "tok live".to_string()
+    } else {
+        format!("tok {}", format_token_count_compact(total))
+    };
+    if let Some(label) = throughput {
+        text.push_str(" \u{00B7} ");
+        text.push_str(&label);
+    }
     vec![Span::styled(text, Style::default().fg(palette::TEXT_MUTED))]
+}
+
+fn footer_output_throughput_label(app: &App) -> Option<String> {
+    if app.is_loading
+        && let Some(started_at) = app.turn_started_at
+        && let Some(throughput) =
+            TokenThroughput::new(app.streaming_output_token_estimate, started_at.elapsed())
+    {
+        return Some(format!("out ~{}/s live", throughput.compact_rate()));
+    }
+
+    app.session
+        .last_output_throughput
+        .map(|throughput| format!("out {}/s last", throughput.compact_rate()))
 }
 
 /// Test-only helper retained as a parity reference for `FooterWidget`'s

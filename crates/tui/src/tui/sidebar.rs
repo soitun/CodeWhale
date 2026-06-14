@@ -1487,7 +1487,7 @@ fn shell_summary_for_sidebar(
     if status == ToolStatus::Failed && looks_like_pending_ci(command, output_summary, output) {
         return format!(
             "Waiting for CI \u{00B7} {} details",
-            crate::tui::key_shortcuts::tool_details_shortcut_label()
+            crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
         );
     }
 
@@ -1535,7 +1535,7 @@ fn looks_like_pending_ci(
 fn failure_summary_with_hint(summary: &str) -> String {
     let hint = format!(
         "inspect details with {}",
-        crate::tui::key_shortcuts::tool_details_shortcut_label()
+        crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
     );
     if summary.trim().is_empty() {
         hint
@@ -1778,7 +1778,7 @@ fn editorial_tool_rows(
             row.name = "Waiting for CI".to_string();
             row.summary = format!(
                 "{command} \u{00B7} {count} polls collapsed \u{00B7} {} details",
-                crate::tui::key_shortcuts::tool_details_shortcut_label()
+                crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
             );
             row.status = ToolStatus::Running;
         }
@@ -3860,7 +3860,7 @@ mod tests {
         assert!(
             text.iter().any(|line| line.contains(&format!(
                 "inspect details with {}",
-                crate::tui::key_shortcuts::tool_details_shortcut_label()
+                crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
             ))),
             "failed row should include the next action: {text:?}"
         );

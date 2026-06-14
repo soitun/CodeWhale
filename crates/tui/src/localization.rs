@@ -1801,7 +1801,9 @@ fn english(id: MessageId) -> &'static str {
         MessageId::CtxInspNoSystemPrompt => "No system prompt set.",
         MessageId::CtxInspNoReferences => "No file, directory, or media references recorded yet.",
         MessageId::CtxInspNoToolActivity => "No tool activity recorded yet.",
-        MessageId::CtxInspAltVHint => "Open the matching card and press Alt+V for full details.",
+        MessageId::CtxInspAltVHint => {
+            "Open the matching card and press Alt+V (or v) for full details."
+        }
         MessageId::CtxInspCells => "cells",
         MessageId::CtxInspApiMessages => "API messages",
         MessageId::CtxInspActive => "active",
@@ -2438,7 +2440,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::CtxInspNoSystemPrompt => "Chưa có lời nhắc hệ thống.",
         MessageId::CtxInspNoReferences => "Chưa có tham chiếu tệp, thư mục hoặc phương tiện nào.",
         MessageId::CtxInspNoToolActivity => "Chưa có hoạt động công cụ nào.",
-        MessageId::CtxInspAltVHint => "Mở thẻ phù hợp và nhấn Alt+V để biết chi tiết.",
+        MessageId::CtxInspAltVHint => "Mở thẻ phù hợp và nhấn Alt+V (hoặc v) để biết chi tiết.",
         MessageId::CtxInspCells => "ô",
         MessageId::CtxInspApiMessages => "tin nhắn API",
         MessageId::CtxInspActive => "đang hoạt động",
@@ -2595,7 +2597,7 @@ fn traditional_chinese(id: MessageId) -> Option<&'static str> {
         MessageId::CtxInspNoSystemPrompt => "未設定系統提示。",
         MessageId::CtxInspNoReferences => "尚未記錄任何檔案、目錄或媒體引用。",
         MessageId::CtxInspNoToolActivity => "尚未記錄任何工具活動。",
-        MessageId::CtxInspAltVHint => "開啟對應的卡片並按 Alt+V 檢視詳細資訊。",
+        MessageId::CtxInspAltVHint => "開啟對應的卡片並按 Alt+V（或 v）檢視詳細資訊。",
         MessageId::CtxInspCells => "儲存格",
         MessageId::CtxInspApiMessages => "API 訊息",
         MessageId::CtxInspActive => "作用中",
@@ -3219,7 +3221,9 @@ fn japanese(id: MessageId) -> Option<&'static str> {
             "ファイル、ディレクトリ、メディアの参照はまだ記録されていません。"
         }
         MessageId::CtxInspNoToolActivity => "ツールアクティビティはまだ記録されていません。",
-        MessageId::CtxInspAltVHint => "該当するカードを開き、Alt+V を押すと詳細が表示されます。",
+        MessageId::CtxInspAltVHint => {
+            "該当するカードを開き、Alt+V（または v）を押すと詳細が表示されます。"
+        }
         MessageId::CtxInspCells => "セル",
         MessageId::CtxInspApiMessages => "API メッセージ",
         MessageId::CtxInspActive => "アクティブ",
@@ -3749,7 +3753,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::CtxInspNoSystemPrompt => "未设置系统提示。",
         MessageId::CtxInspNoReferences => "尚未记录任何文件、目录或媒体引用。",
         MessageId::CtxInspNoToolActivity => "尚未记录任何工具活动。",
-        MessageId::CtxInspAltVHint => "打开对应的卡片并按 Alt+V 查看详细信息。",
+        MessageId::CtxInspAltVHint => "打开对应的卡片并按 Alt+V（或 v）查看详细信息。",
         MessageId::CtxInspCells => "单元格",
         MessageId::CtxInspApiMessages => "API 消息",
         MessageId::CtxInspActive => "活动中",
@@ -4366,7 +4370,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CtxInspNoToolActivity => "Nenhuma atividade de ferramenta registrada ainda.",
         MessageId::CtxInspAltVHint => {
-            "Abra o cartão correspondente e pressione Alt+V para detalhes completos."
+            "Abra o cartão correspondente e pressione Alt+V (ou v) para detalhes completos."
         }
         MessageId::CtxInspCells => "células",
         MessageId::CtxInspApiMessages => "mensagens da API",
@@ -4996,7 +5000,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CtxInspNoToolActivity => "Aún no se ha registrado actividad de herramientas.",
         MessageId::CtxInspAltVHint => {
-            "Abra la tarjeta correspondiente y presione Alt+V para ver los detalles completos."
+            "Abra la tarjeta correspondiente y presione Alt+V (o v) para ver los detalles completos."
         }
         MessageId::CtxInspCells => "celdas",
         MessageId::CtxInspApiMessages => "mensajes de API",

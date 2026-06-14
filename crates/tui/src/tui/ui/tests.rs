@@ -2073,6 +2073,7 @@ fn active_tool_status_label_summarizes_live_tool_group() {
     assert!(label.contains("1 active"));
     assert!(label.contains("1 done"));
     assert!(label.contains(crate::tui::key_shortcuts::tool_details_shortcut_label()));
+    assert!(label.contains("/v"));
 }
 
 #[test]
@@ -4225,6 +4226,31 @@ fn footer_session_tokens_chip_uses_single_compact_total() {
 }
 
 #[test]
+fn footer_session_tokens_chip_shows_live_output_throughput() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.turn_started_at = Some(Instant::now() - Duration::from_secs(10));
+    app.streaming_output_token_estimate = 125;
+
+    let text = spans_text(&footer_session_tokens_spans(&app));
+
+    assert_eq!(text, "tok live \u{00B7} out ~12/s live");
+}
+
+#[test]
+fn footer_session_tokens_chip_shows_last_reported_output_throughput() {
+    let mut app = create_test_app();
+    app.session.total_input_tokens = 1_000;
+    app.session.total_output_tokens = 240;
+    app.session.last_output_throughput =
+        crate::resource_telemetry::TokenThroughput::new(240, Duration::from_secs(12));
+
+    let text = spans_text(&footer_session_tokens_spans(&app));
+
+    assert_eq!(text, "tok 1.2k \u{00B7} out 20/s last");
+}
+
+#[test]
 fn format_context_budget_caps_overflow_display() {
     assert_eq!(format_context_budget(5_000, 128_000), "5.0k/128.0k");
     assert_eq!(format_context_budget(250_000, 128_000), ">128.0k/128.0k");
@@ -6148,7 +6174,7 @@ fn detail_target_prefers_visible_tool_card() {
     let expected = format!(
         "{} Activity: find · {} raw",
         crate::tui::key_shortcuts::activity_shortcut_label(),
-        crate::tui::key_shortcuts::tool_details_shortcut_label()
+        crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
     );
     assert_eq!(
         selected_detail_footer_label(&app).as_deref(),
@@ -6203,7 +6229,7 @@ fn activity_footer_hint_uses_details_for_subagent_cards() {
     let expected = format!(
         "{} Activity: sub-agent · {} details",
         crate::tui::key_shortcuts::activity_shortcut_label(),
-        crate::tui::key_shortcuts::tool_details_shortcut_label()
+        crate::tui::key_shortcuts::tool_details_shortcut_hint_label()
     );
     assert_eq!(
         selected_detail_footer_label(&app).as_deref(),
