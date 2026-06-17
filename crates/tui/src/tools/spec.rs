@@ -491,6 +491,7 @@ impl ToolContext {
         workspace_canonical: &Path,
     ) -> Result<PathBuf, ToolError> {
         let workspace_normalized = normalize_path(workspace_canonical);
+        let workspace_plain = normalize_path(&self.workspace);
         let mut existing_ancestor = candidate.clone();
         let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
 
@@ -508,6 +509,7 @@ impl ToolContext {
                 }
             }
         }
+        let ancestor_normalized = normalize_path(&existing_ancestor);
 
         let canonical_ancestor = if existing_ancestor.exists() {
             existing_ancestor
@@ -523,6 +525,14 @@ impl ToolContext {
             canonical.push(part);
         }
         let canonical = normalize_path(&canonical);
+
+        if self.follow_symlinks {
+            if ancestor_normalized.starts_with(&workspace_plain)
+                || ancestor_normalized.starts_with(&workspace_normalized)
+            {
+                return Ok(canonical);
+            }
+        }
 
         // Validate it's under workspace, OR is under a user-trusted external
         // path (`/trust add <path>` from the slash command, persisted in
@@ -775,6 +785,8 @@ pub trait ToolSpec: Send + Sync {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
     #[test]
@@ -888,6 +900,29 @@ mod tests {
             .resolve_path(other_file.to_str().unwrap())
             .expect_err("untrusted path must error");
         assert!(matches!(err, ToolError::PathEscape { .. }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tool_context_follow_symlinks_allows_nonexistent_path_under_workspace_symlink() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(outside.join("target")).expect("mkdir outside target");
+        symlink(outside.join("target"), workspace.join("linked")).expect("symlink");
+
+        let ctx = ToolContext::new(workspace).with_follow_symlinks(true);
+        let resolved = ctx
+            .resolve_path("linked/new.txt")
+            .expect("path under workspace symlink should resolve");
+
+        let expected = outside
+            .join("target")
+            .canonicalize()
+            .expect("canonical target")
+            .join("new.txt");
+        assert_eq!(resolved, normalize_path(&expected));
     }
 
     #[test]

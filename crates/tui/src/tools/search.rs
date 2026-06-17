@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -341,11 +342,16 @@ fn collect_files(
     follow_symlinks: bool,
 ) -> Result<Vec<PathBuf>, ToolError> {
     let mut files = Vec::new();
+    let mut visited_dirs = HashSet::new();
     check_cancelled(cancel_token)?;
 
     if root.is_file() {
         files.push(root.to_path_buf());
         return Ok(files);
+    }
+
+    if follow_symlinks && let Ok(canonical_root) = root.canonicalize() {
+        visited_dirs.insert(canonical_root);
     }
 
     collect_files_recursive(
@@ -356,6 +362,7 @@ fn collect_files(
         cancel_token,
         &mut files,
         follow_symlinks,
+        &mut visited_dirs,
     )?;
     Ok(files)
 }
@@ -368,6 +375,7 @@ fn collect_files_recursive(
     cancel_token: Option<&CancellationToken>,
     files: &mut Vec<PathBuf>,
     follow_symlinks: bool,
+    visited_dirs: &mut HashSet<PathBuf>,
 ) -> Result<(), ToolError> {
     check_cancelled(cancel_token)?;
 
@@ -417,6 +425,15 @@ fn collect_files_recursive(
         };
 
         if effective_type.is_dir() {
+            if follow_symlinks {
+                let canonical_dir = match path.canonicalize() {
+                    Ok(canonical) => canonical,
+                    Err(_) => continue,
+                };
+                if !visited_dirs.insert(canonical_dir) {
+                    continue;
+                }
+            }
             collect_files_recursive(
                 root,
                 &path,
@@ -425,6 +442,7 @@ fn collect_files_recursive(
                 cancel_token,
                 files,
                 follow_symlinks,
+                visited_dirs,
             )?;
         } else if effective_type.is_file() {
             // Check inclusions (if any specified)
@@ -759,6 +777,31 @@ mod tests {
         let parsed: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(parsed["total_matches"].as_u64().unwrap(), 0);
         assert_eq!(parsed["files_searched"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_grep_files_follow_symlinks_avoids_directory_cycles() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let real_dir = workspace.join("real");
+        fs::create_dir_all(&real_dir).expect("mkdir");
+        fs::write(real_dir.join("needle.txt"), "NEEDLE\n").expect("write");
+        std::os::unix::fs::symlink(&workspace, real_dir.join("loop")).expect("symlink loop");
+
+        let ctx = ToolContext::new(workspace).with_follow_symlinks(true);
+        let tool = GrepFilesTool;
+        let result = tool
+            .execute(json!({"pattern": "NEEDLE"}), &ctx)
+            .await
+            .expect("execute");
+
+        assert!(result.success);
+        let parsed: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(parsed["total_matches"].as_u64().unwrap(), 1);
+        assert_eq!(parsed["files_searched"].as_u64().unwrap(), 1);
+        let matches = parsed["matches"].as_array().unwrap();
+        assert!(matches[0]["file"].as_str().unwrap().ends_with("needle.txt"));
     }
 
     #[tokio::test]
