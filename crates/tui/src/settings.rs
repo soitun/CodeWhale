@@ -134,8 +134,13 @@ impl TuiPrefs {
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read tui.toml from {}", path.display()))?;
-        let prefs: TuiPrefs = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse tui.toml from {}", path.display()))?;
+        let prefs: TuiPrefs = match toml::from_str(&content) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to parse {} (using defaults): {e:#}", path.display());
+                return Ok(Self::default());
+            }
+        };
         Ok(prefs)
     }
 
@@ -408,9 +413,16 @@ impl Settings {
         } else {
             let content = std::fs::read_to_string(&read_path)
                 .with_context(|| format!("Failed to read settings from {}", read_path.display()))?;
-            let mut s: Settings = toml::from_str(&content).with_context(|| {
-                format!("Failed to parse settings from {}", read_path.display())
-            })?;
+            let mut s: Settings = match toml::from_str(&content) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse {} (using defaults): {e:#}",
+                        read_path.display()
+                    );
+                    return Ok(Self::default());
+                }
+            };
             s.default_mode = normalize_mode(&s.default_mode).to_string();
             s.composer_density = normalize_composer_density(&s.composer_density).to_string();
             s.transcript_spacing = normalize_transcript_spacing(&s.transcript_spacing).to_string();
