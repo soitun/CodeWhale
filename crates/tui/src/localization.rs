@@ -1456,7 +1456,7 @@ fn english(id: MessageId) -> &'static str {
         }
         MessageId::CmdSlopDescription => "Inspect or export the SlopLedger",
         MessageId::CmdStashDescription => {
-            "Park or restore a composer draft (Ctrl+S to push, /stash list/pop)"
+            "Park or restore a composer draft (Ctrl+S sends queued follow-up first; otherwise stash, /stash list/pop)"
         }
         MessageId::CmdStatusDescription => "Show runtime session status",
         MessageId::CmdStatuslineDescription => "Configure which items appear in the footer",
@@ -1558,7 +1558,9 @@ fn english(id: MessageId) -> &'static str {
             "Delete character before / after the cursor, or remove selected attachment"
         }
         MessageId::KbClearDraft => "Clear the current draft",
-        MessageId::KbStashDraft => "Stash the current draft (`/stash pop` to restore)",
+        MessageId::KbStashDraft => {
+            "Send queued follow-up first; otherwise stash current draft (`/stash pop` to restore)"
+        }
         MessageId::KbSearchHistory => "Search prompt history and recover local drafts",
         MessageId::KbInsertNewline => "Insert a newline in the composer",
         MessageId::KbSendDraft => "Send the current draft",
