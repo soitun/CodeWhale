@@ -3,13 +3,16 @@
 use super::CommandResult;
 use crate::config::{
     ApiProvider, COMMON_DEEPSEEK_MODELS, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS,
-    DEFAULT_XIAOMI_MIMO_BASE_URL, MAX_STREAM_CHUNK_TIMEOUT_SECS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
+    DEFAULT_SUBAGENT_API_TIMEOUT_SECS, DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+    DEFAULT_XIAOMI_MIMO_BASE_URL, MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
+    MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENTS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
+    MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, SubagentsConfig,
     XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key,
     normalize_model_name_for_provider,
 };
 use crate::config_persistence::{
     persist_provider_base_url_key, persist_root_bool_key, persist_root_string_key,
-    persist_tui_integer_key,
+    persist_subagents_bool_key, persist_subagents_integer_key, persist_tui_integer_key,
 };
 use crate::config_ui::{ConfigUiMode, parse_mode};
 use crate::localization::resolve_locale;
@@ -56,6 +59,14 @@ pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     if raw.is_empty() {
         return show_config(app, None);
     }
+    let mut raw_words = raw.splitn(2, char::is_whitespace);
+    if raw_words
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case("subagents"))
+    {
+        let rest = raw_words.next().unwrap_or("").trim();
+        return subagents_config_command(app, rest);
+    }
     let parts: Vec<&str> = raw.splitn(2, ' ').collect();
     if parts.len() == 1 {
         // Single arg: editor-mode shortcut OR show-value request.
@@ -87,6 +98,9 @@ pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
 /// Show the current value of a single setting.
 fn show_single_setting(app: &App, key: &str) -> CommandResult {
     let key = key.to_lowercase();
+    if let Some(subagent_key) = key.strip_prefix("subagents.") {
+        return show_subagents_setting(app, subagent_key);
+    }
     fn locale_display(l: crate::localization::Locale) -> &'static str {
         match l {
             crate::localization::Locale::En => "en",
@@ -427,9 +441,410 @@ fn stream_chunk_timeout_value_label(raw: u64, resolved: u64) -> String {
     }
 }
 
+fn subagents_config_command(app: &mut App, raw: &str) -> CommandResult {
+    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
+    if persist {
+        tokens.pop();
+    }
+
+    match tokens.as_slice() {
+        [] | ["status"] => subagents_status(app),
+        ["on"] | ["enable"] | ["enabled"] => {
+            set_subagents_config_value(app, "enabled", "true", persist)
+        }
+        ["off"] | ["disable"] | ["disabled"] => {
+            set_subagents_config_value(app, "enabled", "false", persist)
+        }
+        [key] => show_subagents_setting(app, key),
+        [key, value] => set_subagents_config_value(app, key, value, persist),
+        _ => CommandResult::error(
+            "Usage: /config subagents [status|on|off|enabled|max_concurrent|max_depth|launch_concurrency|api_timeout_secs|heartbeat_timeout_secs <value>] [--save]",
+        ),
+    }
+}
+
+fn load_command_config(app: &App) -> Result<Config, String> {
+    Config::load(app.config_path.clone(), app.config_profile.as_deref())
+        .map_err(|err| format!("Failed to load config: {err}"))
+}
+
+fn subagents_status(app: &App) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "(unresolved)".to_string());
+    let disabled_reason = config.subagents_disabled_reason();
+    let subagents = config.subagents.as_ref();
+    let explicit_enabled = subagents.and_then(|cfg| cfg.enabled);
+    let raw_max_concurrent = subagents.and_then(|cfg| cfg.max_concurrent);
+    let raw_max_depth = subagents.and_then(|cfg| cfg.max_depth);
+    let raw_launch = subagents.and_then(|cfg| cfg.launch_concurrency);
+    let raw_api = subagents.and_then(|cfg| cfg.api_timeout_secs);
+    let raw_heartbeat = subagents.and_then(|cfg| cfg.heartbeat_timeout_secs);
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Sub-agents: {}",
+        disabled_reason
+            .map(|reason| format!("disabled ({reason})"))
+            .unwrap_or_else(|| "enabled".to_string())
+    ));
+    lines.push(format!("Config path: {path}"));
+    lines.push(format!(
+        "subagents.enabled = {}",
+        explicit_enabled
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default true".to_string())
+    ));
+    lines.push(format!(
+        "subagents.max_concurrent = {} (resolved {})",
+        option_display(raw_max_concurrent),
+        config.max_subagents()
+    ));
+    lines.push(format!(
+        "subagents.max_depth = {} (resolved {})",
+        option_display(raw_max_depth),
+        config.subagent_max_spawn_depth()
+    ));
+    lines.push(format!(
+        "subagents.launch_concurrency = {} (resolved {})",
+        option_display(raw_launch),
+        config.launch_concurrency()
+    ));
+    lines.push(format!(
+        "subagents.api_timeout_secs = {} (resolved {})",
+        option_display(raw_api),
+        config.subagent_api_timeout_secs()
+    ));
+    lines.push(format!(
+        "subagents.heartbeat_timeout_secs = {} (resolved {})",
+        option_display(raw_heartbeat),
+        config.subagent_heartbeat_timeout_secs()
+    ));
+    CommandResult::message(lines.join("\n"))
+}
+
+fn show_subagents_setting(app: &App, key: &str) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let Some(key) = canonical_subagents_key(key) else {
+        return CommandResult::error(format!(
+            "Unknown subagents setting '{key}'. Use `/config subagents status`."
+        ));
+    };
+    let subagents = config.subagents.as_ref();
+    let value = match key {
+        "enabled" => subagents
+            .and_then(|cfg| cfg.enabled)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default true".to_string()),
+        "max_concurrent" => format!(
+            "{} (resolved {})",
+            option_display(subagents.and_then(|cfg| cfg.max_concurrent)),
+            config.max_subagents()
+        ),
+        "max_depth" => format!(
+            "{} (resolved {})",
+            option_display(subagents.and_then(|cfg| cfg.max_depth)),
+            config.subagent_max_spawn_depth()
+        ),
+        "launch_concurrency" => format!(
+            "{} (resolved {})",
+            option_display(subagents.and_then(|cfg| cfg.launch_concurrency)),
+            config.launch_concurrency()
+        ),
+        "api_timeout_secs" => format!(
+            "{} (resolved {})",
+            option_display(subagents.and_then(|cfg| cfg.api_timeout_secs)),
+            config.subagent_api_timeout_secs()
+        ),
+        "heartbeat_timeout_secs" => format!(
+            "{} (resolved {})",
+            option_display(subagents.and_then(|cfg| cfg.heartbeat_timeout_secs)),
+            config.subagent_heartbeat_timeout_secs()
+        ),
+        _ => unreachable!("canonical subagent key"),
+    };
+    CommandResult::message(format!("subagents.{key} = {value}"))
+}
+
+fn option_display<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn canonical_subagents_key(key: &str) -> Option<&'static str> {
+    let normalized = key.trim().to_ascii_lowercase();
+    let key = normalized
+        .strip_prefix("subagents.")
+        .unwrap_or(normalized.as_str());
+    match key {
+        "enabled" | "enable" => Some("enabled"),
+        "max_concurrent" | "max_subagents" | "concurrency" | "cap" => Some("max_concurrent"),
+        "max_depth" | "depth" | "spawn_depth" => Some("max_depth"),
+        "launch_concurrency" | "launches" | "launch" => Some("launch_concurrency"),
+        "api_timeout_secs" | "api_timeout" | "step_timeout_secs" => Some("api_timeout_secs"),
+        "heartbeat_timeout_secs" | "heartbeat_timeout" | "heartbeat" => {
+            Some("heartbeat_timeout_secs")
+        }
+        _ => None,
+    }
+}
+
+fn set_subagents_config_value(
+    app: &mut App,
+    key: &str,
+    value: &str,
+    persist: bool,
+) -> CommandResult {
+    let Some(key) = canonical_subagents_key(key) else {
+        return CommandResult::error(format!(
+            "Unknown subagents setting '{key}'. Use `/config subagents status`."
+        ));
+    };
+    let mut config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let current_max_subagents = config.max_subagents() as u64;
+    let subagents = config
+        .subagents
+        .get_or_insert_with(SubagentsConfig::default);
+
+    let mut note = None;
+    let save_result = match key {
+        "enabled" => {
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(err) => return CommandResult::error(err),
+            };
+            subagents.enabled = Some(enabled);
+            if persist {
+                Some(persist_subagents_bool_key(
+                    app.config_path.as_deref(),
+                    "enabled",
+                    enabled,
+                ))
+            } else {
+                None
+            }
+        }
+        "max_concurrent" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let clamped = raw.min(MAX_SUBAGENTS as u64);
+            if clamped != raw {
+                note = Some(format!("clamped from {raw} to {clamped}"));
+            }
+            subagents.max_concurrent = Some(clamped as usize);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "max_concurrent",
+                    clamped,
+                ))
+            } else {
+                None
+            }
+        }
+        "max_depth" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let ceiling = u64::from(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+            let clamped = raw.min(ceiling);
+            if clamped != raw {
+                note = Some(format!("clamped from {raw} to {clamped}"));
+            }
+            subagents.max_depth = Some(clamped as u32);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "max_depth",
+                    clamped,
+                ))
+            } else {
+                None
+            }
+        }
+        "launch_concurrency" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let clamped = raw.clamp(1, current_max_subagents);
+            if clamped != raw {
+                note = Some(format!("clamped from {raw} to {clamped}"));
+            }
+            subagents.launch_concurrency = Some(clamped as usize);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "launch_concurrency",
+                    clamped,
+                ))
+            } else {
+                None
+            }
+        }
+        "api_timeout_secs" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let stored = if raw == 0 {
+                0
+            } else {
+                raw.clamp(MIN_SUBAGENT_API_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS)
+            };
+            if stored != raw {
+                note = Some(format!("clamped from {raw} to {stored}"));
+            }
+            subagents.api_timeout_secs = Some(stored);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "api_timeout_secs",
+                    stored,
+                ))
+            } else {
+                None
+            }
+        }
+        "heartbeat_timeout_secs" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let stored = if raw == 0 {
+                0
+            } else {
+                raw.clamp(
+                    MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+                    MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+                )
+            };
+            if stored != raw {
+                note = Some(format!("clamped from {raw} to {stored}"));
+            }
+            subagents.heartbeat_timeout_secs = Some(stored);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "heartbeat_timeout_secs",
+                    stored,
+                ))
+            } else {
+                None
+            }
+        }
+        _ => unreachable!("canonical subagent key"),
+    };
+
+    let save_suffix = if let Some(result) = save_result {
+        match result {
+            Ok(path) => format!("saved to {}", path.display()),
+            Err(err) => return CommandResult::error(format!("Failed to save: {err}")),
+        }
+    } else {
+        "session only, add --save to persist".to_string()
+    };
+
+    if key == "max_concurrent" {
+        app.max_subagents = config.max_subagents();
+    }
+    let display_value = subagents_config_display_value(&config, key);
+    let note = note.map(|note| format!("; {note}")).unwrap_or_default();
+    CommandResult::with_message_and_action(
+        format!(
+            "subagents.{key} = {display_value} ({save_suffix}; runtime updated for subsequent turns{note})"
+        ),
+        subagents_runtime_action(app, &config),
+    )
+}
+
+fn parse_subagents_u64(key: &str, value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("subagents.{key} must be a whole number"))
+}
+
+fn subagents_config_display_value(config: &Config, key: &str) -> String {
+    let subagents = config.subagents.as_ref();
+    match key {
+        "enabled" => subagents
+            .and_then(|cfg| cfg.enabled)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default true".to_string()),
+        "max_concurrent" => {
+            if subagents.and_then(|cfg| cfg.max_concurrent) == Some(0) {
+                "0 (disabled)".to_string()
+            } else {
+                config.max_subagents().to_string()
+            }
+        }
+        "max_depth" => {
+            if subagents.and_then(|cfg| cfg.max_depth) == Some(0) {
+                "0 (agent tool disabled)".to_string()
+            } else {
+                config.subagent_max_spawn_depth().to_string()
+            }
+        }
+        "launch_concurrency" => config.launch_concurrency().to_string(),
+        "api_timeout_secs" => {
+            let raw = subagents.and_then(|cfg| cfg.api_timeout_secs);
+            if raw == Some(0) {
+                format!("0 (default {DEFAULT_SUBAGENT_API_TIMEOUT_SECS})")
+            } else {
+                config.subagent_api_timeout_secs().to_string()
+            }
+        }
+        "heartbeat_timeout_secs" => {
+            let raw = subagents.and_then(|cfg| cfg.heartbeat_timeout_secs);
+            if raw == Some(0) {
+                format!("0 (default {DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS})")
+            } else {
+                config.subagent_heartbeat_timeout_secs().to_string()
+            }
+        }
+        _ => unreachable!("canonical subagent key"),
+    }
+}
+
+fn subagents_runtime_action(app: &App, config: &Config) -> AppAction {
+    let max_subagents = app.max_subagents.clamp(1, MAX_SUBAGENTS);
+    let launch_concurrency = config
+        .subagents
+        .as_ref()
+        .and_then(|cfg| cfg.launch_concurrency.or(cfg.interactive_max_launch_legacy))
+        .unwrap_or(max_subagents)
+        .clamp(1, max_subagents);
+    AppAction::UpdateSubagentRuntimeConfig {
+        enabled: config.subagents_enabled(),
+        max_subagents,
+        launch_concurrency,
+        max_spawn_depth: config.subagent_max_spawn_depth(),
+        api_timeout_secs: config.subagent_api_timeout_secs(),
+        heartbeat_timeout_secs: config.subagent_heartbeat_timeout_secs(),
+    }
+}
+
 /// Modify a setting at runtime
 pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
     let key = key.to_lowercase();
+    if let Some(subagent_key) = key.strip_prefix("subagents.") {
+        return set_subagents_config_value(app, subagent_key, value, persist);
+    }
 
     match key.as_str() {
         "model" => {
@@ -1649,6 +2064,98 @@ mod tests {
         assert!(!app.allow_shell);
         let msg = result.message.unwrap();
         assert!(msg.contains("Failed to parse boolean 'maybe'"));
+    }
+
+    #[test]
+    fn config_command_subagents_off_save_persists_and_updates_runtime() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-subagents-off-save-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("custom-config.toml");
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        let result = config_command(&mut app, Some("subagents off --save"));
+        let msg = result.message.unwrap();
+        let saved = fs::read_to_string(&config_path).unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("subagents.enabled = false"));
+        assert!(msg.contains("saved to"));
+        assert!(saved.contains("[subagents]"));
+        assert!(saved.contains("enabled = false"));
+        match result.action {
+            Some(AppAction::UpdateSubagentRuntimeConfig { enabled, .. }) => {
+                assert!(!enabled);
+            }
+            other => panic!("expected subagent runtime update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_command_subagents_depth_save_clamps_to_ceiling() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-subagents-depth-save-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("custom-config.toml");
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        let result = config_command(&mut app, Some("subagents max_depth 99 --save"));
+        let msg = result.message.unwrap();
+        let saved = fs::read_to_string(&config_path).unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("subagents.max_depth = 3"));
+        assert!(msg.contains("clamped from 99 to 3"));
+        assert!(saved.contains("max_depth = 3"));
+        match result.action {
+            Some(AppAction::UpdateSubagentRuntimeConfig {
+                max_spawn_depth, ..
+            }) => {
+                assert_eq!(max_spawn_depth, codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+            }
+            other => panic!("expected subagent runtime update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_command_subagents_status_shows_raw_and_resolved_values() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-subagents-status-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[subagents]
+enabled = true
+max_concurrent = 2
+max_depth = 0
+launch_concurrency = 5
+api_timeout_secs = 0
+heartbeat_timeout_secs = 1
+"#,
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        let result = config_command(&mut app, Some("subagents status"));
+        let msg = result.message.unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("Sub-agents: disabled (subagents.max_depth=0)"));
+        assert!(msg.contains("subagents.max_concurrent = 2 (resolved 2)"));
+        assert!(msg.contains("subagents.launch_concurrency = 5 (resolved 2)"));
+        assert!(msg.contains("subagents.api_timeout_secs = 0 (resolved 120)"));
+        assert!(msg.contains("subagents.heartbeat_timeout_secs = 1 (resolved 150)"));
     }
 
     #[test]

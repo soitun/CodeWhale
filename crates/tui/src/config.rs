@@ -16,7 +16,7 @@ use serde_json::json;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::audit::log_sensitive_event;
-use crate::features::{Features, FeaturesToml, is_known_feature_key};
+use crate::features::{Feature, Features, FeaturesToml, is_known_feature_key};
 use crate::hooks::HooksConfig;
 
 pub const DEFAULT_MAX_SUBAGENTS: usize = 20;
@@ -1761,6 +1761,11 @@ pub struct ContextConfig {
 /// `review`, `custom`). Per-call explicit model choices still win.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SubagentsConfig {
+    /// Top-level switch for the model-facing `agent` tool. `None` preserves
+    /// the feature-flag default; `false` hides/refuses sub-agent spawning
+    /// without changing the numeric queue/depth knobs.
+    #[serde(default)]
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
@@ -1780,12 +1785,13 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub max_concurrent: Option<usize>,
     /// How many levels of nested sub-agents the interactive `agent` tool may
-    /// spawn. `0` disables sub-agents entirely — the `agent` tool refuses to
-    /// spawn, a full opt-out; `1` allows one level, `2` two, and so on. When
-    /// unset, defaults to [`codewhale_config::DEFAULT_SPAWN_DEPTH`]; any value
-    /// is clamped to [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`]. Fleet
-    /// workers are governed separately by `[fleet.exec] max_spawn_depth`; both
-    /// share the same default and ceiling so the limit cannot drift.
+    /// spawn. `0` blocks the model-facing `agent` tool at this runtime depth;
+    /// use `[subagents] enabled = false` for the clearer durable off switch.
+    /// `1` allows one level, `2` two, and so on. When unset, defaults to
+    /// [`codewhale_config::DEFAULT_SPAWN_DEPTH`]; any value is clamped to
+    /// [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`]. Fleet workers are
+    /// governed separately by `[fleet.exec] max_spawn_depth`; both share the
+    /// same default and ceiling so the limit cannot drift.
     #[serde(default)]
     pub max_depth: Option<u32>,
     /// Number of direct (depth-1) sub-agents that may execute concurrently
@@ -3172,12 +3178,39 @@ impl Config {
             .clamp(1, MAX_SUBAGENTS)
     }
 
+    /// Whether the model-facing `agent` tool is available after applying the
+    /// feature flag, explicit `[subagents] enabled` switch, and legacy
+    /// zero-valued opt-outs.
+    #[must_use]
+    pub fn subagents_enabled(&self) -> bool {
+        self.subagents_disabled_reason().is_none()
+    }
+
+    /// Machine-readable reason sub-agents are disabled, in precedence order.
+    #[must_use]
+    pub fn subagents_disabled_reason(&self) -> Option<&'static str> {
+        if !self.features().enabled(Feature::Subagents) {
+            return Some("features.subagents=false");
+        }
+        let subagents_cfg = self.subagents.as_ref()?;
+        if subagents_cfg.enabled == Some(false) {
+            return Some("subagents.enabled=false");
+        }
+        if subagents_cfg.max_concurrent == Some(0) {
+            return Some("subagents.max_concurrent=0");
+        }
+        if subagents_cfg.max_depth == Some(0) {
+            return Some("subagents.max_depth=0");
+        }
+        None
+    }
+
     /// How many levels of nested sub-agents the interactive `agent` tool may
     /// spawn. Reads `[subagents] max_depth`; when unset it defaults to
     /// [`codewhale_config::DEFAULT_SPAWN_DEPTH`]. `0` is a valid value that
-    /// disables sub-agent spawning entirely (full opt-out). Any value is
-    /// clamped to [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`] so the
-    /// operator's choice can never exceed the hard recursion ceiling.
+    /// blocks the `agent` tool at this runtime depth. Any value is clamped to
+    /// [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`] so the operator's choice
+    /// can never exceed the hard recursion ceiling.
     #[must_use]
     pub fn subagent_max_spawn_depth(&self) -> u32 {
         self.subagents
@@ -7383,6 +7416,64 @@ action = "session.compact"
             ..Config::default()
         };
         assert_eq!(high.max_subagents(), MAX_SUBAGENTS);
+    }
+
+    #[test]
+    fn subagents_enabled_reports_disable_precedence() {
+        assert!(Config::default().subagents_enabled());
+
+        let mut feature_disabled = Config::default();
+        feature_disabled
+            .set_feature("subagents", false)
+            .expect("known feature");
+        assert!(!feature_disabled.subagents_enabled());
+        assert_eq!(
+            feature_disabled.subagents_disabled_reason(),
+            Some("features.subagents=false")
+        );
+
+        let explicit_disabled = Config {
+            subagents: Some(SubagentsConfig {
+                enabled: Some(false),
+                max_concurrent: Some(0),
+                max_depth: Some(0),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert!(!explicit_disabled.subagents_enabled());
+        assert_eq!(
+            explicit_disabled.subagents_disabled_reason(),
+            Some("subagents.enabled=false")
+        );
+
+        let zero_concurrency = Config {
+            subagents: Some(SubagentsConfig {
+                enabled: Some(true),
+                max_concurrent: Some(0),
+                max_depth: Some(1),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            zero_concurrency.subagents_disabled_reason(),
+            Some("subagents.max_concurrent=0")
+        );
+
+        let zero_depth = Config {
+            subagents: Some(SubagentsConfig {
+                enabled: Some(true),
+                max_concurrent: Some(1),
+                max_depth: Some(0),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            zero_depth.subagents_disabled_reason(),
+            Some("subagents.max_depth=0")
+        );
     }
 
     #[test]

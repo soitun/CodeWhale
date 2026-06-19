@@ -162,6 +162,16 @@ pub enum Op {
     /// Update the SSE idle timeout used for subsequent streamed turns.
     SetStreamChunkTimeout { timeout_secs: u64 },
 
+    /// Update sub-agent runtime controls for subsequent turns.
+    SetSubagentRuntimeConfig {
+        enabled: bool,
+        max_subagents: usize,
+        launch_concurrency: usize,
+        max_spawn_depth: u32,
+        api_timeout_secs: u64,
+        heartbeat_timeout_secs: u64,
+    },
+
     /// Sync engine session state (used for resume/load)
     SyncSession {
         session_id: Option<String>,

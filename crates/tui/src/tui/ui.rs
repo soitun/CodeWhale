@@ -1088,6 +1088,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         max_steps: u32::MAX,
         max_subagents: app.max_subagents,
         launch_concurrency: config.launch_concurrency(),
+        subagents_enabled: config.subagents_enabled(),
         features: config.features(),
         compaction: app.compaction_config(),
         todos: app.todos.clone(),
@@ -1097,7 +1098,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             app.hunt.token_budget,
             app.hunt.verdict.goal_status(),
         ),
-        max_spawn_depth: crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH,
+        max_spawn_depth: config.subagent_max_spawn_depth(),
         allowed_tools: app.active_allowed_tools.clone(),
         disallowed_tools: None,
         hook_executor: app.runtime_services.hook_executor.clone(),
@@ -7128,6 +7129,25 @@ async fn apply_command_result(
                     .send(Op::SetStreamChunkTimeout { timeout_secs })
                     .await;
             }
+            AppAction::UpdateSubagentRuntimeConfig {
+                enabled,
+                max_subagents,
+                launch_concurrency,
+                max_spawn_depth,
+                api_timeout_secs,
+                heartbeat_timeout_secs,
+            } => {
+                let _ = engine_handle
+                    .send(Op::SetSubagentRuntimeConfig {
+                        enabled,
+                        max_subagents,
+                        launch_concurrency,
+                        max_spawn_depth,
+                        api_timeout_secs,
+                        heartbeat_timeout_secs,
+                    })
+                    .await;
+            }
             AppAction::OpenConfigEditor(mode) => match mode {
                 ConfigUiMode::Native => {
                     if app.view_stack.top_kind() != Some(ModalKind::Config) {
@@ -8836,6 +8856,25 @@ async fn handle_view_events(
                         AppAction::UpdateStreamChunkTimeout(timeout_secs) => {
                             let _ = engine_handle
                                 .send(Op::SetStreamChunkTimeout { timeout_secs })
+                                .await;
+                        }
+                        AppAction::UpdateSubagentRuntimeConfig {
+                            enabled,
+                            max_subagents,
+                            launch_concurrency,
+                            max_spawn_depth,
+                            api_timeout_secs,
+                            heartbeat_timeout_secs,
+                        } => {
+                            let _ = engine_handle
+                                .send(Op::SetSubagentRuntimeConfig {
+                                    enabled,
+                                    max_subagents,
+                                    launch_concurrency,
+                                    max_spawn_depth,
+                                    api_timeout_secs,
+                                    heartbeat_timeout_secs,
+                                })
                                 .await;
                         }
                         AppAction::OpenConfigView => {}

@@ -1324,7 +1324,7 @@ impl Default for PersistedSubAgentState {
 }
 
 /// Default cap on sub-agent recursion depth. Override via
-/// `[runtime] max_spawn_depth = N` in config.
+/// `[subagents] max_depth = N` in config.
 ///
 /// Sourced from [`codewhale_config::DEFAULT_SPAWN_DEPTH`] so standalone
 /// sub-agents and fleet workers share ONE recursion axis (no "two moving
@@ -1550,7 +1550,7 @@ impl SubAgentRuntime {
     }
 
     /// Override the maximum spawn depth (default `DEFAULT_MAX_SPAWN_DEPTH`).
-    /// Used by config wiring (`[runtime] max_spawn_depth = N`) and tests.
+    /// Used by config wiring (`[subagents] max_depth = N`) and tests.
     #[must_use]
     #[allow(dead_code)]
     pub fn with_max_spawn_depth(mut self, max: u32) -> Self {
@@ -1846,6 +1846,30 @@ impl SubAgentManager {
             timeout
         };
         self
+    }
+
+    /// Apply live runtime limits. The launch semaphore is replaced only when
+    /// no sub-agent is currently running, because active tasks may still hold
+    /// permits from the previous semaphore.
+    pub fn update_runtime_limits(
+        &mut self,
+        max_agents: usize,
+        running_heartbeat_timeout: Duration,
+        launch_concurrency: usize,
+    ) -> bool {
+        self.max_agents = max_agents.clamp(1, crate::config::MAX_SUBAGENTS);
+        self.running_heartbeat_timeout = if running_heartbeat_timeout.is_zero() {
+            Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS)
+        } else {
+            running_heartbeat_timeout
+        };
+        if self.running_count() == 0 {
+            self.launch_gate =
+                Arc::new(Semaphore::new(launch_concurrency.clamp(1, self.max_agents)));
+            true
+        } else {
+            false
+        }
     }
 
     fn persist_state(&self) -> Result<()> {
@@ -3119,7 +3143,7 @@ async fn spawn_subagent_from_input(
     if runtime.would_exceed_depth() {
         return Err(ToolError::execution_failed(format!(
             "Sub-agent depth limit reached (current depth {}, max {}). \
-             Increase via [runtime] max_spawn_depth in config.toml.",
+             Increase via [subagents] max_depth in config.toml.",
             runtime.spawn_depth, runtime.max_spawn_depth
         )));
     }

@@ -280,6 +280,9 @@ pub struct EngineConfig {
     /// before further launches queue for a launch slot (#3095).
     /// Resolved from `[subagents] launch_concurrency`.
     pub launch_concurrency: usize,
+    /// Whether the model-facing `agent` tool is available after applying
+    /// feature flags and `[subagents]` opt-out controls.
+    pub subagents_enabled: bool,
     /// Feature flags controlling tool availability.
     pub features: Features,
     /// Auto-compaction settings for long conversations.
@@ -292,7 +295,7 @@ pub struct EngineConfig {
     pub goal_state: SharedGoalState,
     /// Maximum sub-agent recursion depth (default 3). See
     /// `SubAgentRuntime::max_spawn_depth`. Override via
-    /// `[runtime] max_spawn_depth = N` in `~/.deepseek/config.toml`.
+    /// `[subagents] max_depth = N` in `~/.codewhale/config.toml`.
     pub max_spawn_depth: u32,
     /// Per-domain network policy decider (#135). Shared across the session so
     /// session-scoped approvals (`/network allow <host>`) persist for the
@@ -403,6 +406,7 @@ impl Default for EngineConfig {
             max_steps: 100,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
             launch_concurrency: DEFAULT_MAX_SUBAGENTS,
+            subagents_enabled: true,
             features: Features::with_defaults(),
             compaction: CompactionConfig::default(),
             todos: new_shared_todo_list(),
@@ -1448,6 +1452,48 @@ impl Engine {
                             )))
                             .await;
                     }
+                    Op::SetSubagentRuntimeConfig {
+                        enabled,
+                        max_subagents,
+                        launch_concurrency,
+                        max_spawn_depth,
+                        api_timeout_secs,
+                        heartbeat_timeout_secs,
+                    } => {
+                        self.config.subagents_enabled = enabled;
+                        self.config.max_subagents =
+                            max_subagents.clamp(1, crate::config::MAX_SUBAGENTS);
+                        self.config.launch_concurrency =
+                            launch_concurrency.clamp(1, self.config.max_subagents);
+                        self.config.max_spawn_depth =
+                            max_spawn_depth.min(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+                        self.config.subagent_api_timeout = Duration::from_secs(api_timeout_secs);
+                        self.config.subagent_heartbeat_timeout =
+                            Duration::from_secs(heartbeat_timeout_secs);
+                        let launch_gate_applied = {
+                            let mut manager = self.subagent_manager.write().await;
+                            manager.update_runtime_limits(
+                                self.config.max_subagents,
+                                self.config.subagent_heartbeat_timeout,
+                                self.config.launch_concurrency,
+                            )
+                        };
+                        let launch_note = if launch_gate_applied {
+                            ""
+                        } else {
+                            "; launch_concurrency takes full effect after active sub-agents finish or the session restarts"
+                        };
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Sub-agent runtime updated: enabled={enabled}, max_subagents={}, launch_concurrency={}, max_depth={}{}",
+                                self.config.max_subagents,
+                                self.config.launch_concurrency,
+                                self.config.max_spawn_depth,
+                                launch_note
+                            )))
+                            .await;
+                    }
                     Op::SyncSession {
                         session_id,
                         messages,
@@ -2103,7 +2149,10 @@ impl Engine {
             .build_turn_tool_registry_builder(input_policy.mode, todo_list, plan_state)
             .with_dynamic_tools(&dynamic_tools);
 
-        let fork_context_for_runtime = if self.config.features.enabled(Feature::Subagents) {
+        let subagents_available =
+            self.config.subagents_enabled && self.config.features.enabled(Feature::Subagents);
+
+        let fork_context_for_runtime = if subagents_available {
             let state = StructuredState::capture(
                 input_policy.mode.label(),
                 self.config.workspace.clone(),
@@ -2128,7 +2177,7 @@ impl Engine {
         // envelopes into `Event::SubAgentMailbox` so the UI can route them
         // to the matching in-transcript card. The drainer exits naturally
         // when every cloned sender is dropped at turn-end.
-        let mailbox_for_runtime = if self.config.features.enabled(Feature::Subagents) {
+        let mailbox_for_runtime = if subagents_available {
             let cancel_token = self.cancel_token.child_token();
             let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
             let tx_event_clone = self.tx_event.clone();
@@ -2169,7 +2218,7 @@ impl Engine {
 
         let mut tool_registry = match input_policy.mode {
             AppMode::Agent | AppMode::Yolo => {
-                if self.config.features.enabled(Feature::Subagents) {
+                if subagents_available {
                     let runtime = if let Some(client) = self.deepseek_client.clone() {
                         let mut rt = SubAgentRuntime::new(
                             client,
