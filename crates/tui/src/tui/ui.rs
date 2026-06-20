@@ -265,6 +265,12 @@ enum TranslationEvent {
 // TurnComplete / focus-gain / resize. The alt-screen buffer's double-buffering
 // plus ratatui's `terminal.clear()` are sufficient to repaint cleanly.
 const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H";
+// Xterm alternate-scroll mode keeps wheel events inside the alternate-screen
+// viewport. Crossterm's mouse-capture command does not enable this DEC private
+// mode, so terminals can still scroll the host scrollback if mouse capture is
+// disabled, dropped during focus changes, or unavailable in the host.
+const ENABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007h";
+const DISABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007l";
 /// Begin synchronized update (DEC 2026): tell the terminal to defer
 /// rendering until END_SYNC_UPDATE is received. Best-effort —
 /// terminals that don't support this silently ignore the sequence.
@@ -808,6 +814,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
 
     cleanup_guard.defused = true;
     pop_keyboard_enhancement_flags(terminal.backend_mut());
+    disable_alternate_scroll_mode(terminal.backend_mut());
     execute!(terminal.backend_mut(), DisableFocusChange)?;
     disable_raw_mode()?;
     if use_alt_screen {
@@ -998,6 +1005,7 @@ impl Drop for TerminalCleanupGuard {
 
         let mut stdout = io::stdout();
         pop_keyboard_enhancement_flags(&mut stdout);
+        disable_alternate_scroll_mode(&mut stdout);
         let _ = execute!(stdout, DisableFocusChange);
         let _ = disable_raw_mode();
         if self.use_alt_screen {
@@ -9625,6 +9633,7 @@ fn pause_terminal(
     // mode. Best-effort — terminals that didn't accept the flags
     // silently ignore the pop. Matches the shutdown and panic paths.
     pop_keyboard_enhancement_flags(terminal.backend_mut());
+    disable_alternate_scroll_mode(terminal.backend_mut());
     execute!(terminal.backend_mut(), DisableFocusChange)?;
     disable_raw_mode()?;
     if use_alt_screen {
@@ -9763,6 +9772,29 @@ pub(crate) fn pop_keyboard_enhancement_flags<W: Write>(writer: &mut W) {
     let _ = execute!(writer, PopKeyboardEnhancementFlags);
 }
 
+fn set_alternate_scroll_mode<W: Write>(writer: &mut W, enabled: bool) {
+    let sequence = if enabled {
+        ENABLE_ALT_SCROLL_MODE
+    } else {
+        DISABLE_ALT_SCROLL_MODE
+    };
+    if let Err(err) = writer.write_all(sequence).and_then(|()| writer.flush()) {
+        tracing::debug!(
+            ?err,
+            enabled,
+            "alternate-scroll terminal mode change ignored"
+        );
+    }
+}
+
+fn enable_alternate_scroll_mode<W: Write>(writer: &mut W) {
+    set_alternate_scroll_mode(writer, true);
+}
+
+fn disable_alternate_scroll_mode<W: Write>(writer: &mut W) {
+    set_alternate_scroll_mode(writer, false);
+}
+
 /// Best-effort terminal restoration for emergency exit paths
 /// (panic hook, signal handlers). Mirrors the normal teardown in
 /// `run_event_loop` but tolerates any subset of modes not actually being
@@ -9773,6 +9805,7 @@ pub(crate) fn pop_keyboard_enhancement_flags<W: Write>(writer: &mut W) {
 pub fn emergency_restore_terminal() {
     let mut stdout = std::io::stdout();
     pop_keyboard_enhancement_flags(&mut stdout);
+    disable_alternate_scroll_mode(&mut stdout);
     let _ = execute!(stdout, DisableFocusChange);
     let _ = execute!(stdout, DisableBracketedPaste);
     let _ = execute!(stdout, DisableMouseCapture);
@@ -9833,6 +9866,7 @@ fn recover_terminal_modes<W: Write>(
 
     pop_keyboard_enhancement_flags(writer);
     push_keyboard_enhancement_flags(writer);
+    enable_alternate_scroll_mode(writer);
     if use_mouse_capture && let Err(err) = execute!(writer, EnableMouseCapture) {
         tracing::debug!(?err, "EnableMouseCapture ignored");
     }

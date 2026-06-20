@@ -204,6 +204,10 @@ fn recover_terminal_modes_emits_expected_csi_sequences_with_gating() {
         on.contains("\x1b[>1u") && off.contains("\x1b[>1u"),
         "Kitty keyboard disambiguation flag must be re-pushed regardless of gating"
     );
+    assert!(
+        on.contains("\x1b[?1007h") && off.contains("\x1b[?1007h"),
+        "alternate-scroll mode must be re-armed regardless of mouse-capture gating"
+    );
 
     assert!(
         on.contains("\x1b[?1000h"),
@@ -230,6 +234,17 @@ fn recover_terminal_modes_runs_without_panic_on_windows() {
     let mut buf: Vec<u8> = Vec::new();
     recover_terminal_modes(&mut buf, true, true);
     recover_terminal_modes(&mut buf, false, false);
+}
+
+#[test]
+fn alternate_scroll_mode_disable_emits_xterm_reset() {
+    let mut buf: Vec<u8> = Vec::new();
+    disable_alternate_scroll_mode(&mut buf);
+    let seq = String::from_utf8_lossy(&buf);
+    assert!(
+        seq.contains("\x1b[?1007l"),
+        "disable_alternate_scroll_mode must emit the xterm alternate-scroll reset"
+    );
 }
 
 // On Windows crossterm's PushKeyboardEnhancementFlags never writes bytes
