@@ -89,6 +89,7 @@ def main() -> None:
     parser.add_argument("--wall-timeout", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=24)
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--default-tool-timeout", type=int, default=300)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--regenerate", type=Path)
     args = parser.parse_args()
@@ -112,6 +113,7 @@ def main() -> None:
         "tasks": args.tasks,
         "models": [args.model],
         "reasoning_effort": args.reasoning_effort,
+        "default_tool_timeout": args.default_tool_timeout,
         "agent_import_path": args.agent_import_path,
         "model_by_job": {job_name: common.label_for_model(args.model, args.reasoning_effort)},
         "reasoning_effort_by_job": {job_name: args.reasoning_effort},
@@ -142,6 +144,8 @@ def main() -> None:
         f"max_steps={args.max_steps}",
         "--agent-kwarg",
         f"max_tokens={args.max_tokens}",
+        "--agent-kwarg",
+        f"default_timeout_sec={args.default_tool_timeout}",
         "--yes",
     ]
     for task in args.tasks:

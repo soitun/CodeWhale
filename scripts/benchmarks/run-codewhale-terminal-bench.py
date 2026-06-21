@@ -106,6 +106,7 @@ DENIAL_TERMS = (
 )
 ARTIFACT_INCOMPATIBLE_RE = re.compile(
     r"artifact_incompatible|error while loading shared libraries|"
+    r"cannot execute binary file|exec format error|"
     r"glibc_[0-9]|version `?glibc|version .* not found|"
     r"libssl[^\\n]*not found|libcrypto[^\\n]*not found|libdbus[^\\n]*not found|"
     r"openssl[^\\n]*(?:not found|incompatible)",
@@ -118,7 +119,10 @@ BACKGROUND_NOT_READY_RE = re.compile(
 )
 VERIFIER_ENVIRONMENT_RE = re.compile(
     r"verifier_environment_failure|verifier .*environment|grader .*environment|"
-    r"tests?/verify\\.sh: .*not found|pytest: command not found",
+    r"tests?/verify\\.sh: .*not found|pytest: command not found|"
+    r"curl: command not found|uv: command not found|"
+    r"no space left on device|not enough free space|"
+    r"invalid signature was encountered|/root/\\.local/bin/env: no such file",
     re.IGNORECASE,
 )
 CONTEXT_EXHAUSTION_RE = re.compile(
@@ -434,6 +438,7 @@ def classify_failure(row: dict[str, Any]) -> str:
             "artifact_preflight_excerpt",
             "background_error",
             "transcript_excerpt",
+            "verifier_stdout_excerpt",
         )
     )
     if ARTIFACT_INCOMPATIBLE_RE.search(evidence):
@@ -505,6 +510,7 @@ def parse_trial(trial_dir: Path, model: str, reasoning_effort: str | None = None
         "artifact_preflight_path": None,
         "artifact_preflight_excerpt": None,
         "harness_note_path": None,
+        "verifier_stdout_excerpt": None,
     }
     for log_name in (
         "codewhale.txt",
@@ -525,6 +531,9 @@ def parse_trial(trial_dir: Path, model: str, reasoning_effort: str | None = None
     harness_note_path = trial_dir / "agent" / "codewhale-harness-note.txt"
     if harness_note_path.exists():
         row["harness_note_path"] = stable_path(harness_note_path)
+    verifier_stdout = read_text_if_exists(trial_dir / "verifier" / "test-stdout.txt")
+    if verifier_stdout:
+        row["verifier_stdout_excerpt"] = short_excerpt(verifier_stdout)
     metadata = agent_result.get("metadata")
     if isinstance(metadata, dict) and row.get("reasoning_tokens") is None:
         reasoning_tokens = metadata.get("reasoning_tokens")

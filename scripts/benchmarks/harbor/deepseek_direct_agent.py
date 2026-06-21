@@ -34,6 +34,7 @@ class DeepSeekDirectAgent(BaseAgent):
         reasoning_effort: str | None = None,
         max_steps: int = 24,
         max_tokens: int = 4096,
+        default_timeout_sec: int = 300,
         base_url: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -41,6 +42,7 @@ class DeepSeekDirectAgent(BaseAgent):
         self._reasoning_effort = self._normalize_reasoning_effort(reasoning_effort)
         self._max_steps = int(max_steps)
         self._max_tokens = int(max_tokens)
+        self._default_timeout_sec = max(1, min(int(default_timeout_sec), 600))
         self._base_url = (
             base_url
             or os.environ.get("DEEPSEEK_BASE_URL")
@@ -100,7 +102,10 @@ class DeepSeekDirectAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "exec_shell",
-                    "description": "Run a shell command in the task workspace.",
+                    "description": (
+                        "Run a shell command in the task workspace. Set timeout_sec "
+                        "to 300-600 for installs, builds, tests, or long readiness checks."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -222,7 +227,7 @@ class DeepSeekDirectAgent(BaseAgent):
     ) -> str:
         if tool_name == "exec_shell":
             command = str(arguments.get("command") or "")
-            timeout_sec = int(arguments.get("timeout_sec") or 120)
+            timeout_sec = int(arguments.get("timeout_sec") or self._default_timeout_sec)
             timeout_sec = max(1, min(timeout_sec, 600))
             result = await environment.exec(
                 command,
@@ -258,6 +263,8 @@ class DeepSeekDirectAgent(BaseAgent):
         system = (
             "You are a terminal coding agent inside a benchmark container. "
             "Use the provided tools to inspect files, run commands, and write the required artifacts. "
+            "For package installs, builds, tests, services, and readiness loops, pass timeout_sec=300 "
+            "or timeout_sec=600 to exec_shell. "
             "The benchmark only grades files and container state, not prose. "
             "Do not answer with an explanation when a file must be saved. "
             "If the task asks to save a file, call write_file with the exact requested path. "
@@ -332,4 +339,5 @@ class DeepSeekDirectAgent(BaseAgent):
             "direct_deepseek_log": str(self.logs_dir / self._OUTPUT_FILENAME),
             "reasoning_effort": self._reasoning_effort,
             "reasoning_tokens": self._reasoning_tokens,
+            "default_timeout_sec": self._default_timeout_sec,
         }

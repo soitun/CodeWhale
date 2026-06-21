@@ -20,6 +20,8 @@ from harbor.models.trial.paths import EnvironmentPaths
 CODEWHALE_LINUX_BIN_ENV = "CODEWHALE_LINUX_BIN"
 CODEWHALE_TUI_LINUX_BIN_ENV = "CODEWHALE_TUI_LINUX_BIN"
 HARNESS_LIBRARY = "/usr/local/lib/codewhale-bench-harness.sh"
+APT_ENV_WRAPPER = "/usr/local/bin/apt-get"
+APT_CMD_ENV_WRAPPER = "/usr/local/bin/apt"
 HARNESS_TIMEOUTS = {
     "default_command_s": 30,
     "build_command_s": 300,
@@ -206,12 +208,29 @@ class CodeWhaleLocalAgent(BaseInstalledAgent):
             environment,
             command=(
                 "if command -v apt-get >/dev/null 2>&1; then "
+                "export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; "
+                "ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime 2>/dev/null || true; "
+                "printf '%s\\n' Etc/UTC > /etc/timezone 2>/dev/null || true; "
                 "apt-get update && "
                 "ssl_pkg=''; "
                 "if apt-cache show libssl3 >/dev/null 2>&1; then ssl_pkg=libssl3; "
                 "elif apt-cache show libssl1.1 >/dev/null 2>&1; then ssl_pkg=libssl1.1; fi; "
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y "
+                "apt-get install -y "
                 "--no-install-recommends bash ca-certificates git ripgrep libdbus-1-3 $ssl_pkg; "
+                "printf '%s\\n' '#!/usr/bin/env sh' "
+                "'export DEBIAN_FRONTEND=\"${DEBIAN_FRONTEND:-noninteractive}\"' "
+                "'export TZ=\"${TZ:-Etc/UTC}\"' "
+                "'[ -s /etc/timezone ] || printf \"%s\\n\" \"$TZ\" > /etc/timezone 2>/dev/null || true' "
+                "'ln -snf \"/usr/share/zoneinfo/$TZ\" /etc/localtime 2>/dev/null || true' "
+                "'exec /usr/bin/apt-get \"$@\"' "
+                f"> {shlex.quote(APT_ENV_WRAPPER)} && chmod 755 {shlex.quote(APT_ENV_WRAPPER)}; "
+                "printf '%s\\n' '#!/usr/bin/env sh' "
+                "'export DEBIAN_FRONTEND=\"${DEBIAN_FRONTEND:-noninteractive}\"' "
+                "'export TZ=\"${TZ:-Etc/UTC}\"' "
+                "'[ -s /etc/timezone ] || printf \"%s\\n\" \"$TZ\" > /etc/timezone 2>/dev/null || true' "
+                "'ln -snf \"/usr/share/zoneinfo/$TZ\" /etc/localtime 2>/dev/null || true' "
+                "'exec /usr/bin/apt \"$@\"' "
+                f"> {shlex.quote(APT_CMD_ENV_WRAPPER)} && chmod 755 {shlex.quote(APT_CMD_ENV_WRAPPER)}; "
                 "elif command -v apk >/dev/null 2>&1; then "
                 "apk add --no-cache bash ca-certificates git ripgrep openssl dbus-libs; "
                 "fi"
@@ -368,6 +387,7 @@ class CodeWhaleLocalAgent(BaseInstalledAgent):
             f"- Background service helpers are available with: source {HARNESS_LIBRARY}",
             "- Helpers: start_background COMMAND NAME READY_PROBE TIMEOUT_S; read_background_log NAME [LINES]; stop_background NAME; assert_ready NAME READY_PROBE TIMEOUT_S.",
             "- Timeout classes: default commands 30s, build commands 300s, background starts 600s, readiness probes 120s, verifiers 900s.",
+            "- Debian package-manager wrappers force DEBIAN_FRONTEND=noninteractive and TZ=Etc/UTC; still avoid interactive installers and use apt-get -y.",
         ]
         if task_name:
             lines.append(f"- Task name: {task_name}")
@@ -421,6 +441,8 @@ class CodeWhaleLocalAgent(BaseInstalledAgent):
         env: dict[str, str] = {
             key_env: api_key,
             "AWS_LC_SYS_NO_ASM": "1",
+            "DEBIAN_FRONTEND": "noninteractive",
+            "TZ": "Etc/UTC",
             "CODEWHALE_HOME": "/tmp/codewhale-home",
             "CODEWHALE_PROVIDER": provider,
             "CODEWHALE_MODEL": model,
@@ -437,6 +459,8 @@ class CodeWhaleLocalAgent(BaseInstalledAgent):
         config_lines = [
             f'provider = "{provider}"',
             f'default_text_model = "{model}"',
+            'default_mode = "yolo"',
+            "allow_shell = true",
         ]
         if self._reasoning_effort:
             config_lines.append(f'reasoning_effort = "{self._reasoning_effort}"')
@@ -458,6 +482,7 @@ class CodeWhaleLocalAgent(BaseInstalledAgent):
             environment,
             command=(
                 "set +e; "
+                "export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; "
                 f"{self._REMOTE_BIN} "
                 f"{config_arg}"
                 f"--provider {shlex.quote(provider)} "
