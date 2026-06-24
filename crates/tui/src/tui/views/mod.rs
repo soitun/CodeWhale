@@ -1823,7 +1823,7 @@ impl ModalView for SubAgentsView {
                 ViewAction::Emit(ViewEvent::SubAgentsRefresh)
             }
             KeyCode::Char('f') | KeyCode::Char('F') => {
-                ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                ViewAction::Emit(ViewEvent::CommandPaletteSelected {
                     action: CommandPaletteAction::ExecuteCommand {
                         command: "/fleet".to_string(),
                     },
@@ -2401,7 +2401,7 @@ mod tests {
         let action = view.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
 
         match action {
-            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+            ViewAction::Emit(ViewEvent::CommandPaletteSelected {
                 action: CommandPaletteAction::ExecuteCommand { command },
             }) => assert_eq!(command, "/fleet"),
             other => panic!("expected /fleet jump action, got {other:?}"),

@@ -291,11 +291,7 @@ impl ModalView for FleetSetupView {
         } else {
             Direction::Vertical
         };
-        let constraints = if direction == Direction::Horizontal {
-            vec![Constraint::Ratio(1, self.lanes.len() as u32); self.lanes.len()]
-        } else {
-            vec![Constraint::Length(5); self.lanes.len()]
-        };
+        let constraints = vec![Constraint::Ratio(1, self.lanes.len() as u32); self.lanes.len()];
         let areas = Layout::default()
             .direction(direction)
             .constraints(constraints)
@@ -491,7 +487,7 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                 FleetSetupRow::new(
                     "status",
                     "/fleet status",
-                    "legacy /subagents opens the same worker view",
+                    "compat /subagents opens the same worker view",
                 )
                 .tone(RowTone::Ready),
                 FleetSetupRow::new(

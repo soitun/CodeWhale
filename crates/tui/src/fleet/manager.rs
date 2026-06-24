@@ -1566,6 +1566,7 @@ mod tests {
             agent_profile: None,
             role: Some(role.to_string()),
             loadout: None,
+            model: None,
             model_class: None,
             tool_profile: None,
             tools: Vec::new(),
