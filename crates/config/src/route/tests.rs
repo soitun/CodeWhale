@@ -437,6 +437,86 @@ fn resolver_strict_direct_rejects_models_dev_offering_from_another_provider() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #3385: the DEFAULT resolver now sources the bundled Models.dev catalog asset,
+// so real provider/model facts (context windows) reach candidates.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_resolver_yields_real_facts_from_bundled_catalog() {
+    let r = RouteResolver::new();
+
+    // A GLM row (Z.ai) resolves to a real, non-default context window — proof
+    // the bundled asset feeds the default resolver rather than the old 4-row
+    // seam, which only knew deepseek/together/openrouter and left everything
+    // else at `RouteLimits::default()` (unknown).
+    let glm = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("GLM-5.2")))
+        .expect("Z.ai GLM-5.2 should resolve from the bundled catalog");
+    assert_eq!(glm.provider_kind, ProviderKind::Zai);
+    assert_eq!(glm.wire_model_id.as_str(), "GLM-5.2");
+    assert_eq!(
+        glm.limits.context_tokens,
+        Some(1_000_000),
+        "GLM-5.2 must carry its real context window, not the unknown default"
+    );
+    assert_eq!(glm.limits.output_tokens, Some(131_072));
+    assert!(glm.limits.has_known_limit());
+
+    // A Kimi row (Moonshot) likewise resolves with its real window — a model
+    // the 4-row seam never knew about at all.
+    let kimi = r
+        .resolve(&req(Some(ProviderKind::Moonshot), Some("kimi-k2.7-code")))
+        .expect("Moonshot kimi-k2.7-code should resolve from the bundled catalog");
+    assert_eq!(kimi.limits.context_tokens, Some(262_144));
+    assert_eq!(kimi.limits.output_tokens, Some(262_144));
+
+    // The asset preserves provider-scoped `cost` on the catalog row (consumed
+    // by `crate::pricing::OfferingPricing`), but this branch's resolver does not
+    // yet carry a per-offering pricing meter onto the candidate (that is the
+    // separate #3085 keystone). Asserting it stays honestly `UnknownOrStale`
+    // here documents that boundary rather than silently fabricating a price.
+    let glm51 = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.1")))
+        .expect("Z.ai glm-5.1 should resolve from the bundled catalog");
+    assert_eq!(glm51.limits.context_tokens, Some(202_752));
+    assert!(matches!(
+        glm51.pricing,
+        Some(super::candidate::PricingSku::UnknownOrStale)
+    ));
+}
+
+#[test]
+fn default_resolver_preserves_seam_canonical_joins() {
+    // The bundled asset is merged UNDER the hand seam, so the seam's curated
+    // canonical-model joins still win: a DeepSeek-native selector keeps its
+    // canonical id, and an aggregator-prefixed wire id still maps back to the
+    // canonical DeepSeek model. (This is what keeps the existing route
+    // invariants green after the asset was wired in.)
+    let r = RouteResolver::new();
+
+    let direct = r
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("deepseek-v4-pro resolves");
+    assert_eq!(
+        direct.canonical_model.as_ref().map(ModelId::as_str),
+        Some("deepseek-v4-pro")
+    );
+
+    let hosted = r
+        .resolve(&req(
+            Some(ProviderKind::Together),
+            Some("deepseek-ai/DeepSeek-V4-Pro"),
+        ))
+        .expect("together hosted deepseek resolves");
+    assert_eq!(
+        hosted.canonical_model.as_ref().map(ModelId::as_str),
+        Some("deepseek-v4-pro"),
+        "seam canonical join must survive the asset merge"
+    );
+    assert_eq!(hosted.wire_model_id.as_str(), "deepseek-ai/DeepSeek-V4-Pro");
+}
+
 #[test]
 fn resolver_deepseek_none_selector_uses_default_wire_id() {
     let r = RouteResolver::new();

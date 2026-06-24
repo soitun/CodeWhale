@@ -35,6 +35,7 @@ use super::errors::RouteError;
 use super::ids::{LogicalModelRef, ModelId, ProviderId, WireModelId};
 use super::offering::{ProviderModelOffering, RouteLimits, bundled_offerings};
 use crate::ProviderKind;
+use crate::catalog::{CatalogOffering, bundled_catalog_offerings};
 
 /// A request to resolve into an executable route.
 ///
@@ -66,9 +67,20 @@ impl Default for RouteResolver {
 
 impl RouteResolver {
     /// Construct a resolver with CodeWhale's bundled offline offerings.
+    ///
+    /// The default offerings are the committed Models.dev-shaped catalog asset
+    /// (`crate::catalog::bundled_catalog_offerings`, real context windows and
+    /// honest per-row `cost`) merged with the tiny hand seam
+    /// ([`bundled_offerings`]). The hand seam is kept and given precedence on a
+    /// `(provider, wire id)` collision: it encodes the curated canonical-model
+    /// joins the route invariants depend on (e.g. a DeepSeek-native row and the
+    /// aggregator rows that map a prefixed wire id back to `deepseek-v4-pro`),
+    /// which generated Models.dev JSON does not prove. Asset-only rows (GLM,
+    /// Kimi, MiniMax, Qwen, …) add the real provider/model facts the picker and
+    /// candidates were previously missing.
     #[must_use]
     pub fn new() -> Self {
-        Self::from_offerings(bundled_offerings())
+        Self::from_offerings(default_offerings())
     }
 
     /// Construct a resolver from a provider-scoped offering catalog.
@@ -316,6 +328,35 @@ impl RouteResolver {
                         .is_some_and(|model| model.as_str() == raw))
         })
     }
+}
+
+/// Build the default resolver offerings: the bundled Models.dev asset rows
+/// merged under the hand seam, with the seam winning a `(provider, wire id)`
+/// collision.
+///
+/// The seam is appended *after* the asset rows and de-duplicated keeping the
+/// first-seen row per identity, so seam rows (which carry the curated canonical
+/// joins and the deliberately unpriced DeepSeek-native entries the route
+/// invariants assert) shadow any asset row with the same `(provider, wire id)`.
+/// Order is otherwise preserved for deterministic resolution.
+fn default_offerings() -> Vec<ProviderModelOffering> {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let asset_rows = bundled_catalog_offerings()
+        .iter()
+        .map(CatalogOffering::to_offering)
+        .collect::<Vec<_>>();
+    // Seam first so it wins identity collisions, then asset-only rows follow.
+    for offering in bundled_offerings().into_iter().chain(asset_rows) {
+        let key = (
+            offering.provider.as_str().to_string(),
+            offering.wire_model_id.as_str().to_string(),
+        );
+        if seen.insert(key) {
+            out.push(offering);
+        }
+    }
+    out
 }
 
 /// The resolver's minimal route classification.

@@ -140,6 +140,39 @@ impl CatalogOffering {
     }
 }
 
+/// The committed, network-free Models.dev-shaped catalog snapshot (#3385).
+///
+/// Curated from in-repo verified model facts (context windows / output caps from
+/// `crates/tui/src/models.rs`, USD pricing from `crates/tui/src/pricing.rs`)
+/// rather than a live models.dev dump, because the public catalog tracks a
+/// different real model generation than CodeWhale's curated forward-dated set.
+/// This is the default bundled layer feeding [`crate::route::RouteResolver::new`].
+/// See the asset's `_meta` block for sourcing and the honesty rule on omitted
+/// pricing (`UnknownOrStale`, never a fabricated zero).
+pub const BUNDLED_MODELS_DEV_JSON: &str = include_str!("../assets/models_dev.bundled.json");
+
+/// Parse the committed bundled Models.dev snapshot.
+///
+/// # Panics
+/// Panics only if the committed asset is not valid Models.dev JSON. The
+/// `tests::bundled_asset_parses` guard makes that a build-time failure, so this
+/// never panics in shipped builds.
+#[must_use]
+pub fn bundled_models_dev_catalog() -> ModelsDevCatalog {
+    ModelsDevCatalog::parse_json(BUNDLED_MODELS_DEV_JSON)
+        .expect("committed bundled Models.dev asset must be valid JSON")
+}
+
+/// The bundled-layer [`CatalogOffering`] rows from the committed snapshot.
+///
+/// This is the real-data source for the default resolver: every text-chat row
+/// from [`BUNDLED_MODELS_DEV_JSON`], tagged [`CatalogSource::Bundled`], with
+/// honest limits and pricing.
+#[must_use]
+pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
+    bundled_offerings_from_models_dev(&bundled_models_dev_catalog())
+}
+
 /// Hydrate bundled [`CatalogOffering`] rows from a parsed Models.dev catalog.
 ///
 /// Only text-chat offerings are emitted (TTS/audio-only rows stay in the parsed
