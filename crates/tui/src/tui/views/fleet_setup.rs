@@ -323,6 +323,8 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
             subtitle: "role and persona",
             rows: vec![
                 FleetSetupRow::new("manager", "plan/split", "coordinates queued Fleet work"),
+                FleetSetupRow::new("main", "orchestrator", "default parent for the whole Fleet")
+                    .tone(RowTone::Ready),
                 FleetSetupRow::new("scout", "read-first", "research and repo reconnaissance"),
                 FleetSetupRow::new("builder", "write", "implements bounded changes"),
                 FleetSetupRow::new("reviewer", "read-only", "checks regressions and tests"),
@@ -351,6 +353,12 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                 FleetSetupRow::new("balanced", "default", "normal build/review work")
                     .tone(RowTone::Ready),
                 FleetSetupRow::new("strong", "hard", "security, release, architecture"),
+                FleetSetupRow::new(
+                    "fixed model",
+                    "profile model",
+                    "visible model id on active route",
+                )
+                .tone(RowTone::Current),
                 FleetSetupRow::new("deep-reasoning", "debug", "higher reasoning when supported"),
                 FleetSetupRow::new("tool-heavy", "operator", "shell and artifact workflows"),
             ],
@@ -409,8 +417,8 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
             ],
         },
         FleetSetupLane {
-            title: "5 Depth",
-            subtitle: "fanout and recursion",
+            title: "5 Org",
+            subtitle: "team and recursion",
             rows: vec![
                 FleetSetupRow::new(
                     "role workers",
@@ -438,6 +446,27 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                     format!("ceiling {}", codewhale_config::MAX_SPAWN_DEPTH_CEILING),
                 )
                 .tone(RowTone::Ready),
+                FleetSetupRow::new(
+                    "starter team",
+                    "3 scout + 1 each",
+                    "builder, reviewer, verifier, synthesizer, operator",
+                )
+                .tone(RowTone::Ready),
+                FleetSetupRow::new(
+                    "scout tree",
+                    "3 scouts",
+                    "recursive exploration splits breadth-first",
+                ),
+                FleetSetupRow::new(
+                    "builder tree",
+                    "builder+reviewer",
+                    "implementation gets paired review by default",
+                ),
+                FleetSetupRow::new(
+                    "verifier tree",
+                    "verifier+reviewer",
+                    "test evidence gets interpreted before handoff",
+                ),
                 FleetSetupRow::new(
                     "budget",
                     token_budget,
@@ -588,9 +617,17 @@ fn profile_authoring_prompt(snapshot: &FleetSetupSnapshot) -> String {
          - description\n\
          - role_hint\n\
          - model_class_hint (inherit, fast, balanced, deep-reasoning, code, review, or tool-heavy)\n\
+         - model (optional explicit model id on the active/resolved route; omit for loadout auto)\n\
          - [instructions].text\n\
          - [tools].posture = \"read-only\"\n\n\
-         Do not include provider, model, base_url, api_key, auth, secrets, trust, allow_shell, or approval_required=false.\n\
+         Do not include provider, base_url, api_key, auth, secrets, trust, allow_shell, or approval_required=false.\n\
+         If model is present, keep it to a visible model id such as deepseek-v4-pro or glm-5.2.\n\
+         Default operational shape:\n\
+         - one main orchestrator profile manages the Fleet run\n\
+         - starter team is 3 scout/explore workers plus 1 builder, 1 reviewer, 1 verifier, 1 synthesizer, and 1 operator\n\
+         - scout recursion can split into 3 scout children\n\
+         - builder recursion can split into builder + reviewer children\n\
+         - verifier recursion can split into verifier + reviewer children\n\n\
          Keep the profile permission-narrowing and compatible with recursive Fleet role workers.",
         provider = snapshot.provider,
         model = snapshot.model,
@@ -653,7 +690,9 @@ mod tests {
             }) => {
                 assert!(text.contains("Target path: .codewhale/agents/reviewer.toml"));
                 assert!(text.contains("provider = DeepSeek"));
-                assert!(text.contains("Do not include provider, model, base_url"));
+                assert!(text.contains("model (optional explicit model id"));
+                assert!(text.contains("Do not include provider, base_url"));
+                assert!(text.contains("starter team is 3 scout/explore workers"));
             }
             other => panic!("expected profile prompt insertion, got {other:?}"),
         }
@@ -665,6 +704,7 @@ mod tests {
 
         assert!(view.profile_prompt().contains("Current route context only"));
         assert!(view.profile_prompt().contains("permission-narrowing"));
+        assert!(view.profile_prompt().contains("builder + reviewer"));
     }
 
     #[test]
@@ -677,6 +717,12 @@ mod tests {
                 .iter()
                 .flat_map(|lane| lane.rows.iter())
                 .any(|row| row.value == "Fleet -> exec")
+        );
+        assert!(
+            view.lanes
+                .iter()
+                .flat_map(|lane| lane.rows.iter())
+                .any(|row| row.label == "starter team" && row.value == "3 scout + 1 each")
         );
         view.render(Rect::new(0, 0, 120, 32), &mut buf);
         let rendered = buf
