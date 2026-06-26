@@ -92,7 +92,10 @@ async function verifyAsset(url, label) {
   }
 }
 
-async function downloadText(url) {
+async function downloadText(url, redirects = 0) {
+  if (redirects > 10) {
+    throw new Error(`Too many redirects while downloading ${url}`);
+  }
   const client = url.startsWith("https:") ? https : http;
   return new Promise((resolve, reject) => {
     client
@@ -107,7 +110,8 @@ async function downloadText(url) {
           const status = res.statusCode || 0;
           if (status >= 300 && status < 400 && res.headers.location) {
             const next = new URL(res.headers.location, url).toString();
-            resolve(downloadText(next));
+            res.resume();
+            resolve(downloadText(next, redirects + 1));
             return;
           }
           if (status !== 200) {
@@ -125,7 +129,10 @@ async function downloadText(url) {
   });
 }
 
-async function downloadJson(url) {
+async function downloadJson(url, redirects = 0) {
+  if (redirects > 10) {
+    throw new Error(`Too many redirects while downloading ${url}`);
+  }
   const client = url.startsWith("https:") ? https : http;
   return new Promise((resolve, reject) => {
     const headers = {
@@ -142,7 +149,8 @@ async function downloadJson(url) {
         const status = res.statusCode || 0;
         if (status >= 300 && status < 400 && res.headers.location) {
           const next = new URL(res.headers.location, url).toString();
-          resolve(downloadJson(next));
+          res.resume();
+          resolve(downloadJson(next, redirects + 1));
           return;
         }
         const chunks = [];
@@ -207,7 +215,7 @@ async function findReleaseWorkflowRun(repo, tag, tagSha) {
   if (!match) {
     throw new Error(
       `No successful release.yml workflow run found for ${tag} at ${tagSha}. ` +
-        "Rerun the Release workflow before publishing npm.",
+        "Rerun the Release workflow before publishing npm, or increase the verifier's last-100-runs search window.",
     );
   }
   return match;

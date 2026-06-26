@@ -108,7 +108,7 @@ run_summary="$(
     --jq 'map(select(.headSha == env.TAG_SHA and .conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))) | sort_by(.updatedAt) | last | if . == null then empty else "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.url)" end'
 )"
 if [[ -z "${run_summary}" ]]; then
-  echo "No successful Release workflow run found for ${tag} at ${local_sha}." >&2
+  echo "No successful Release workflow run found in the last 100 Release runs for ${tag} at ${local_sha}." >&2
   echo "Rerun the Release workflow before publishing Cargo/npm." >&2
   exit 1
 fi

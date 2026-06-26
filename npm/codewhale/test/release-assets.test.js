@@ -51,6 +51,18 @@ test("assertReleaseAssetsFresh rejects assets older than the release workflow ru
   );
 });
 
+test("assertReleaseAssetsFresh rejects non-uploaded assets", () => {
+  assert.throws(
+    () =>
+      assertReleaseAssetsFresh(
+        { assets: [{ name: "codewhale-linux-x64", state: "new", updated_at: "2026-06-26T00:10:00Z" }] },
+        ["codewhale-linux-x64"],
+        { database_id: 123, created_at: "2026-06-26T00:00:00Z" },
+      ),
+    /asset set is stale/,
+  );
+});
+
 test("assertReleaseAssetsFresh accepts assets updated by the release workflow run", () => {
   assert.doesNotThrow(() =>
     assertReleaseAssetsFresh(
