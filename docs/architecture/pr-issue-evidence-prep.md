@@ -1,6 +1,6 @@
 # EPIC Evidence Preparation
 
-## EPIC-002 Closure Evidence (Draft — Phase 6 In Progress)
+## EPIC-002 Closure Evidence (Draft — Phase 7 In Progress)
 
 **Epic:** EPIC-002 — Command Single Responsibility Extraction
 **Related EPIC:** [#2870](https://github.com/Hmbown/CodeWhale/issues/2870)
@@ -8,10 +8,11 @@
 [#2851](https://github.com/Hmbown/CodeWhale/pull/2851),
 [#2887](https://github.com/Hmbown/CodeWhale/pull/2887)
 
-This section records draft EPIC-002 closure evidence prepared during Phase 6.
-Layer 4.4 (FEAT-008) is currently in Phase 6 code review. Evidence below is
-Phase 6 current-state — final pass/fail markers replace these placeholders only
-after the Phase 8 final gate.
+This section records draft EPIC-002 closure evidence prepared during Phase 6
+and polished during Phase 7. Layer 4.4 (FEAT-008) is currently in Phase 7
+(Testing and Polish). All evidence below has been verified by running the
+documented commands in the current working tree. Final pass/fail markers for
+the PR body replace these placeholders only after the Phase 8 final gate.
 
 ### PR References
 
@@ -25,17 +26,17 @@ after the Phase 8 final gate.
 
 | AT ID | Check | Result |
 |-------|-------|--------|
-| AT-001 | `cargo test -p codewhale-tui --test epic_acceptance_harness` | ⬜ Draft (Phase 6 current evidence) |
-| AT-002 | `every_registered_command_dispatches_to_a_handler` | ⬜ Draft (Phase 6 current evidence) |
-| AT-003 | `every_command_alias_dispatches_to_a_handler` | ⬜ Draft (Phase 6 current evidence) |
-| AT-004 | Help/palette/completion surface tests | ⬜ Draft (Phase 6 current evidence) |
-| AT-005 | `dispatch_prefers_user_command_over_builtin_with_same_name` | ⬜ Draft (Phase 6 current evidence) |
-| AT-006 | `hidden_user_commands_still_dispatch_directly` | ⬜ Draft (Phase 6 current evidence) |
-| AT-007 | `unknown_command_suggests_nearest_match` | ⬜ Draft (Phase 6 current evidence) |
-| AT-008 | `command_registry_has_unique_names_and_aliases` | ⬜ Draft (Phase 6 current evidence) |
-| AT-009 | `command_ownership_contract_is_enforced` | ⬜ Draft (Phase 6 current evidence) |
-| AT-010 | Cleanup inventory — no undocumented migration paths | ⬜ Draft (Phase 6 current evidence) |
-| AT-011 | Final closure matrix | ⬜ Draft (Phase 6 current evidence — subject to Phase 8 final gate) |
+| AT-001 | `cargo test -p codewhale-tui --test epic_acceptance_harness` | ⬜ Draft (Phase 7 current evidence) |
+| AT-002 | `every_registered_command_dispatches_to_a_handler` | ⬜ Draft (Phase 7 current evidence) |
+| AT-003 | `every_command_alias_dispatches_to_a_handler` | ⬜ Draft (Phase 7 current evidence) |
+| AT-004 | Help/palette/completion surface tests (21 palette, 18 completion) | ⬜ Draft (Phase 7 current evidence) |
+| AT-005 | `dispatch_prefers_user_command_over_builtin_with_same_name` | ⬜ Draft (Phase 7 current evidence) |
+| AT-006 | `hidden_user_commands_still_dispatch_directly` | ⬜ Draft (Phase 7 current evidence) |
+| AT-007 | `unknown_command_suggests_nearest_match` | ⬜ Draft (Phase 7 current evidence) |
+| AT-008 | `command_registry_has_unique_names_and_aliases` | ⬜ Draft (Phase 7 current evidence) |
+| AT-009 | `command_ownership_contract_is_enforced` | ⬜ Draft (Phase 7 current evidence) |
+| AT-010 | Cleanup inventory — no undocumented migration paths | ⬜ Draft (Phase 7 current evidence) |
+| AT-011 | Final closure matrix | ⬜ Draft (Phase 7 current evidence — subject to Phase 8 final gate) |
 
 ### Permanent Exceptions
 
@@ -55,17 +56,72 @@ after the Phase 8 final gate.
 
 ### Validation
 
-- `cargo fmt --all -- --check`
-- `cargo check -p codewhale-tui`
-- `cargo test -p codewhale-tui commands::tests:: -- --test-threads=1` (60 passed)
-- `cargo test -p codewhale-tui command_palette -- --test-threads=1` (21 passed)
-- `cargo test -p codewhale-tui slash_completion -- --test-threads=1` (18 passed)
-- `cargo test -p codewhale-tui user_registry -- --test-threads=1` (18 passed)
-- `cargo test -p codewhale-tui --test epic_acceptance_harness` (1 passed)
-- `cargo test -p codewhale-tui --test eval_smoke_acceptance -- --test-threads=1` (1 passed) — eval smoke, not AT-004 command-surface evidence
-- `cargo test -p codewhale-tui --test core_session_command_extraction -- --test-threads=1` (1 passed)
-- `cargo test -p codewhale-tui --test plugin_e2e_acceptance -- --test-threads=1` (4 passed)
-- `git diff --check`
+- `cargo fmt --all -- --check` — clean
+- `cargo check -p codewhale-tui` — clean (no errors, no warnings)
+- `cargo test -p codewhale-tui --bin codewhale-tui commands::tests:: -- --test-threads=1` — 60 passed
+- `cargo test -p codewhale-tui --bin codewhale-tui command_palette -- --test-threads=1` — 21 passed
+- `cargo test -p codewhale-tui --bin codewhale-tui slash_completion -- --test-threads=1` — 18 passed
+- `cargo test -p codewhale-tui --bin codewhale-tui user_registry -- --test-threads=1` — 18 passed
+- `cargo test -p codewhale-tui --test epic_acceptance_harness` — 1 passed (3/3 Gherkin steps)
+- `cargo test -p codewhale-tui --test eval_smoke_acceptance -- --test-threads=1` — 1 passed (4/4 Gherkin steps) — eval smoke, not AT-004 command-surface evidence
+- `cargo test -p codewhale-tui --test core_session_command_extraction -- --test-threads=1` — 1 passed (4/4 Gherkin steps)
+- `cargo test -p codewhale-tui --test plugin_e2e_acceptance -- --test-threads=1` — 4 passed
+- `git diff --check` — clean
+
+## FEAT-008 PR Summary Draft
+
+**Title:** Layer 4.4: Registry cleanup, docs, and full validation (FEAT-008)
+
+```markdown
+Refs #2870.
+
+## Summary
+
+FEAT-008 completes EPIC-002 (Command Single Responsibility Extraction) by
+removing transition-only command scaffolding, validating command and alias
+uniqueness, updating source-verified command architecture documentation, and
+preparing auditable EPIC closure evidence. This is Layer 4.4 (the final cleanup
+and validation layer).
+
+## Changes
+
+- No temporary adapters, duplicate command lists, or migration-only dispatch
+  paths remain — all §3.2 inventory items confirmed as permanent exceptions or
+  not present after Phase 3 source verification.
+- Command registration ownership follows the final layered model:
+  top-level group registration → group-owned command modules → command-level
+  metadata and behavior.
+- Architecture documentation (`docs/architecture/command-dispatch.md`) updated
+  to reflect the finalized dispatch flow and permanent exceptions.
+- PR/issue evidence document (`docs/architecture/pr-issue-evidence-prep.md`)
+  prepared for EPIC-002 closure.
+
+## Gherkin / Acceptance Coverage
+
+- `tests/epic_acceptance_harness.rs` — 1 scenario, 3 steps (AT-001)
+- `tests/core_session_command_extraction.rs` — 1 scenario, 4 steps (AT-002/003)
+- `tests/eval_smoke_acceptance.rs` — 1 scenario, 4 steps (not AT-004 evidence)
+- `tests/plugin_e2e_acceptance.rs` — 4 tests (AT-002/003/004 coverage)
+- AT-008: `command_registry_has_unique_names_and_aliases` — enforced by test
+- AT-009: `command_ownership_contract_is_enforced` — enforced by test
+- AT-010: cleanup inventory verified — no undocumented migration paths
+
+## Validation
+
+- `cargo fmt --all -- --check` — clean
+- `cargo check -p codewhale-tui` — clean
+- `cargo test -p codewhale-tui --bin codewhale-tui commands::tests:: -- --test-threads=1` — 60 passed
+- `cargo test -p codewhale-tui --bin codewhale-tui command_palette -- --test-threads=1` — 21 passed
+- `cargo test -p codewhale-tui --bin codewhale-tui slash_completion -- --test-threads=1` — 18 passed
+- `cargo test -p codewhale-tui --bin codewhale-tui user_registry -- --test-threads=1` — 18 passed
+- `cargo test -p codewhale-tui --test epic_acceptance_harness` — 1 passed
+- `cargo test -p codewhale-tui --test eval_smoke_acceptance -- --test-threads=1` — 1 passed
+- `cargo test -p codewhale-tui --test core_session_command_extraction -- --test-threads=1` — 1 passed
+- `cargo test -p codewhale-tui --test plugin_e2e_acceptance -- --test-threads=1` — 4 passed
+- `git diff --check` — clean
+
+Paulo Aboim Pinto
+```
 
 ---
 
