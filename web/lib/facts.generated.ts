@@ -161,6 +161,11 @@ export const FACTS: RepoFacts = {
       "env": "ANTHROPIC_API_KEY"
     },
     {
+      "id": "openmodel",
+      "label": "OpenModel",
+      "env": "OPENMODEL_API_KEY"
+    },
+    {
       "id": "zai",
       "label": "Z.ai",
       "env": "ZAI_API_KEY / Z_AI_API_KEY"
@@ -179,6 +184,11 @@ export const FACTS: RepoFacts = {
       "id": "deepinfra",
       "label": "DeepInfra",
       "env": "DEEPINFRA_API_KEY / DEEPINFRA_TOKEN"
+    },
+    {
+      "id": "sakana",
+      "label": "Sakana AI",
+      "env": "FUGU_API_KEY / SAKANA_API_KEY"
     }
   ],
   "defaultModel": "deepseek-v4-pro",

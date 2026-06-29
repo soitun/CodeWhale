@@ -103,6 +103,8 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
     Zai: { id: "zai", label: "Z.ai", env: "ZAI_API_KEY / Z_AI_API_KEY" },
     Stepfun: { id: "stepfun", label: "StepFun", env: "STEPFUN_API_KEY / STEP_API_KEY" },
     Minimax: { id: "minimax", label: "MiniMax", env: "MINIMAX_API_KEY" },
+    Openmodel: { id: "openmodel", label: "OpenModel", env: "OPENMODEL_API_KEY" },
+    Sakana: { id: "sakana", label: "Sakana AI", env: "FUGU_API_KEY / SAKANA_API_KEY" },
   };
   // Log loudly on unmapped variants so a new provider can never be silently
   // dropped from the drift-derived facts again. DeepseekCN (#1104) and the
