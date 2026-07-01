@@ -1076,6 +1076,12 @@ impl ModalView for SetupWizardView {
             KeyCode::Char('g') if self.selected_step() == SetupStep::Constitution => {
                 self.commit_guided_constitution()
             }
+            KeyCode::Char('p') if self.selected_step() == SetupStep::ProviderModel => {
+                ViewAction::EmitAndClose(ViewEvent::SetupOpenProviderRequested)
+            }
+            KeyCode::Char('m') if self.selected_step() == SetupStep::ProviderModel => {
+                ViewAction::EmitAndClose(ViewEvent::SetupOpenModelRequested)
+            }
             KeyCode::Char(key @ ('1' | '2' | '3' | '4' | '5' | '6'))
                 if self.selected_step() == SetupStep::Constitution =>
             {
@@ -1151,6 +1157,15 @@ impl ModalView for SetupWizardView {
             hints.push(ActionHint::new(
                 "G",
                 tr(self.locale, MessageId::SetupActionGuided).to_string(),
+            ));
+        } else if self.selected_step() == SetupStep::ProviderModel {
+            hints.push(ActionHint::new(
+                "P",
+                tr(self.locale, MessageId::SetupActionProvider).to_string(),
+            ));
+            hints.push(ActionHint::new(
+                "M",
+                tr(self.locale, MessageId::SetupActionModel).to_string(),
             ));
         }
         hints.extend([
@@ -1784,6 +1799,28 @@ mod tests {
         assert!(matches!(action, ViewAction::None));
         assert_eq!(view.selected_step(), SetupStep::ProviderModel);
         assert_eq!(view.state().constitution_choice, ConstitutionChoice::Unset);
+    }
+
+    #[test]
+    fn provider_model_step_hands_off_to_existing_route_surfaces() {
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::ProviderModel,
+            SetupRuntimeFacts::default(),
+        );
+
+        let provider_action = view.handle_key(key(KeyCode::Char('p')));
+        assert!(matches!(
+            provider_action,
+            ViewAction::EmitAndClose(ViewEvent::SetupOpenProviderRequested)
+        ));
+
+        let model_action = view.handle_key(key(KeyCode::Char('m')));
+        assert!(matches!(
+            model_action,
+            ViewAction::EmitAndClose(ViewEvent::SetupOpenModelRequested)
+        ));
     }
 
     #[test]

@@ -623,6 +623,12 @@ pub enum ViewEvent {
         state: codewhale_config::SetupState,
         message: String,
     },
+    /// Emitted by the setup Provider/Model readiness card to hand off to the
+    /// existing provider manager instead of duplicating provider auth UI.
+    SetupOpenProviderRequested,
+    /// Emitted by the setup Provider/Model readiness card to hand off to the
+    /// existing provider-qualified model route picker.
+    SetupOpenModelRequested,
     /// Emitted by the `/hotbar` setup wizard when the user chooses "Disable
     /// Hotbar". The host persists `hotbar = []` and hides the panel.
     HotbarDisableRequested,

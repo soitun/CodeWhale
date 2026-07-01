@@ -9608,6 +9608,28 @@ async fn handle_view_events(
                         Some(format!("User constitution could not be saved: {err}"));
                 }
             },
+            ViewEvent::SetupOpenProviderRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                    let runtime_status = query_provider_runtime_status(engine_handle).await;
+                    app.view_stack.push(
+                        crate::tui::provider_picker::ProviderPickerView::new_with_runtime_status(
+                            app.api_provider,
+                            config,
+                            runtime_status,
+                        ),
+                    );
+                    app.status_message =
+                        Some("Provider setup opened from /setup readiness.".to_string());
+                }
+            }
+            ViewEvent::SetupOpenModelRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+                    app.view_stack
+                        .push(crate::tui::model_picker::ModelPickerView::new(app, config));
+                    app.status_message =
+                        Some("Model route picker opened from /setup readiness.".to_string());
+                }
+            }
             ViewEvent::HotbarDisableRequested => {
                 disable_hotbar(app, config);
             }
