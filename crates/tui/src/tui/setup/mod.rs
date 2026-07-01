@@ -29,8 +29,8 @@ use crate::tui::views::{
 };
 
 use codewhale_config::{
-    ConstitutionChoice, ConstitutionValidity, InheritedConfigFacts, SetupState, SetupStep,
-    StepEntry, StepStatus, UserConstitution, UserConstitutionLoad,
+    ConstitutionChoice, ConstitutionSource, ConstitutionValidity, InheritedConfigFacts, SetupState,
+    SetupStep, StepEntry, StepStatus, UserConstitution, UserConstitutionLoad,
 };
 
 /// Target lane for the once-per-version constitution checkpoint. The workspace
@@ -147,8 +147,22 @@ impl SetupWizardView {
     }
 
     #[must_use]
+    pub fn new_at(state: SetupState, locale: Locale, step: SetupStep) -> Self {
+        Self {
+            state,
+            selected: step_index(step),
+            locale,
+        }
+    }
+
+    #[must_use]
     pub fn new_for_app(app: &App, config: &Config) -> Self {
         Self::new(load_setup_state_for_app(app, config), app.ui_locale)
+    }
+
+    #[must_use]
+    pub fn new_for_app_at(app: &App, config: &Config, step: SetupStep) -> Self {
+        Self::new_at(load_setup_state_for_app(app, config), app.ui_locale, step)
     }
 
     #[cfg(test)]
@@ -189,6 +203,9 @@ impl SetupWizardView {
         };
         let mut state = self.state.clone();
         state.complete_constitution_checkpoint(CONSTITUTION_CHECKPOINT_VERSION, choice);
+        state.constitution_source = ConstitutionSource::Bundled;
+        state.constitution_validity = ConstitutionValidity::Unknown;
+        state.constitution_preview_hash = None;
         state.set_step(
             SetupStep::Constitution,
             StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)

@@ -318,6 +318,10 @@ fn load_handoff_block(workspace: &Path) -> Option<String> {
 /// Load the structured user-global constitution, if present, and render it as
 /// its own model-facing block.
 fn load_user_constitution_block() -> Option<String> {
+    if user_constitution_disabled_by_setup_state() {
+        return None;
+    }
+
     let path = match codewhale_config::UserConstitution::path() {
         Ok(path) => path,
         Err(err) => {
@@ -350,6 +354,25 @@ fn load_user_constitution_block() -> Option<String> {
                 path.display()
             );
             None
+        }
+    }
+}
+
+fn user_constitution_disabled_by_setup_state() -> bool {
+    match codewhale_config::SetupState::load() {
+        Ok(Some(state)) => matches!(
+            state.constitution_choice,
+            codewhale_config::ConstitutionChoice::Bundled
+                | codewhale_config::ConstitutionChoice::Deferred
+                | codewhale_config::ConstitutionChoice::ExpertOverride
+        ),
+        Ok(None) => false,
+        Err(err) => {
+            tracing::warn!(
+                target: "prompts",
+                "could not resolve setup-state path while loading user constitution: {err:#}"
+            );
+            false
         }
     }
 }
@@ -2482,6 +2505,55 @@ mod tests {
             !prompt.contains(&codewhale_home.display().to_string()),
             "prompt should use the stable user-global source label, not a device-specific home path"
         );
+    }
+
+    #[test]
+    fn bundled_choice_disables_user_global_constitution_block() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let codewhale_home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+
+        let constitution = codewhale_config::UserConstitution {
+            about: Some("This file should stay inactive.".to_string()),
+            ..codewhale_config::UserConstitution::default()
+        };
+        constitution
+            .save_to(
+                &codewhale_home
+                    .join(codewhale_config::user_constitution::USER_CONSTITUTION_FILE_NAME),
+            )
+            .expect("save user constitution");
+
+        let mut state = codewhale_config::SetupState::default();
+        state.complete_constitution_checkpoint(
+            "0.8.67",
+            codewhale_config::ConstitutionChoice::Bundled,
+        );
+        state
+            .save_to(&codewhale_home.join(codewhale_config::setup_state::SETUP_STATE_FILE_NAME))
+            .expect("save setup state");
+
+        let prompt = match system_prompt_for_mode_with_context_skills_and_session(
+            &workspace,
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                project_context_pack_enabled: false,
+                ..PromptSessionContext::default()
+            },
+        ) {
+            SystemPrompt::Text(text) => text,
+            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
+        };
+
+        assert!(!prompt.contains("<codewhale_user_constitution"));
+        assert!(!prompt.contains("This file should stay inactive."));
     }
 
     #[test]

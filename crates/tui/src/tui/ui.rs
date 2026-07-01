@@ -741,6 +741,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     }
 
     if options.resume_session_id.is_none()
+        && !options.skip_onboarding
         && app.onboarding == crate::tui::app::OnboardingState::None
         && crate::tui::setup::should_open_update_checkpoint(&app, config)
         && app.view_stack.top_kind() != Some(ModalKind::SetupWizard)
@@ -7611,6 +7612,15 @@ async fn apply_command_result(
                         .push(crate::tui::setup::SetupWizardView::new_for_app(app, config));
                 }
             }
+            AppAction::OpenSetupWizardAt { step } => {
+                if app.view_stack.top_kind() != Some(ModalKind::SetupWizard) {
+                    app.view_stack
+                        .push(crate::tui::setup::SetupWizardView::new_for_app_at(
+                            app, config, step,
+                        ));
+                }
+            }
+            AppAction::UseBundledConstitution => use_bundled_constitution(app, config),
             AppAction::DisableHotbar => disable_hotbar(app, config),
             AppAction::RestoreHotbarDefaults => restore_hotbar_defaults(app, config),
             AppAction::OpenExternalUrl { url, label } => match open_external_url(&url) {
@@ -9092,6 +9102,42 @@ fn apply_hotbar_setup_saved(
             app.status_message = Some(format!("Failed to save Hotbar bindings: {err}"));
             app.add_message(HistoryCell::System {
                 content: format!("Failed to save Hotbar bindings: {err}"),
+            });
+        }
+    }
+    app.needs_redraw = true;
+}
+
+fn use_bundled_constitution(app: &mut App, config: &Config) {
+    let mut state = crate::tui::setup::load_setup_state_for_app(app, config);
+    state.complete_constitution_checkpoint(
+        crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
+        codewhale_config::ConstitutionChoice::Bundled,
+    );
+    state.constitution_source = codewhale_config::ConstitutionSource::Bundled;
+    state.constitution_validity = codewhale_config::ConstitutionValidity::Unknown;
+    state.constitution_preview_hash = None;
+    state.set_step(
+        codewhale_config::SetupStep::Constitution,
+        codewhale_config::StepEntry::new(
+            codewhale_config::StepStatus::Verified,
+            true,
+            crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
+        )
+        .with_result("bundled/default constitution"),
+    );
+
+    match state.save() {
+        Ok(()) => {
+            app.status_message = Some(
+                "Using the bundled/default constitution; custom user-global law is inactive."
+                    .to_string(),
+            );
+        }
+        Err(err) => {
+            app.status_message = Some(format!("Failed to save constitution choice: {err}"));
+            app.add_message(HistoryCell::System {
+                content: format!("Failed to save constitution choice: {err}"),
             });
         }
     }

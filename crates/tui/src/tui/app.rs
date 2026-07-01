@@ -5914,6 +5914,12 @@ pub enum AppAction {
     OpenHotbarSetup,
     /// Open the constitution-first `/setup` wizard shell.
     OpenSetupWizard,
+    /// Open the constitution-first `/setup` wizard at a specific step.
+    OpenSetupWizardAt {
+        step: codewhale_config::SetupStep,
+    },
+    /// Record that the bundled/default constitution should be used.
+    UseBundledConstitution,
     /// Disable the Hotbar: persist `hotbar = []` and clear the live slots.
     DisableHotbar,
     /// Restore the default recommended Hotbar slots: remove the `hotbar` key so

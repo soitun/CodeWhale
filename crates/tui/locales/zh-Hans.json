@@ -69,6 +69,7 @@
   "CmdCompactDescription": "触发上下文压缩以释放空间",
   "CmdPurgeDescription": "让 Agent 分析对话历史，精确保留有用信息并移除冗余内容",
   "CmdConfigDescription": "打开交互式配置编辑器",
+  "CmdConstitutionDescription": "管理长期宪法规则与预览",
   "CmdContextDescription": "打开紧凑会话上下文检查器",
   "CmdCostDescription": "显示本次会话的费用明细",
   "CmdDiffDescription": "显示会话开始以来的文件变更",

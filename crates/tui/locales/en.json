@@ -70,6 +70,7 @@
     "CmdCompactDescription": "Trigger context compaction to free up space",
     "CmdPurgeDescription": "Let the agent surgically prune conversation history to free context space",
     "CmdConfigDescription": "Open interactive configuration editor",
+    "CmdConstitutionDescription": "Manage standing constitution law and previews",
     "CmdContextDescription": "Open context inspector or source-map report",
     "CmdCostDescription": "Show session cost breakdown",
     "CmdDiffDescription": "Show file changes since session start",
