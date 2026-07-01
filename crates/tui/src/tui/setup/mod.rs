@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Widget, Wrap},
 };
 
-use crate::config::{Config, has_api_key};
+use crate::config::{Config, has_api_key, has_api_key_for};
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::prompts::CONSTITUTION_OVERRIDE_FILE;
@@ -29,8 +29,9 @@ use crate::tui::views::{
 };
 
 use codewhale_config::{
-    ConstitutionChoice, ConstitutionSource, ConstitutionValidity, InheritedConfigFacts, SetupState,
-    SetupStep, StepEntry, StepStatus, UserConstitution, UserConstitutionLoad,
+    ConstitutionChoice, ConstitutionSource, ConstitutionValidity, InheritedConfigFacts,
+    RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus, UserConstitution,
+    UserConstitutionLoad,
 };
 
 /// Target lane for the once-per-version constitution checkpoint. The workspace
@@ -133,9 +134,129 @@ pub struct SetupWizardView {
     state: SetupState,
     selected: usize,
     locale: Locale,
+    facts: SetupRuntimeFacts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupRuntimeFacts {
+    provider: String,
+    model: String,
+    auth: String,
+    health: String,
+    provider_ready: bool,
+    provider_result: String,
+    work_intent: String,
+    approval: String,
+    shell: String,
+    trust: String,
+    sandbox: String,
+    network: String,
+    runtime_result: String,
+}
+
+impl Default for SetupRuntimeFacts {
+    fn default() -> Self {
+        Self {
+            provider: "not loaded".to_string(),
+            model: "not loaded".to_string(),
+            auth: "not checked".to_string(),
+            health: "not checked".to_string(),
+            provider_ready: false,
+            provider_result: "provider/model not loaded".to_string(),
+            work_intent: "not loaded".to_string(),
+            approval: "not loaded".to_string(),
+            shell: "not loaded".to_string(),
+            trust: "not loaded".to_string(),
+            sandbox: "not configured".to_string(),
+            network: "not configured".to_string(),
+            runtime_result: "runtime posture not loaded".to_string(),
+        }
+    }
+}
+
+impl SetupRuntimeFacts {
+    fn from_app_config(app: &App, config: &Config) -> Self {
+        let provider_ready = has_api_key_for(config, app.api_provider);
+        let model = app.model_display_label();
+        let provider = app.api_provider.display_name().to_string();
+        let auth = if provider_ready {
+            "present or local runtime".to_string()
+        } else {
+            "missing for active provider".to_string()
+        };
+        let health = if provider_ready {
+            "ready for first turn; live validation remains with /provider"
+        } else {
+            "needs key or local runtime before first turn"
+        }
+        .to_string();
+        let provider_result = format!(
+            "provider={}, model={}, auth={}, health={}",
+            app.api_provider.as_str(),
+            model,
+            if provider_ready {
+                "present/local"
+            } else {
+                "missing"
+            },
+            if provider_ready {
+                "not checked"
+            } else {
+                "needs action"
+            }
+        );
+        let shell = if app.allow_shell { "enabled" } else { "hidden" }.to_string();
+        let trust = if app.trust_mode {
+            "trusted workspace / writes allowed by posture"
+        } else {
+            "workspace trust not elevated"
+        }
+        .to_string();
+        let sandbox = config
+            .sandbox_mode
+            .as_deref()
+            .filter(|mode| !mode.trim().is_empty())
+            .unwrap_or("default")
+            .to_string();
+        let network = config
+            .network
+            .as_ref()
+            .map_or("prompt by default".to_string(), |policy| {
+                format!("default {}", policy.default)
+            });
+        let runtime_result = format!(
+            "intent={}, approval={}, shell={}, trust={}, sandbox={}, network={}",
+            app.mode.as_setting(),
+            app.approval_mode.label().to_ascii_lowercase(),
+            if app.allow_shell { "enabled" } else { "hidden" },
+            if app.trust_mode {
+                "trusted"
+            } else {
+                "workspace"
+            },
+            sandbox,
+            network
+        );
+        Self {
+            provider,
+            model,
+            auth,
+            health,
+            provider_ready,
+            provider_result,
+            work_intent: app.mode.display_name().to_string(),
+            approval: app.approval_mode.label().to_ascii_lowercase(),
+            shell,
+            trust,
+            sandbox,
+            network,
+            runtime_result,
+        }
+    }
 }
 
 impl SetupWizardView {
+    #[cfg(test)]
     #[must_use]
     pub fn new(state: SetupState, locale: Locale) -> Self {
         let selected = initial_step_index(&state);
@@ -143,26 +264,27 @@ impl SetupWizardView {
             state,
             selected,
             locale,
-        }
-    }
-
-    #[must_use]
-    pub fn new_at(state: SetupState, locale: Locale, step: SetupStep) -> Self {
-        Self {
-            state,
-            selected: step_index(step),
-            locale,
+            facts: SetupRuntimeFacts::default(),
         }
     }
 
     #[must_use]
     pub fn new_for_app(app: &App, config: &Config) -> Self {
-        Self::new(load_setup_state_for_app(app, config), app.ui_locale)
+        Self::new_with_facts(
+            load_setup_state_for_app(app, config),
+            app.ui_locale,
+            SetupRuntimeFacts::from_app_config(app, config),
+        )
     }
 
     #[must_use]
     pub fn new_for_app_at(app: &App, config: &Config, step: SetupStep) -> Self {
-        Self::new_at(load_setup_state_for_app(app, config), app.ui_locale, step)
+        Self::new_at_with_facts(
+            load_setup_state_for_app(app, config),
+            app.ui_locale,
+            step,
+            SetupRuntimeFacts::from_app_config(app, config),
+        )
     }
 
     #[cfg(test)]
@@ -180,6 +302,30 @@ impl SetupWizardView {
         &STEP_SPECS[self.selected]
     }
 
+    fn new_with_facts(state: SetupState, locale: Locale, facts: SetupRuntimeFacts) -> Self {
+        let selected = initial_step_index(&state);
+        Self {
+            state,
+            selected,
+            locale,
+            facts,
+        }
+    }
+
+    fn new_at_with_facts(
+        state: SetupState,
+        locale: Locale,
+        step: SetupStep,
+        facts: SetupRuntimeFacts,
+    ) -> Self {
+        Self {
+            state,
+            selected: step_index(step),
+            locale,
+            facts,
+        }
+    }
+
     fn move_next(&mut self) {
         self.selected = (self.selected + 1).min(STEP_SPECS.len().saturating_sub(1));
     }
@@ -194,6 +340,47 @@ impl SetupWizardView {
             spec.id(),
             StepEntry::new(status, spec.required(), CONSTITUTION_CHECKPOINT_VERSION),
         );
+    }
+
+    fn commit_provider_model_review(&mut self) -> ViewAction {
+        let status = if self.facts.provider_ready {
+            StepStatus::Verified
+        } else {
+            StepStatus::NeedsAction
+        };
+        let mut state = self.state.clone();
+        state.set_step(
+            SetupStep::ProviderModel,
+            StepEntry::new(status, true, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(self.facts.provider_result.clone()),
+        );
+        self.state = state.clone();
+        self.move_next();
+        let message_id = if status == StepStatus::Verified {
+            MessageId::SetupProviderModelReviewed
+        } else {
+            MessageId::SetupProviderModelNeedsActionSaved
+        };
+        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, message_id).to_string(),
+        })
+    }
+
+    fn commit_runtime_posture_review(&mut self) -> ViewAction {
+        let mut state = self.state.clone();
+        state.runtime_posture_source = RuntimePostureSource::Confirmed;
+        state.set_step(
+            SetupStep::TrustSandbox,
+            StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(self.facts.runtime_result.clone()),
+        );
+        self.state = state.clone();
+        self.move_next();
+        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, MessageId::SetupRuntimePostureReviewed).to_string(),
+        })
     }
 
     fn commit_constitution(&self, kind: SetupCommitKind) -> ViewAction {
@@ -280,6 +467,12 @@ impl ModalView for SetupWizardView {
             KeyCode::Enter if self.selected_step() == SetupStep::Constitution => {
                 self.commit_constitution(SetupCommitKind::BundledConstitution)
             }
+            KeyCode::Enter if self.selected_step() == SetupStep::ProviderModel => {
+                self.commit_provider_model_review()
+            }
+            KeyCode::Enter if self.selected_step() == SetupStep::TrustSandbox => {
+                self.commit_runtime_posture_review()
+            }
             KeyCode::Enter => {
                 self.move_next();
                 ViewAction::None
@@ -352,12 +545,14 @@ impl ModalView for SetupWizardView {
             Line::from(""),
             Line::from(Span::raw(tr(self.locale, spec.why_id()).to_string())),
             Line::from(""),
-            Line::from(Span::styled(
-                tr(self.locale, MessageId::SetupWizardWhy).to_string(),
-                Style::default().fg(palette::TEXT_MUTED),
-            )),
-            Line::from(""),
         ];
+        lines.extend(self.selected_step_detail_lines());
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            tr(self.locale, MessageId::SetupWizardWhy).to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+        lines.push(Line::from(""));
         for (idx, step) in STEP_SPECS.iter().enumerate() {
             let selected = idx == self.selected;
             let marker = if selected { ">" } else { " " };
@@ -389,6 +584,68 @@ impl ModalView for SetupWizardView {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+impl SetupWizardView {
+    fn selected_step_detail_lines(&self) -> Vec<Line<'static>> {
+        match self.selected_step() {
+            SetupStep::ProviderModel => self.provider_model_detail_lines(),
+            SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn provider_model_detail_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            self.detail_row(MessageId::SetupCardRouteLabel, &self.facts.provider),
+            self.detail_row(MessageId::SetupCardModelLabel, &self.facts.model),
+            self.detail_row(MessageId::SetupCardAuthLabel, &self.facts.auth),
+            self.detail_row(MessageId::SetupCardHealthLabel, &self.facts.health),
+            Line::from(Span::styled(
+                tr(
+                    self.locale,
+                    if self.facts.provider_ready {
+                        MessageId::SetupProviderModelReadyHint
+                    } else {
+                        MessageId::SetupProviderModelNeedsActionHint
+                    },
+                )
+                .to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]
+    }
+
+    fn runtime_posture_detail_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            self.detail_row(MessageId::SetupCardIntentLabel, &self.facts.work_intent),
+            self.detail_row(MessageId::SetupCardApprovalLabel, &self.facts.approval),
+            self.detail_row(MessageId::SetupCardShellLabel, &self.facts.shell),
+            self.detail_row(MessageId::SetupCardTrustLabel, &self.facts.trust),
+            self.detail_row(MessageId::SetupCardSandboxLabel, &self.facts.sandbox),
+            self.detail_row(MessageId::SetupCardNetworkLabel, &self.facts.network),
+            Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupRuntimePostureBoundary).to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+            Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupRuntimePostureReviewHint).to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]
+    }
+
+    fn detail_row(&self, label: MessageId, value: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", tr(self.locale, label)),
+                Style::default()
+                    .fg(palette::TEXT_MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(value.to_string()),
+        ])
     }
 }
 
@@ -554,5 +811,93 @@ mod tests {
             tr(Locale::ZhHans, MessageId::SetupCheckpointDoneBundled),
             tr(Locale::En, MessageId::SetupCheckpointDoneBundled)
         );
+    }
+
+    #[test]
+    fn provider_model_review_records_ready_route_and_continues() {
+        let facts = SetupRuntimeFacts {
+            provider: "DeepSeek".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            auth: "present".to_string(),
+            health: "ready".to_string(),
+            provider_ready: true,
+            provider_result:
+                "provider=deepseek, model=deepseek-v4-pro, auth=present/local, health=not checked"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::ProviderModel,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(state.status(SetupStep::ProviderModel), StepStatus::Verified);
+        assert_eq!(view.selected_step(), SetupStep::TrustSandbox);
+        assert!(message.contains("Provider/model readiness recorded"));
+    }
+
+    #[test]
+    fn provider_model_review_records_missing_auth_as_needs_action() {
+        let facts = SetupRuntimeFacts {
+            provider_ready: false,
+            provider_result:
+                "provider=deepseek, model=deepseek-v4-pro, auth=missing, health=needs action"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::ProviderModel,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(
+            state.status(SetupStep::ProviderModel),
+            StepStatus::NeedsAction
+        );
+        assert!(message.contains("needs action"));
+    }
+
+    #[test]
+    fn runtime_posture_review_confirms_without_config_mutation() {
+        let facts = SetupRuntimeFacts {
+            runtime_result: "intent=agent, approval=suggest, shell=enabled, trust=workspace, sandbox=default, network=prompt by default".to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::TrustSandbox,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(state.status(SetupStep::TrustSandbox), StepStatus::Verified);
+        assert_eq!(
+            state.runtime_posture_source,
+            RuntimePostureSource::Confirmed
+        );
+        assert!(message.contains("Runtime posture reviewed"));
+        assert_eq!(view.selected_step(), SetupStep::ToolsMcp);
     }
 }
