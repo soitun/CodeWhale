@@ -573,13 +573,24 @@ pub enum ViewEvent {
     /// switch as `AppAction::SwitchProvider`.
     ProviderPickerApplied {
         provider: crate::config::ApiProvider,
+        provider_id: Option<String>,
     },
     /// Emitted by the `/provider` picker after the user types an API key
     /// inline for a provider that lacked one. The handler should persist
     /// the key via `save_api_key_for` and then perform the provider switch.
     ProviderPickerApiKeySubmitted {
         provider: crate::config::ApiProvider,
+        provider_id: Option<String>,
         api_key: String,
+    },
+    /// Emitted by the `/provider` picker after the custom provider form is
+    /// completed. The handler persists a named OpenAI-compatible provider
+    /// table and switches to it without storing raw secrets.
+    ProviderPickerCustomProviderSubmitted {
+        provider_id: String,
+        base_url: String,
+        model: Option<String>,
+        api_key_env: Option<String>,
     },
     /// Emitted by the `/provider` picker when Kimi CLI OAuth credentials can
     /// be reused for Moonshot/Kimi dispatch.
@@ -590,6 +601,7 @@ pub enum ViewEvent {
     /// the `/model` picker pre-filtered to the highlighted provider (#3083).
     ProviderPickerOpenModels {
         provider: crate::config::ApiProvider,
+        provider_id: Option<String>,
     },
     /// Emitted by the `/mode` picker when the user chooses a mode.
     ModeSelected {

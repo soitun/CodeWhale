@@ -7119,14 +7119,15 @@ async fn switch_provider(
         .await;
 
     let persist_warning = (|| -> anyhow::Result<()> {
+        let provider_key = provider_persistence_key(config, target);
         crate::config_persistence::persist_root_string_key(
             app.config_path.as_deref(),
             "provider",
-            target.as_str(),
+            &provider_key,
         )?;
 
         let mut settings = crate::settings::Settings::load()?;
-        settings.default_provider = Some(target.as_str().to_string());
+        settings.default_provider = Some(provider_key);
         if model_override.is_some() {
             settings.set_model_for_provider(target.as_str(), &new_model);
             if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
@@ -7161,6 +7162,24 @@ async fn switch_provider(
         status_message.push_str(" (not fully persisted)");
     }
     app.status_message = Some(status_message);
+}
+
+fn provider_persistence_key(config: &Config, provider: ApiProvider) -> String {
+    if provider == ApiProvider::Custom
+        && let Some(provider_id) = config
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider_id| !provider_id.is_empty())
+        && config
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom_provider_config(provider_id))
+            .is_some()
+    {
+        return provider_id.to_string();
+    }
+    provider.as_str().to_string()
 }
 
 async fn apply_provider_fallback_switch(
@@ -9708,12 +9727,42 @@ async fn handle_view_events(
                 )
                 .await;
             }
-            ViewEvent::ProviderPickerApplied { provider } => {
+            ViewEvent::ProviderPickerApplied {
+                provider,
+                provider_id,
+            } => {
+                if let Some(provider_id) = provider_id {
+                    set_active_custom_provider_in_memory(config, &provider_id);
+                }
                 let model_override = provider_picker_model_override(app, provider);
                 switch_provider(app, engine_handle, config, provider, model_override).await;
             }
-            ViewEvent::ProviderPickerApiKeySubmitted { provider, api_key } => {
+            ViewEvent::ProviderPickerApiKeySubmitted {
+                provider,
+                provider_id,
+                api_key,
+            } => {
+                if let Some(provider_id) = provider_id {
+                    set_active_custom_provider_in_memory(config, &provider_id);
+                }
                 apply_provider_picker_api_key(app, engine_handle, config, provider, api_key).await;
+            }
+            ViewEvent::ProviderPickerCustomProviderSubmitted {
+                provider_id,
+                base_url,
+                model,
+                api_key_env,
+            } => {
+                apply_provider_picker_custom_provider(
+                    app,
+                    engine_handle,
+                    config,
+                    provider_id,
+                    base_url,
+                    model,
+                    api_key_env,
+                )
+                .await;
             }
             ViewEvent::ProviderPickerKimiOAuthEnabled { provider } => {
                 apply_provider_picker_auth_mode(
@@ -9726,7 +9775,13 @@ async fn handle_view_events(
                 )
                 .await;
             }
-            ViewEvent::ProviderPickerOpenModels { provider } => {
+            ViewEvent::ProviderPickerOpenModels {
+                provider,
+                provider_id,
+            } => {
+                if let Some(provider_id) = provider_id {
+                    set_active_custom_provider_in_memory(config, &provider_id);
+                }
                 open_model_picker_for_provider(app, config, provider);
             }
             ViewEvent::ModeSelected { mode } => {
@@ -10121,6 +10176,71 @@ fn apply_backtrack(app: &mut App, depth: usize) {
 
 /// Persist the typed API key to `~/.codewhale/config.toml`, refresh the
 /// in-memory config so the engine can see it, then switch to the provider.
+fn set_active_custom_provider_in_memory(config: &mut Config, provider_id: &str) {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        return;
+    }
+    config.provider = Some(provider_id.to_string());
+    config
+        .providers
+        .get_or_insert_with(ProvidersConfig::default)
+        .custom
+        .entry(provider_id.to_string())
+        .or_default();
+}
+
+async fn apply_provider_picker_custom_provider(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    provider_id: String,
+    base_url: String,
+    model: Option<String>,
+    api_key_env: Option<String>,
+) {
+    let written = match crate::config_persistence::persist_custom_provider(
+        app.config_path.as_deref(),
+        &provider_id,
+        &base_url,
+        model.as_deref(),
+        api_key_env.as_deref(),
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            app.add_message(HistoryCell::System {
+                content: format!("Failed to save custom provider {provider_id}: {err}"),
+            });
+            app.status_message = Some("Custom provider was not saved.".to_string());
+            return;
+        }
+    };
+
+    config.provider = Some(provider_id.clone());
+    let entry = config
+        .providers
+        .get_or_insert_with(ProvidersConfig::default)
+        .custom
+        .entry(provider_id.clone())
+        .or_default();
+    entry.kind = Some("openai-compatible".to_string());
+    entry.base_url = Some(base_url.trim().trim_end_matches('/').to_string());
+    entry.model = model.clone().and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    entry.api_key_env = api_key_env.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+
+    app.status_message = Some(format!(
+        "Custom provider {provider_id} saved to {}",
+        written.display()
+    ));
+    switch_provider(app, engine_handle, config, ApiProvider::Custom, model).await;
+}
+
 async fn apply_provider_picker_api_key(
     app: &mut App,
     engine_handle: &mut EngineHandle,

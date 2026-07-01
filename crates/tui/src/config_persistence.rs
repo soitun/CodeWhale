@@ -395,6 +395,122 @@ fn provider_base_url_table_key(provider: ApiProvider) -> anyhow::Result<&'static
     }
 }
 
+pub(crate) fn persist_custom_provider(
+    config_path: Option<&Path>,
+    provider_id: &str,
+    base_url: &str,
+    model: Option<&str>,
+    api_key_env: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    use std::fs;
+
+    let provider_id = normalize_custom_provider_id(provider_id)?;
+    let base_url = normalize_custom_provider_base_url(base_url)?;
+    let model = model.and_then(normalize_optional_custom_provider_field);
+    let api_key_env = api_key_env.and_then(normalize_optional_custom_provider_field);
+
+    let path = config_toml_path(config_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+
+    let (mut doc, original_raw) = if path.exists() {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read config at {}", path.display()))?;
+        let doc: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))?;
+        (doc, Some(raw))
+    } else {
+        (toml::Value::Table(toml::value::Table::new()), None)
+    };
+
+    let table = doc
+        .as_table_mut()
+        .context("config.toml root must be a table")?;
+    table.insert(
+        "provider".to_string(),
+        toml::Value::String(provider_id.clone()),
+    );
+    let providers = table
+        .entry("providers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .context("`providers` must be a table")?;
+    let entry = providers
+        .entry(provider_id.clone())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("`providers.{provider_id}` must be a table"))?;
+    entry.insert(
+        "kind".to_string(),
+        toml::Value::String("openai-compatible".to_string()),
+    );
+    entry.insert("base_url".to_string(), toml::Value::String(base_url));
+    if let Some(model) = model {
+        entry.insert("model".to_string(), toml::Value::String(model));
+    } else {
+        entry.remove("model");
+    }
+    if let Some(api_key_env) = api_key_env {
+        entry.insert("api_key_env".to_string(), toml::Value::String(api_key_env));
+    } else {
+        entry.remove("api_key_env");
+    }
+
+    if let Some(raw) = original_raw {
+        save_toml_preserving_comments(&path, &doc, &raw)?;
+    } else {
+        let body = toml::to_string_pretty(&doc).context("failed to serialize config.toml")?;
+        fs::write(&path, body)
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+fn normalize_custom_provider_id(raw: &str) -> anyhow::Result<String> {
+    use anyhow::bail;
+
+    let value = raw.trim();
+    if value.is_empty() {
+        bail!("custom provider name is required");
+    }
+    if value == "__custom__" {
+        bail!("custom provider name is reserved");
+    }
+    if crate::config::ApiProvider::parse(value).is_some() {
+        bail!("custom provider name must not shadow a built-in provider");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        bail!("custom provider name may only use letters, numbers, '-' and '_'");
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_custom_provider_base_url(raw: &str) -> anyhow::Result<String> {
+    use anyhow::bail;
+
+    let value = raw.trim().trim_end_matches('/');
+    if value.is_empty() {
+        bail!("custom provider base URL is required");
+    }
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|err| anyhow::anyhow!("custom provider base URL is invalid: {err}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        bail!("custom provider base URL must be an http(s) URL with a host");
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_optional_custom_provider_field(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 pub(crate) fn persist_hotbar_bindings(
     config_path: Option<&Path>,
     bindings: &[codewhale_config::HotbarBindingToml],
@@ -784,6 +900,83 @@ mod tests {
             !cfg1.memory_enabled(),
             "memory should be disabled after persisting false"
         );
+    }
+
+    #[test]
+    fn persist_custom_provider_writes_named_openai_compatible_table() {
+        let temp_root = temp_root("codewhale-custom-provider-persist");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+
+        let path = temp_root.join(".codewhale").join("config.toml");
+        let written = persist_custom_provider(
+            Some(&path),
+            "acme_ai",
+            "https://api.acme.example/v1/",
+            Some("acme/code-1"),
+            Some("ACME_API_KEY"),
+        )
+        .expect("custom provider should persist");
+        let body = fs::read_to_string(&written).expect("written file should be readable");
+
+        assert!(body.contains("provider = \"acme_ai\""), "{body}");
+        assert!(body.contains("[providers.acme_ai]"), "{body}");
+        assert!(body.contains("kind = \"openai-compatible\""), "{body}");
+        assert!(
+            body.contains("base_url = \"https://api.acme.example/v1\""),
+            "{body}"
+        );
+        assert!(body.contains("model = \"acme/code-1\""), "{body}");
+        assert!(body.contains("api_key_env = \"ACME_API_KEY\""), "{body}");
+        assert!(
+            !body.contains("sk-"),
+            "helper must not persist raw secret values: {body}"
+        );
+
+        let loaded =
+            crate::config::Config::load(Some(written.clone()), None).expect("config should load");
+        assert_eq!(loaded.provider.as_deref(), Some("acme_ai"));
+        assert_eq!(loaded.api_provider(), crate::config::ApiProvider::Custom);
+        let entry = loaded
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom_provider_config("acme_ai"))
+            .expect("custom provider entry");
+        assert!(entry.is_openai_compatible_custom());
+        assert_eq!(
+            entry.base_url.as_deref(),
+            Some("https://api.acme.example/v1")
+        );
+        assert_eq!(entry.model.as_deref(), Some("acme/code-1"));
+        assert_eq!(entry.api_key_env.as_deref(), Some("ACME_API_KEY"));
+    }
+
+    #[test]
+    fn persist_custom_provider_rejects_builtin_or_invalid_names() {
+        let temp_root = temp_root("codewhale-custom-provider-invalid");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let path = temp_root.join(".codewhale").join("config.toml");
+
+        let builtin = persist_custom_provider(
+            Some(&path),
+            "openrouter",
+            "https://api.example.invalid/v1",
+            None,
+            None,
+        )
+        .expect_err("built-in names should be rejected");
+        assert!(builtin.to_string().contains("built-in provider"));
+
+        let bad_chars = persist_custom_provider(
+            Some(&path),
+            "my provider",
+            "https://api.example.invalid/v1",
+            None,
+            None,
+        )
+        .expect_err("space in name should be rejected");
+        assert!(bad_chars.to_string().contains("letters, numbers"));
     }
 
     #[test]
