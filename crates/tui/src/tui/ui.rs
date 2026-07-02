@@ -7238,6 +7238,29 @@ async fn switch_provider(
         Ok(route) => route,
         Err(reason) => {
             app.pending_provider_switch = None;
+            // #3830: if the switch failed only because the target provider has
+            // no key or local runtime, hand off to /provider already focused
+            // on that provider's key prompt instead of dead-ending with an
+            // error the user has to translate into an action.
+            if !crate::config::has_api_key_for(config, target)
+                && app.view_stack.top_kind() != Some(ModalKind::ProviderPicker)
+            {
+                let runtime_status = query_provider_runtime_status(engine_handle).await;
+                app.view_stack.push(
+                    crate::tui::provider_picker::ProviderPickerView::new_for_missing_auth(
+                        previous_provider,
+                        target,
+                        config,
+                        runtime_status,
+                    ),
+                );
+                app.status_message = Some(format!(
+                    "{} needs a key or local runtime — enter one to switch.",
+                    target.display_name()
+                ));
+                app.needs_redraw = true;
+                return;
+            }
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Cannot switch to {}: {reason}\nProvider unchanged ({}).",

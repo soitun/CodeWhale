@@ -1143,6 +1143,29 @@ impl ProviderPickerView {
         }
     }
 
+    /// Open the picker already focused on `target` in its key-entry stage —
+    /// the missing-auth handoff (#3830): when a route switch is rejected for
+    /// want of a key, drop the user straight onto that provider's key prompt
+    /// instead of dead-ending with an error. Falls back to the normal list
+    /// if the target has no row (e.g. an unknown custom id).
+    #[must_use]
+    pub fn new_for_missing_auth(
+        active: ApiProvider,
+        target: ApiProvider,
+        config: &Config,
+        runtime_status: Option<ProviderRuntimeStatus>,
+    ) -> Self {
+        let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
+        if let Some(idx) = picker.rows.iter().position(|row| row.provider == target) {
+            picker.selected_idx = idx;
+            // The target may be an unconfigured catalog row; show the catalog
+            // so it is visible, then jump into key entry for it.
+            picker.view = ProviderListView::Catalog;
+            picker.enter_key_entry();
+        }
+        picker
+    }
+
     fn row_visible(&self, idx: usize) -> bool {
         match self.view {
             ProviderListView::Catalog => true,
@@ -3063,6 +3086,21 @@ mod tests {
             }
             other => panic!("expected ProviderPickerApplied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn new_for_missing_auth_opens_key_entry_focused_on_target() {
+        // #3830: the missing-auth handoff drops the user onto the target
+        // provider's key prompt, not a dead-end error.
+        let config = Config::default();
+        let picker = ProviderPickerView::new_for_missing_auth(
+            ApiProvider::Deepseek,
+            ApiProvider::Anthropic,
+            &config,
+            None,
+        );
+        assert_eq!(picker.stage, Stage::KeyEntry);
+        assert_eq!(picker.selected_provider(), ApiProvider::Anthropic);
     }
 
     #[test]
