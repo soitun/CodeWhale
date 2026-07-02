@@ -264,15 +264,6 @@ pub(crate) enum RepoLawAction {
     Block,
 }
 
-impl ProtectedInvariant {
-    fn text(&self) -> &str {
-        match self {
-            Self::Advisory(text) => text,
-            Self::Enforced(enforced) => &enforced.text,
-        }
-    }
-}
-
 /// A compiled, mechanically-enforceable repo-law rule.
 pub(crate) struct RepoLawRule {
     pub(crate) text: String,

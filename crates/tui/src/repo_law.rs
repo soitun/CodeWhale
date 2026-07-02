@@ -70,8 +70,9 @@ pub(crate) fn repo_law_plan_decision(
         }
     }
     let (rule, target) = hold?;
+    let protects = rule.patterns.join(", ");
     let reason = format!(
-        "Repo law holds this write: \"{}\" protects {target} (.codewhale/constitution.json)",
+        "Repo law holds this write: \"{}\" protects {protects} (matched {target}, .codewhale/constitution.json)",
         rule.text
     );
     Some(match rule.action {

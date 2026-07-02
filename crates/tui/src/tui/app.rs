@@ -2014,6 +2014,18 @@ pub struct App {
     /// DeepSeek account balance, refreshed once per turn completion.
     /// Shared cell updated by background fetch tasks; read lock in the UI thread.
     pub balance_cell: std::sync::Arc<std::sync::Mutex<Option<crate::pricing::BalanceInfo>>>,
+    /// Shared cell for async fleet-profile model-draft delivery. A background
+    /// task fills it (model label + drafted profile or a failure reason) so
+    /// the drafting network call never parks the event loop (#3757 review).
+    #[allow(clippy::type_complexity)]
+    pub fleet_draft_cell: std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                String,
+                Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
+            )>,
+        >,
+    >,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -2794,6 +2806,7 @@ impl App {
             turn_last_activity_at: None,
             cumulative_turn_duration: std::time::Duration::ZERO,
             balance_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,

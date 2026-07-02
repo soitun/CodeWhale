@@ -1961,6 +1961,17 @@ async fn run_event_loop(
             app.prompt_suggestion = Some(suggestion);
         }
 
+        // Poll the fleet-profile model-draft cell filled by the background
+        // drafting task (#3757 review: the draft must not park the loop).
+        let fleet_draft_delivery = app
+            .fleet_draft_cell
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some((model_label, outcome)) = fleet_draft_delivery {
+            deliver_fleet_draft_result(app, model_label, outcome, app.ui_locale);
+        }
+
         // First, poll for engine events (non-blocking)
         let mut received_engine_event = false;
         let mut transcript_batch_updated = false;
@@ -5476,33 +5487,74 @@ async fn handle_fleet_profile_model_draft(
     model_class: String,
     locale: crate::localization::Locale,
 ) {
+    // Do NOT await the network call on the event loop — that parks the whole
+    // TUI for up to the timeout (#3757 review). Spawn it into the shared
+    // fleet_draft_cell and let the loop poll + deliver the result, keeping
+    // the wizard interactive with a drafting status.
     const DRAFT_TIMEOUT: Duration = Duration::from_secs(20);
     let model_label = app.model_display_label();
-    let outcome = match DeepSeekClient::new(config) {
-        Err(err) => Err(format!("provider not ready: {err:#}")),
-        Ok(client) => {
-            let request_model = app.model.clone();
-            match tokio::time::timeout(
-                DRAFT_TIMEOUT,
-                crate::tui::setup::draft_fleet_profile_with_model(
-                    &client,
-                    &request_model,
-                    &role,
-                    &model_class,
-                    locale,
-                ),
-            )
-            .await
-            {
-                Err(_) => Err(format!("timed out after {}s", DRAFT_TIMEOUT.as_secs())),
-                Ok(result) => result,
-            }
+    let client = match DeepSeekClient::new(config) {
+        Ok(client) => client,
+        Err(err) => {
+            deliver_fleet_draft_result(
+                app,
+                model_label.clone(),
+                Err(format!("provider not ready: {err:#}")),
+                locale,
+            );
+            return;
         }
     };
+    let request_model = app.model.clone();
+    let cell = app.fleet_draft_cell.clone();
+    let spawn_label = model_label.clone();
+    app.status_message = Some(match locale {
+        crate::localization::Locale::ZhHans => {
+            format!(
+                "{model_label} 正在起草配置……（最多 {}s）",
+                DRAFT_TIMEOUT.as_secs()
+            )
+        }
+        _ => format!(
+            "{model_label} is drafting the profile… (up to {}s)",
+            DRAFT_TIMEOUT.as_secs()
+        ),
+    });
+    app.needs_redraw = true;
+    tokio::spawn(async move {
+        let outcome = match tokio::time::timeout(
+            DRAFT_TIMEOUT,
+            crate::tui::setup::draft_fleet_profile_with_model(
+                &client,
+                &request_model,
+                &role,
+                &model_class,
+                locale,
+            ),
+        )
+        .await
+        {
+            Err(_) => Err(format!("timed out after {}s", DRAFT_TIMEOUT.as_secs())),
+            Ok(result) => result,
+        };
+        if let Ok(mut guard) = cell.lock() {
+            *guard = Some((spawn_label, outcome));
+        }
+    });
+}
+
+/// Install a completed fleet-profile draft into the wizard (if it is still on
+/// top) and open its preview, or surface a failure. Called from the event
+/// loop when the background draft lands, and directly on the pre-spawn
+/// provider-construction failure.
+fn deliver_fleet_draft_result(
+    app: &mut App,
+    model_label: String,
+    outcome: Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
+    locale: crate::localization::Locale,
+) {
     match outcome {
         Ok(draft) => {
-            // The wizard emitted with `Emit` (no close); if the user closed
-            // it mid-flight the draft is dropped — never installed or saved.
             if app.view_stack.top_kind() == Some(ModalKind::FleetSetup)
                 && let Some(mut boxed) = app.view_stack.pop()
             {
@@ -5535,6 +5587,7 @@ async fn handle_fleet_profile_model_draft(
             });
         }
     }
+    app.needs_redraw = true;
 }
 
 // `format_*` chip/message builders moved to `tui/format_helpers.rs`.
