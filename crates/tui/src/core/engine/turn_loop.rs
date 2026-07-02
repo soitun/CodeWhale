@@ -1629,8 +1629,17 @@ impl Engine {
                     )));
                 }
 
+                // Fail closed: a tool with no execution path — not MCP, not
+                // code/js/search, and with no registry spec — must be blocked,
+                // NOT run unguarded. Previously this only checked
+                // `tool_def.is_none()`, so a tool present in the model-facing
+                // catalog but absent from the execution registry (or when the
+                // registry itself is None) fell through every approval branch
+                // with approval_required=false and executed with no gate.
+                let registry_has_spec =
+                    tool_registry.is_some_and(|registry| registry.get(&tool_name).is_some());
                 if blocked_error.is_none()
-                    && tool_def.is_none()
+                    && !registry_has_spec
                     && !McpPool::is_mcp_tool(&tool_name)
                     && tool_name != CODE_EXECUTION_TOOL_NAME
                     && tool_name != JS_EXECUTION_TOOL_NAME
