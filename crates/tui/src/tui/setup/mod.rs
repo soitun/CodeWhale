@@ -20,7 +20,9 @@ use ratatui::{
 use crate::config::{Config, has_api_key, has_api_key_for};
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
-use crate::prompts::CONSTITUTION_OVERRIDE_FILE;
+use crate::prompts::{
+    BASE_PROMPT_OVERRIDE_OPT_IN_ENV, CONSTITUTION_OVERRIDE_FILE, base_prompt_override_opt_in,
+};
 use crate::tui::app::App;
 use crate::tui::onboarding;
 use crate::tui::views::{
@@ -182,6 +184,7 @@ struct SetupRuntimeFacts {
     project_override_warning: Option<String>,
     constitution_autonomy: String,
     constitution_file: SetupConstitutionFileState,
+    expert_override: SetupExpertOverrideState,
 }
 
 impl Default for SetupRuntimeFacts {
@@ -208,12 +211,14 @@ impl Default for SetupRuntimeFacts {
             project_override_warning: None,
             constitution_autonomy: "not loaded".to_string(),
             constitution_file: SetupConstitutionFileState::NotChecked,
+            expert_override: SetupExpertOverrideState::NotChecked,
         }
     }
 }
 
 impl SetupRuntimeFacts {
     fn from_app_config(app: &App, config: &Config) -> Self {
+        let expert_override = SetupExpertOverrideState::load();
         let provider_ready = has_api_key_for(config, app.api_provider);
         let model = app.model_display_label();
         let provider = app.api_provider.display_name().to_string();
@@ -321,6 +326,7 @@ impl SetupRuntimeFacts {
             ),
             constitution_autonomy,
             constitution_file: SetupConstitutionFileState::load(),
+            expert_override,
         }
     }
 }
@@ -483,6 +489,77 @@ impl SetupConstitutionFileState {
             Self::Invalid => "constitution.json 无效；请修复/重新生成，或使用内置",
             Self::Unreadable => "constitution.json 无法读取；请修复/重新生成，或使用内置",
             Self::PathError => "无法解析 CODEWHALE_HOME 中的 constitution.json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupExpertOverrideState {
+    NotChecked,
+    Missing,
+    Active,
+    Disabled,
+    Empty,
+    Unreadable,
+    PathError,
+}
+
+impl SetupExpertOverrideState {
+    fn load() -> Self {
+        let Some(path) = expert_override_path() else {
+            return Self::PathError;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(raw) if raw.trim().is_empty() => Self::Empty,
+            Ok(_) if base_prompt_override_opt_in() => Self::Active,
+            Ok(_) => Self::Disabled,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            Err(_) => Self::Unreadable,
+        }
+    }
+
+    fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    fn label(self, locale: Locale) -> Cow<'static, str> {
+        match locale {
+            Locale::ZhHans => self.zh_hans_label(),
+            _ => self.english_label(),
+        }
+    }
+
+    fn english_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("not checked yet"),
+            Self::Missing => Cow::Borrowed("no prompts/constitution.md found"),
+            Self::Active => Cow::Borrowed("active; expert Markdown override is opted in"),
+            Self::Disabled => Cow::Owned(format!(
+                "file found but disabled; set {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 to activate"
+            )),
+            Self::Empty => Cow::Borrowed("override file is empty; bundled/default applies"),
+            Self::Unreadable => {
+                Cow::Borrowed("override file is unreadable; bundled/default applies")
+            }
+            Self::PathError => {
+                Cow::Borrowed("CODEWHALE_HOME could not be resolved for prompts/constitution.md")
+            }
+        }
+    }
+
+    fn zh_hans_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("尚未检查"),
+            Self::Missing => Cow::Borrowed("未找到 prompts/constitution.md"),
+            Self::Active => Cow::Borrowed("已启用；专家 Markdown 覆盖已选择加入"),
+            Self::Disabled => Cow::Owned(format!(
+                "已找到文件但未启用；设置 {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 后生效"
+            )),
+            Self::Empty => Cow::Borrowed("覆盖文件为空；使用内置/默认准则"),
+            Self::Unreadable => Cow::Borrowed("覆盖文件无法读取；使用内置/默认准则"),
+            Self::PathError => {
+                Cow::Borrowed("无法解析 CODEWHALE_HOME 中的 prompts/constitution.md")
+            }
         }
     }
 }
@@ -1654,6 +1731,7 @@ impl SetupWizardView {
             .facts
             .constitution_file
             .label(self.state.constitution_choice, self.locale);
+        let expert_override = self.facts.expert_override.label(self.locale);
         let preview = self
             .state
             .constitution_preview_hash
@@ -1665,6 +1743,10 @@ impl SetupWizardView {
             self.detail_row(MessageId::SetupConstitutionSourceLabel, &source_state),
             self.detail_row(MessageId::SetupConstitutionPreviewLabel, &preview),
             self.detail_row(MessageId::SetupConstitutionExistingLabel, existing_file),
+            self.detail_row(
+                MessageId::SetupConstitutionExpertOverrideLabel,
+                &expert_override,
+            ),
             Line::from(Span::styled(
                 tr(self.locale, MessageId::SetupConstitutionGuidedAnswersHint).to_string(),
                 Style::default().fg(palette::TEXT_MUTED),
@@ -2287,6 +2369,28 @@ pub fn should_open_update_checkpoint(app: &App, config: &Config) -> bool {
     state.needs_constitution_checkpoint(CONSTITUTION_CHECKPOINT_VERSION)
 }
 
+pub fn defer_update_checkpoint_for_app(app: &App, config: &Config) -> anyhow::Result<SetupState> {
+    let mut state = load_setup_state_for_app(app, config);
+    if !state.needs_constitution_checkpoint(CONSTITUTION_CHECKPOINT_VERSION) {
+        return Ok(state);
+    }
+    state.complete_constitution_checkpoint(
+        CONSTITUTION_CHECKPOINT_VERSION,
+        ConstitutionChoice::Deferred,
+    );
+    state.constitution_source = ConstitutionSource::Bundled;
+    state.constitution_validity = ConstitutionValidity::Unknown;
+    state.constitution_authoring = None;
+    state.constitution_preview_hash = None;
+    state.set_step(
+        SetupStep::Constitution,
+        StepEntry::new(StepStatus::Deferred, true, CONSTITUTION_CHECKPOINT_VERSION)
+            .with_result("checkpoint deferred; bundled applies"),
+    );
+    state.save()?;
+    Ok(state)
+}
+
 #[must_use]
 pub fn load_setup_state_for_app(app: &App, config: &Config) -> SetupState {
     if let Ok(Some(state)) = SetupState::load() {
@@ -2305,12 +2409,13 @@ fn inherited_facts_for_app(app: &App, config: &Config) -> InheritedConfigFacts {
     let has_user_constitution = user_constitution
         .as_ref()
         .is_some_and(|loaded| !matches!(loaded, UserConstitutionLoad::Missing));
+    let expert_override = SetupExpertOverrideState::load();
     InheritedConfigFacts {
         language: Some(app.ui_locale.tag().to_string()),
         has_provider_route: !config.default_model().trim().is_empty(),
         has_credentials_or_local_runtime: has_api_key(config),
         trust_chosen: app.trust_mode || !onboarding::needs_trust(&app.workspace),
-        has_expert_override: expert_override_path().is_some_and(|path| path.exists()),
+        has_expert_override: expert_override.is_active(),
         has_user_constitution,
         user_constitution_validity,
     }
@@ -3004,6 +3109,47 @@ mod tests {
     }
 
     #[test]
+    fn expert_override_state_requires_content_and_opt_in() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _opt_in = crate::test_support::EnvVarGuard::remove(BASE_PROMPT_OVERRIDE_OPT_IN_ENV);
+
+        assert_eq!(
+            SetupExpertOverrideState::load(),
+            SetupExpertOverrideState::Missing
+        );
+
+        let path = tmp.path().join(CONSTITUTION_OVERRIDE_FILE);
+        std::fs::create_dir_all(path.parent().expect("override parent")).expect("override parent");
+        std::fs::write(&path, "\n  \n").expect("write empty override");
+        assert_eq!(
+            SetupExpertOverrideState::load(),
+            SetupExpertOverrideState::Empty
+        );
+
+        std::fs::write(&path, "# Expert override\n").expect("write override");
+        assert_eq!(
+            SetupExpertOverrideState::load(),
+            SetupExpertOverrideState::Disabled
+        );
+        assert!(!SetupExpertOverrideState::Disabled.is_active());
+        assert!(
+            SetupExpertOverrideState::Disabled
+                .label(Locale::En)
+                .contains(BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
+        );
+
+        // SAFETY: the process-wide test env mutex is held by `_guard`.
+        unsafe { std::env::set_var(BASE_PROMPT_OVERRIDE_OPT_IN_ENV, "1") };
+        assert_eq!(
+            SetupExpertOverrideState::load(),
+            SetupExpertOverrideState::Active
+        );
+        assert!(SetupExpertOverrideState::Active.is_active());
+    }
+
+    #[test]
     fn constitution_detail_lines_show_existing_file_state() {
         let mut state = SetupState {
             constitution_choice: ConstitutionChoice::Bundled,
@@ -3026,6 +3172,8 @@ mod tests {
         assert!(text.contains("Source: bundled; validity valid"));
         assert!(text.contains("Existing file:"));
         assert!(text.contains("inactive under the recorded choice"));
+        assert!(text.contains("Expert override:"));
+        assert!(text.contains("not checked yet"));
 
         state.constitution_choice = ConstitutionChoice::GuidedCustom;
         state.constitution_source = ConstitutionSource::UserGlobal;
@@ -3041,6 +3189,7 @@ mod tests {
         let text = lines_to_text(view.constitution_detail_lines());
         assert!(text.contains("现有文件："));
         assert!(text.contains("已存在并已选择"));
+        assert!(text.contains("专家覆盖："));
     }
 
     #[test]

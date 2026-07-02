@@ -580,8 +580,18 @@ fn drain_terminal_input_queue(
 }
 
 fn open_setup_checkpoint_if_due(app: &mut App, config: &Config, skip_onboarding: bool) -> bool {
-    if skip_onboarding
-        || app.onboarding != crate::tui::app::OnboardingState::None
+    if skip_onboarding {
+        if crate::tui::setup::should_open_update_checkpoint(app, config) {
+            if let Err(err) = crate::tui::setup::defer_update_checkpoint_for_app(app, config) {
+                tracing::warn!(
+                    target: "tui::setup",
+                    "failed to record deferred setup checkpoint: {err}"
+                );
+            }
+        }
+        return false;
+    }
+    if app.onboarding != crate::tui::app::OnboardingState::None
         || app.view_stack.top_kind() == Some(ModalKind::SetupWizard)
         || !crate::tui::setup::should_open_update_checkpoint(app, config)
     {
