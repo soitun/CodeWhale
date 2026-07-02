@@ -224,6 +224,28 @@ cargo build --release -p codewhale-cli -p codewhale-tui   clean (47s)
 scripts/v0867-setup-qa.sh                               9 passed; 0 failed
 ```
 
+## PR Push + Community Harvest Snapshot (2026-07-02)
+
+- Branch pushed to origin as PR #3861 (ready for review), 118 commits ahead of
+  `main`; `Cargo.toml` still `0.8.66`.
+- A five-lens adversarial review of the branch found and closed real repo-law
+  enforcement bypasses (interior `./`/`..` path evasion, apply_patch header
+  forms, `fim_edit` ungated) and safety-floor destroyer evasions
+  (env/wrapper prefixes, quotes, pipes) — all fixed with tests before push.
+- Drafter event-loop-freeze class fully closed (fleet + constitution).
+- Two safe runtime perf wins (idle offline-queue clone skipped; tool output
+  hashed once). Structural render-loop items documented in the local roadmap
+  for human-supervised TUI QA rather than changed blind.
+- **Community harvest (v0.8.67):** four vetted PRs harvested with credit
+  (contributor as canonical author + `Co-authored-by`): #3763 (@idling11,
+  website i18n matrix), #3760 (@idling11, Homebrew rollout docs), #3872 and
+  #3871 (@cyq1017, dead-code removals). Duplicates #3873/#3879 noted on-PR.
+  MCP-spawn/provider/persistence/constitution-context PRs left NEEDS-REVIEW.
+- CI at push: fmt / clippy (workspace, CI flags) / provider-registry /
+  co-author (`--check-authors` canonical) / version-drift / GitGuardian /
+  CodeQL / ubuntu+macOS tests all green; only slowest jobs finishing at
+  snapshot time; zero failures.
+
 ## Remaining Manual Evidence
 
 Before the release is called ready, keep the final manual pass from the QA
