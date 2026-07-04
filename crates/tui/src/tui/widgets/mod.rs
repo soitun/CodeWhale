@@ -3225,9 +3225,7 @@ fn wrap_input_lines_internal(input: &str, width: usize) -> (Vec<String>, Vec<(us
     let mut char_idx = 0usize;
 
     if input.is_empty() {
-        if width == 0 {
-            lines_with_indices.push((0, String::new()));
-        }
+        lines_with_indices.push((0, String::new()));
         return (lines, lines_with_indices);
     }
 
@@ -3378,7 +3376,8 @@ mod tests {
         apply_send_flash, build_empty_state_lines, composer_height, composer_max_height,
         composer_min_input_rows, composer_top_padding, cursor_row_col, empty_composer_visual_rows,
         layout_input, pad_lines_to_bottom, placeholder_visual_lines, push_command_entry,
-        should_render_empty_state, slash_completion_hints, wrap_input_lines, wrap_text,
+        should_render_empty_state, slash_completion_hints, wrap_input_lines,
+        wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
@@ -3746,6 +3745,18 @@ mod tests {
     fn wrap_input_lines_trailing_newline() {
         let lines = wrap_input_lines("a\n", 10);
         assert_eq!(lines, vec!["a", ""]);
+    }
+
+    #[test]
+    fn wrap_input_lines_for_mouse_empty_input() {
+        // Empty input should return a single empty line at position 0.
+        // This ensures empty composer mouse selection works correctly (issue #3909).
+        let result = wrap_input_lines_for_mouse("", 10);
+        assert_eq!(result, vec![(0, String::new())]);
+
+        // Also verify with width=0 edge case
+        let result_zero = wrap_input_lines_for_mouse("", 0);
+        assert_eq!(result_zero, vec![(0, String::new())]);
     }
 
     #[test]
