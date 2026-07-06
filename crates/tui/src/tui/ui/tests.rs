@@ -3873,6 +3873,12 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
     assert_eq!(app.hunt.continuation_count, 2);
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
     assert_eq!(app.hunt.started_at, Some(started_at));
+    // A completed goal must freeze the elapsed timer (regression for the bug
+    // where the sidebar kept ticking "completed in {elapsed}" forever).
+    assert!(
+        app.hunt.finished_at.is_some(),
+        "terminal verdict should set finished_at so the timer freezes"
+    );
 
     let blocked = crate::tools::goal::GoalSnapshot {
         objective: Some("Different objective".to_string()),
@@ -3895,6 +3901,60 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
     assert_eq!(app.hunt.continuation_count, 3);
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Escaped);
     assert!(app.hunt.started_at.is_some());
+    assert!(
+        app.hunt.finished_at.is_some(),
+        "blocked verdict should also freeze the elapsed timer"
+    );
+}
+
+#[test]
+fn apply_goal_snapshot_resume_clears_frozen_timer() {
+    let mut app = create_test_app();
+    app.hunt.quarry = Some("Ship the release lane".to_string());
+    app.hunt.verdict = crate::tui::app::HuntVerdict::Hunting;
+    app.hunt.started_at = Some(Instant::now());
+
+    // First, mark the goal complete — finished_at gets set.
+    let completed = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release lane".to_string()),
+        status: "complete".to_string(),
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count: 0,
+        elapsed_seconds: Some(0),
+        evidence: Some("done".to_string()),
+        blocker: None,
+        completion_verification: Some(crate::tools::goal::GoalCompletionVerification {
+            status: "passed".to_string(),
+            check: "cargo test".to_string(),
+            summary: "ok".to_string(),
+        }),
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &completed));
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
+    assert!(app.hunt.finished_at.is_some());
+
+    // Now a later snapshot reports the goal active again (resume). The frozen
+    // timer must clear so the sidebar starts ticking once more.
+    let resumed = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release lane".to_string()),
+        status: "active".to_string(),
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count: 0,
+        elapsed_seconds: Some(0),
+        evidence: None,
+        blocker: None,
+        completion_verification: None,
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
+    assert!(
+        app.hunt.finished_at.is_none(),
+        "resume should re-arm the elapsed timer"
+    );
 }
 
 #[test]

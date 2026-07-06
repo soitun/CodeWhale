@@ -197,6 +197,15 @@ impl GoalState {
 
     #[must_use]
     pub fn snapshot(&self) -> GoalSnapshot {
+        // Once the goal is terminal, freeze elapsed at the finish time so the
+        // sidebar timer (and any tool snapshot) stops growing after completion.
+        let elapsed_seconds = match (self.started_at, self.finished_at) {
+            (Some(started), Some(finished)) => {
+                Some(finished.saturating_duration_since(started).as_secs())
+            }
+            (Some(started), None) => Some(started.elapsed().as_secs()),
+            (None, _) => None,
+        };
         GoalSnapshot {
             objective: self.objective.clone(),
             status: self
@@ -208,7 +217,7 @@ impl GoalState {
             tokens_used: self.tokens_used,
             time_used_seconds: self.time_used_seconds,
             continuation_count: self.continuation_count,
-            elapsed_seconds: self.started_at.map(|started| started.elapsed().as_secs()),
+            elapsed_seconds,
             evidence: self.evidence.clone(),
             blocker: self.blocker.clone(),
             completion_verification: self.completion_verification.clone(),
@@ -729,6 +738,45 @@ mod tests {
         assert_eq!(snapshot.tokens_used, 300);
         assert_eq!(snapshot.time_used_seconds, 12);
         assert_eq!(snapshot.continuation_count, 1);
+    }
+
+    #[test]
+    fn completed_goal_snapshot_freezes_elapsed() {
+        // Regression: a completed goal's snapshot elapsed_seconds must not keep
+        // growing. Before the fix, snapshot() always used started_at.elapsed(),
+        // so a finished goal's elapsed kept ticking in the sidebar/tool output.
+        let state = new_shared_goal_state_from_host_status(
+            Some("freeze on completion".to_string()),
+            None,
+            GoalStatus::Active,
+        );
+        let first = {
+            let mut goal = state.lock().expect("goal lock");
+            goal.mark_complete(
+                "evidence".to_string(),
+                GoalCompletionVerification {
+                    status: "passed".to_string(),
+                    check: "cargo test".to_string(),
+                    summary: "ok".to_string(),
+                },
+            )
+            .expect("mark complete");
+            goal.snapshot()
+        };
+        let elapsed_at_completion = first.elapsed_seconds.expect("elapsed present");
+
+        // Sleep past a whole-second boundary. Under the old (buggy) code,
+        // snapshot() returned started_at.elapsed().as_secs(), so this would
+        // tick up by at least one second and the assertion below would fail.
+        // With the freeze, the completed snapshot stays at the captured value.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let second = state.lock().expect("goal lock").snapshot();
+        assert_eq!(second.status, "complete");
+        assert_eq!(
+            second.elapsed_seconds,
+            Some(elapsed_at_completion),
+            "completed goal elapsed must be frozen, not keep ticking"
+        );
     }
 
     #[test]

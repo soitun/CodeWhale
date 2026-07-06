@@ -7020,6 +7020,17 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     if objective_changed || app.hunt.started_at.is_none() {
         app.hunt.started_at = Some(Instant::now());
     }
+    // Freeze the elapsed timer the first time a goal goes terminal. Resuming
+    // re-arms the timer by clearing `finished_at`. Keeping this in sync with
+    // `verdict` is what stops completed goals from ticking in the sidebar.
+    let terminal = matches!(verdict, HuntVerdict::Hunted | HuntVerdict::Escaped);
+    if terminal {
+        if app.hunt.finished_at.is_none() {
+            app.hunt.finished_at = Some(Instant::now());
+        }
+    } else {
+        app.hunt.finished_at = None;
+    }
     true
 }
 

@@ -1342,6 +1342,10 @@ pub struct HuntState {
     pub time_used_seconds: u64,
     pub continuation_count: u32,
     pub started_at: Option<Instant>,
+    /// When the goal reached a terminal verdict (Hunted/Wounded/Escaped).
+    /// While `None`, elapsed time keeps growing; once set, the sidebar freezes
+    /// the timer at `finished_at - started_at` so completed goals stop ticking.
+    pub finished_at: Option<Instant>,
     pub verdict: HuntVerdict,
 }
 

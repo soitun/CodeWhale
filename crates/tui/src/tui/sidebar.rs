@@ -460,6 +460,9 @@ pub(crate) struct SidebarWorkSummary {
     goal_token_budget: Option<u32>,
     goal_completed: bool,
     goal_started_at: Option<Instant>,
+    /// When the goal went terminal. While `Some`, the elapsed line freezes at
+    /// `goal_finished_at - goal_started_at` instead of ticking every frame.
+    goal_finished_at: Option<Instant>,
     tokens_used: u32,
     checklist_completion_pct: u8,
     checklist_items: Vec<SidebarWorkChecklistItem>,
@@ -580,6 +583,7 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
         summary.goal_token_budget = app.hunt.token_budget;
         summary.goal_completed = app.hunt.verdict == HuntVerdict::Hunted;
         summary.goal_started_at = app.hunt.started_at;
+        summary.goal_finished_at = app.hunt.finished_at;
         summary.tokens_used = app.session.total_conversation_tokens;
         summary.pause_indicator = live_pause_indicator(app);
         summary.workflow_paused = app.paused || app.paused_quarry.is_some();
@@ -622,6 +626,7 @@ fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             goal_token_budget: app.hunt.token_budget,
             goal_completed: app.hunt.verdict == HuntVerdict::Hunted,
             goal_started_at: app.hunt.started_at,
+            goal_finished_at: app.hunt.finished_at,
             tokens_used: app.session.total_conversation_tokens,
             checklist_completion_pct,
             checklist_items,
@@ -709,7 +714,7 @@ fn work_panel_hover_texts(
         if let Some(started) = summary.goal_started_at
             && texts.len() < max_rows
         {
-            let elapsed = crate::tui::notifications::humanize_duration(started.elapsed());
+            let elapsed = goal_elapsed_for_summary(started, summary.goal_finished_at);
             let elapsed_str = if summary.goal_completed {
                 format!("completed in {elapsed}")
             } else {
@@ -868,6 +873,18 @@ fn work_panel_hover_texts(
     texts
 }
 
+/// Humanized elapsed time for a goal. Once the goal is terminal (`finished`
+/// is `Some`), the elapsed is frozen at `finished - started` so a completed or
+/// escaped goal stops ticking in the sidebar; otherwise it grows live.
+fn goal_elapsed_for_summary(started: Instant, finished: Option<Instant>) -> String {
+    use crate::tui::notifications::humanize_duration;
+    let elapsed = match finished {
+        Some(end) => end.saturating_duration_since(started),
+        None => started.elapsed(),
+    };
+    humanize_duration(elapsed)
+}
+
 fn push_work_goal_lines(
     summary: &SidebarWorkSummary,
     content_width: usize,
@@ -920,7 +937,7 @@ fn push_work_goal_lines(
     if let Some(started) = summary.goal_started_at
         && lines.len() < max_rows
     {
-        let elapsed = crate::tui::notifications::humanize_duration(started.elapsed());
+        let elapsed = goal_elapsed_for_summary(started, summary.goal_finished_at);
         let elapsed_str = if summary.goal_completed {
             format!("completed in {elapsed}")
         } else {

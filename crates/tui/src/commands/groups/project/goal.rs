@@ -20,6 +20,7 @@ fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
             app.hunt.time_used_seconds = 0;
             app.hunt.continuation_count = 0;
             app.hunt.started_at = None;
+            app.hunt.finished_at = None;
             app.hunt.verdict = HuntVerdict::default();
             CommandResult::with_message_and_action(
                 "Goal cleared.",
@@ -54,6 +55,7 @@ fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
             app.hunt.time_used_seconds = 0;
             app.hunt.continuation_count = 0;
             app.hunt.started_at = Some(std::time::Instant::now());
+            app.hunt.finished_at = None;
             app.hunt.verdict = HuntVerdict::Hunting;
             let budget_str = budget
                 .map(|b| format!(" (budget: {b} tokens)"))
@@ -140,6 +142,13 @@ fn close_hunt(app: &mut App, verdict: HuntVerdict, status: GoalStatus) -> Comman
         return CommandResult::error(err);
     }
     app.hunt.verdict = verdict;
+    // Freeze the sidebar timer at the moment of close-out so it stops ticking
+    // for hunted/escaped goals. Wounded (paused) goals are not terminal — the
+    // timer re-arms on resume — but we still record the pause instant so a
+    // paused goal doesn't read as still-running in the sidebar.
+    if app.hunt.finished_at.is_none() {
+        app.hunt.finished_at = Some(std::time::Instant::now());
+    }
 
     // Push the new status to the engine's SharedGoalState so the cross-turn
     // continuation loop respects it: pause/blocked stops the loop, complete
@@ -151,11 +160,7 @@ fn close_hunt(app: &mut App, verdict: HuntVerdict, status: GoalStatus) -> Comman
 
     match verdict {
         HuntVerdict::Hunted => {
-            let elapsed = app
-                .hunt
-                .started_at
-                .map(|t| crate::tui::notifications::humanize_duration(t.elapsed()))
-                .unwrap_or_else(|| "unknown".to_string());
+            let elapsed = goal_elapsed_at_close(&app.hunt);
             CommandResult::with_message_and_action(
                 format!("Goal hunted. Elapsed: {elapsed}"),
                 action,
@@ -186,6 +191,9 @@ fn resume_hunt(app: &mut App) -> CommandResult {
     if app.hunt.started_at.is_none() {
         app.hunt.started_at = Some(std::time::Instant::now());
     }
+    // Re-arm the elapsed timer: a resumed goal should keep ticking from where
+    // it left off (started_at is preserved), not stay frozen at the pause.
+    app.hunt.finished_at = None;
     CommandResult::with_message_and_action("Goal resumed.", AppAction::SendMessage(objective))
 }
 
@@ -204,6 +212,19 @@ fn hunt_verdict_label(verdict: HuntVerdict) -> &'static str {
         HuntVerdict::Hunted => "[HUNTED]",
         HuntVerdict::Wounded => "[WOUNDED]",
         HuntVerdict::Escaped => "[ESCAPED]",
+    }
+}
+
+/// Humanized elapsed time for a closed goal, frozen at the finish instant so
+/// the close-out message doesn't drift further each time it's read.
+fn goal_elapsed_at_close(hunt: &crate::tui::app::HuntState) -> String {
+    use crate::tui::notifications::humanize_duration;
+    match (hunt.started_at, hunt.finished_at) {
+        (Some(started), Some(finished)) => {
+            humanize_duration(finished.saturating_duration_since(started))
+        }
+        (Some(started), None) => humanize_duration(started.elapsed()),
+        (None, _) => "unknown".to_string(),
     }
 }
 
@@ -448,12 +469,14 @@ mod tests {
         app.hunt.tokens_used = 5;
         app.hunt.time_used_seconds = 3;
         app.hunt.continuation_count = 1;
+        app.hunt.finished_at = Some(std::time::Instant::now());
         let _ = hunt(&mut app, Some("clear"));
         assert!(app.hunt.quarry.is_none());
         assert!(app.hunt.token_budget.is_none());
         assert_eq!(app.hunt.tokens_used, 0);
         assert_eq!(app.hunt.time_used_seconds, 0);
         assert_eq!(app.hunt.continuation_count, 0);
+        assert!(app.hunt.finished_at.is_none());
         assert_eq!(
             app.hunt.verdict.goal_status(),
             crate::tools::goal::GoalStatus::Active
@@ -501,6 +524,41 @@ mod tests {
             resumed.action,
             Some(AppAction::SendMessage(msg)) if msg == "Finish release prep"
         ));
+    }
+
+    #[test]
+    fn test_close_hunt_freezes_elapsed_timer() {
+        let mut app = create_test_app();
+        let _ = hunt(&mut app, Some("Freeze the timer on close"));
+        assert!(
+            app.hunt.finished_at.is_none(),
+            "an active goal must not have a frozen finish time"
+        );
+
+        // Closing the goal as hunted must set finished_at so the sidebar timer
+        // stops ticking instead of reading "completed in {growing elapsed}".
+        let result = hunt(&mut app, Some("done"));
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Goal hunted. Elapsed:"),
+            "close-out message should report a frozen elapsed"
+        );
+        assert_eq!(app.hunt.verdict, HuntVerdict::Hunted);
+        assert!(
+            app.hunt.finished_at.is_some(),
+            "hunted goal should freeze the elapsed timer"
+        );
+
+        // Resume must re-arm the timer so a resumed goal keeps ticking.
+        let _ = hunt(&mut app, Some("resume"));
+        assert_eq!(app.hunt.verdict, HuntVerdict::Hunting);
+        assert!(
+            app.hunt.finished_at.is_none(),
+            "resume should clear the frozen timer"
+        );
     }
 
     #[test]
