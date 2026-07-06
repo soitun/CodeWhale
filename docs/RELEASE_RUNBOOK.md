@@ -25,7 +25,7 @@ Current packaging note:
   - `codewhale-tools`
   - `codewhale-core`
   - `codewhale-app-server`
-  - `codewhale-whaleflow`
+  - `codewhale-workflow`
 
 ## Version Coordination
 
@@ -195,7 +195,7 @@ and fails branch-only release sources before assets are published.
    - `codewhale-release`
    - `codewhale-secrets`
    - `codewhale-state`
-   - `codewhale-whaleflow`
+   - `codewhale-workflow`
    - `codewhale-execpolicy`
    - `codewhale-hooks`
    - `codewhale-tools`

@@ -1,31 +1,29 @@
-//! End-to-end tests for the WhaleFlow JS runtime against a fake driver.
+//! End-to-end tests for the Workflow JS runtime against a fake driver.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewhale_whaleflow_js::testing::{FakeDriver, FakeReply};
-use codewhale_whaleflow_js::{
-    ProgressEvent, WHALEFLOW_LIFETIME_CAP, WhaleflowJsError, WhaleflowVm,
-};
+use codewhale_workflow_js::testing::{FakeDriver, FakeReply};
+use codewhale_workflow_js::{ProgressEvent, WORKFLOW_LIFETIME_CAP, WorkflowJsError, WorkflowVm};
 use serde_json::json;
 
 async fn run(
     driver: &Arc<FakeDriver>,
     source: &str,
     args: serde_json::Value,
-) -> Result<serde_json::Value, WhaleflowJsError> {
-    WhaleflowVm::new()
+) -> Result<serde_json::Value, WorkflowJsError> {
+    WorkflowVm::new()
         .run_script(
             source,
             args,
-            driver.clone() as Arc<dyn codewhale_whaleflow_js::WorkflowDriver>,
+            driver.clone() as Arc<dyn codewhale_workflow_js::WorkflowDriver>,
         )
         .await
 }
 
-fn script_message(result: Result<serde_json::Value, WhaleflowJsError>) -> String {
+fn script_message(result: Result<serde_json::Value, WorkflowJsError>) -> String {
     match result {
-        Err(WhaleflowJsError::Script(message)) => message,
+        Err(WorkflowJsError::Script(message)) => message,
         other => panic!("expected script error, got {other:?}"),
     }
 }
@@ -394,10 +392,10 @@ async fn lifetime_cap_throws_on_spawn_attempt_1001() {
     )
     .await
     .unwrap();
-    assert_eq!(value["completed"], json!(WHALEFLOW_LIFETIME_CAP));
+    assert_eq!(value["completed"], json!(WORKFLOW_LIFETIME_CAP));
     let message = value["message"].as_str().unwrap();
     assert!(message.contains("lifetime agent cap (1000)"), "{message}");
-    assert_eq!(driver.spawn_count(), WHALEFLOW_LIFETIME_CAP as usize);
+    assert_eq!(driver.spawn_count(), WORKFLOW_LIFETIME_CAP as usize);
 }
 
 #[tokio::test]
@@ -503,12 +501,12 @@ async fn determinism_ban_new_date() {
 async fn dropping_the_run_future_cancels_outstanding_tasks() {
     let driver = Arc::new(FakeDriver::new());
     driver.on("hang", FakeReply::Never);
-    let vm = WhaleflowVm::new();
+    let vm = WorkflowVm::new();
     {
         let fut = vm.run_script(
             "await task({ description: 'hang forever' }); return 'unreachable';",
             json!(null),
-            driver.clone() as Arc<dyn codewhale_whaleflow_js::WorkflowDriver>,
+            driver.clone() as Arc<dyn codewhale_workflow_js::WorkflowDriver>,
         );
         let outcome = tokio::time::timeout(Duration::from_millis(400), fut).await;
         assert!(outcome.is_err(), "run should still be pending at timeout");

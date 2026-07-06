@@ -1,4 +1,4 @@
-//! The sandboxed QuickJS VM that executes WhaleFlow scripts.
+//! The sandboxed QuickJS VM that executes Workflow scripts.
 //!
 //! Threading model (design §2.2): `rquickjs` contexts and every `'js` value
 //! are `!Send`, so each run gets a dedicated OS thread with its own
@@ -8,7 +8,7 @@
 //! after the await resolves.
 //!
 //! Sandbox: the context registers only standard ECMAScript intrinsics plus
-//! the WhaleFlow globals (`task`, `parallel`, `pipeline`, `log`, `phase`,
+//! the Workflow globals (`task`, `parallel`, `pipeline`, `log`, `phase`,
 //! `budget`, `args`). There is no module loader, no fs/net/process access,
 //! and `Date`/`Math.random` are overridden to throw so recorded runs stay
 //! deterministic for replay.
@@ -25,9 +25,9 @@ use serde::Deserialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 
 use crate::driver::{ProgressEvent, TaskCompletion, TaskRequest, WorkflowDriver};
-use crate::error::WhaleflowJsError;
+use crate::error::WorkflowJsError;
 use crate::schema::{compile_schema, decode_reply};
-use crate::{PARALLEL_MAX_ITEMS, WHALEFLOW_LIFETIME_CAP, normalize_profile};
+use crate::{PARALLEL_MAX_ITEMS, WORKFLOW_LIFETIME_CAP, normalize_profile};
 
 const DEFAULT_VM_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 const MIN_VM_MEMORY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
@@ -41,10 +41,10 @@ const MAX_VM_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_VMS: usize = 4;
 const MAX_CONCURRENT_VMS: usize = 256;
 
-const VM_MEMORY_LIMIT_MB_ENV: &str = "CODEWHALE_WHALEFLOW_JS_MEMORY_LIMIT_MB";
-const VM_STACK_KB_ENV: &str = "CODEWHALE_WHALEFLOW_JS_STACK_KB";
-const VM_THREAD_STACK_KB_ENV: &str = "CODEWHALE_WHALEFLOW_JS_THREAD_STACK_KB";
-const VM_MAX_CONCURRENT_ENV: &str = "CODEWHALE_WHALEFLOW_JS_MAX_CONCURRENT";
+const VM_MEMORY_LIMIT_MB_ENV: &str = "CODEWHALE_WORKFLOW_JS_MEMORY_LIMIT_MB";
+const VM_STACK_KB_ENV: &str = "CODEWHALE_WORKFLOW_JS_STACK_KB";
+const VM_THREAD_STACK_KB_ENV: &str = "CODEWHALE_WORKFLOW_JS_THREAD_STACK_KB";
+const VM_MAX_CONCURRENT_ENV: &str = "CODEWHALE_WORKFLOW_JS_MAX_CONCURRENT";
 
 /// Resource limits applied to the QuickJS runtime before any script runs.
 ///
@@ -117,17 +117,17 @@ fn vm_admission() -> &'static Arc<Semaphore> {
     ADMISSION.get_or_init(|| Arc::new(Semaphore::new(max_concurrent_vms())))
 }
 
-/// Executes WhaleFlow scripts, one isolated QuickJS runtime per run.
+/// Executes Workflow scripts, one isolated QuickJS runtime per run.
 ///
-/// Every [`WhaleflowVm::run_script`] call spins up a fresh interpreter on a
+/// Every [`WorkflowVm::run_script`] call spins up a fresh interpreter on a
 /// dedicated thread, so runs share nothing (globals, heap, interned atoms)
 /// and a wedged script can never stall a sibling run.
 #[derive(Debug, Clone, Default)]
-pub struct WhaleflowVm {
+pub struct WorkflowVm {
     limits: VmLimits,
 }
 
-impl WhaleflowVm {
+impl WorkflowVm {
     /// A VM with the default [`VmLimits`].
     pub fn new() -> Self {
         Self::default()
@@ -138,7 +138,7 @@ impl WhaleflowVm {
         Self { limits }
     }
 
-    /// Run one WhaleFlow script to completion.
+    /// Run one Workflow script to completion.
     ///
     /// * `source` is the script body; it is wrapped in an async function, so
     ///   top-level `await` and `return` both work. The returned value is the
@@ -158,9 +158,9 @@ impl WhaleflowVm {
         source: &str,
         args: serde_json::Value,
         driver: Arc<dyn WorkflowDriver>,
-    ) -> Result<serde_json::Value, WhaleflowJsError> {
+    ) -> Result<serde_json::Value, WorkflowJsError> {
         let args_json = serde_json::to_string(&args)
-            .map_err(|err| WhaleflowJsError::InvalidArgs(err.to_string()))?;
+            .map_err(|err| WorkflowJsError::InvalidArgs(err.to_string()))?;
         let cancel = CancelHandle::new();
         let (result_tx, result_rx) = oneshot::channel();
         let mut guard = RunGuard {
@@ -173,13 +173,13 @@ impl WhaleflowVm {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| WhaleflowJsError::VmInit("VM admission gate closed".to_string()))?;
+            .map_err(|_| WorkflowJsError::VmInit("VM admission gate closed".to_string()))?;
         let limits = self.limits;
         let source = source.to_string();
         let thread_driver = driver.clone();
         let thread_cancel = cancel.clone();
         let spawned = std::thread::Builder::new()
-            .name("whaleflow-js-vm".to_string())
+            .name("workflow-js-vm".to_string())
             .stack_size(vm_thread_stack_bytes())
             .spawn(move || {
                 let _permit: OwnedSemaphorePermit = permit;
@@ -197,7 +197,7 @@ impl WhaleflowVm {
             });
         if let Err(err) = spawned {
             guard.armed = false;
-            return Err(WhaleflowJsError::VmInit(format!(
+            return Err(WorkflowJsError::VmInit(format!(
                 "failed to spawn VM thread: {err}"
             )));
         }
@@ -210,7 +210,7 @@ impl WhaleflowVm {
             }
             // VM thread panicked before reporting; leave the guard armed so
             // its drop (right now, at return) cancels outstanding tasks.
-            Err(_) => Err(WhaleflowJsError::VmTerminated(
+            Err(_) => Err(WorkflowJsError::VmTerminated(
                 "VM thread exited without reporting a result".to_string(),
             )),
         }
@@ -278,11 +278,11 @@ fn vm_thread_main(
     driver: Arc<dyn WorkflowDriver>,
     cancel: CancelHandle,
     limits: VmLimits,
-) -> Result<serde_json::Value, WhaleflowJsError> {
+) -> Result<serde_json::Value, WorkflowJsError> {
     let reactor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| WhaleflowJsError::VmInit(format!("failed to build VM reactor: {err}")))?;
+        .map_err(|err| WorkflowJsError::VmInit(format!("failed to build VM reactor: {err}")))?;
     reactor.block_on(run_in_vm(source, args_json, driver, cancel, limits))
 }
 
@@ -292,8 +292,8 @@ async fn run_in_vm(
     driver: Arc<dyn WorkflowDriver>,
     cancel: CancelHandle,
     limits: VmLimits,
-) -> Result<serde_json::Value, WhaleflowJsError> {
-    let runtime = AsyncRuntime::new().map_err(|err| WhaleflowJsError::VmInit(err.to_string()))?;
+) -> Result<serde_json::Value, WorkflowJsError> {
+    let runtime = AsyncRuntime::new().map_err(|err| WorkflowJsError::VmInit(err.to_string()))?;
     runtime.set_memory_limit(limits.memory_limit_bytes).await;
     runtime.set_max_stack_size(limits.max_stack_bytes).await;
     let interrupt_flag = cancel.flag_arc();
@@ -304,7 +304,7 @@ async fn run_in_vm(
         .await;
     let context = AsyncContext::full(&runtime)
         .await
-        .map_err(|err| WhaleflowJsError::VmInit(err.to_string()))?;
+        .map_err(|err| WorkflowJsError::VmInit(err.to_string()))?;
 
     let result = context
         .async_with(async |ctx| run_in_ctx(ctx, source, args_json, driver, cancel).await)
@@ -320,11 +320,11 @@ async fn run_in_ctx(
     args_json: String,
     driver: Arc<dyn WorkflowDriver>,
     cancel: CancelHandle,
-) -> Result<serde_json::Value, WhaleflowJsError> {
+) -> Result<serde_json::Value, WorkflowJsError> {
     install_host(&ctx, driver, cancel.clone(), &args_json)?;
     ctx.eval::<(), _>(prelude())
         .catch(&ctx)
-        .map_err(|err| WhaleflowJsError::VmInit(format!("prelude failed: {err}")))?;
+        .map_err(|err| WorkflowJsError::VmInit(format!("prelude failed: {err}")))?;
 
     let wrapped = format!("(async () => {{\n{source}\n}})()");
     let promise = ctx
@@ -339,32 +339,32 @@ async fn run_in_ctx(
     js_value_to_json(&ctx, value)
 }
 
-fn script_error(cancel: &CancelHandle, err: CaughtError<'_>) -> WhaleflowJsError {
+fn script_error(cancel: &CancelHandle, err: CaughtError<'_>) -> WorkflowJsError {
     if cancel.is_cancelled() {
-        WhaleflowJsError::Cancelled
+        WorkflowJsError::Cancelled
     } else {
-        WhaleflowJsError::Script(err.to_string())
+        WorkflowJsError::Script(err.to_string())
     }
 }
 
 fn js_value_to_json<'js>(
     ctx: &Ctx<'js>,
     value: Value<'js>,
-) -> Result<serde_json::Value, WhaleflowJsError> {
+) -> Result<serde_json::Value, WorkflowJsError> {
     if value.is_undefined() {
         return Ok(serde_json::Value::Null);
     }
     let text = ctx
         .json_stringify(value)
-        .map_err(|err| WhaleflowJsError::ResultEncoding(err.to_string()))?;
+        .map_err(|err| WorkflowJsError::ResultEncoding(err.to_string()))?;
     match text {
         None => Ok(serde_json::Value::Null),
         Some(text) => {
             let text = text
                 .to_string()
-                .map_err(|err| WhaleflowJsError::ResultEncoding(err.to_string()))?;
+                .map_err(|err| WorkflowJsError::ResultEncoding(err.to_string()))?;
             serde_json::from_str(&text)
-                .map_err(|err| WhaleflowJsError::ResultEncoding(err.to_string()))
+                .map_err(|err| WorkflowJsError::ResultEncoding(err.to_string()))
         }
     }
 }
@@ -374,12 +374,12 @@ fn install_host(
     driver: Arc<dyn WorkflowDriver>,
     cancel: CancelHandle,
     args_json: &str,
-) -> Result<(), WhaleflowJsError> {
+) -> Result<(), WorkflowJsError> {
     let globals = ctx.globals();
 
     let args_value: Value = ctx
         .json_parse(args_json)
-        .map_err(|err| WhaleflowJsError::InvalidArgs(err.to_string()))?;
+        .map_err(|err| WorkflowJsError::InvalidArgs(err.to_string()))?;
     globals.set("args", args_value).map_err(init_err)?;
 
     // Per-run lifetime counter (design §4.3): counts spawn *attempts*, and the
@@ -391,7 +391,7 @@ fn install_host(
     let task_cancel = cancel.clone();
     globals
         .set(
-            "__whaleflow_task",
+            "__workflow_task",
             Func::from(Async(move |opts_json: String| {
                 let driver = task_driver.clone();
                 let cancel = task_cancel.clone();
@@ -404,7 +404,7 @@ fn install_host(
     let log_driver = driver.clone();
     globals
         .set(
-            "__whaleflow_log",
+            "__workflow_log",
             Func::from(move |message: String| {
                 log_driver.progress(ProgressEvent::Log { message });
             }),
@@ -414,7 +414,7 @@ fn install_host(
     let phase_driver = driver.clone();
     globals
         .set(
-            "__whaleflow_phase",
+            "__workflow_phase",
             Func::from(move |title: String| {
                 phase_driver.progress(ProgressEvent::Phase { title });
             }),
@@ -426,7 +426,7 @@ fn install_host(
     let total_driver = driver.clone();
     globals
         .set(
-            "__whaleflow_budget_total",
+            "__workflow_budget_total",
             Func::from(move || -> f64 {
                 match total_driver.budget().total {
                     Some(total) => total as f64,
@@ -439,14 +439,14 @@ fn install_host(
     let spent_driver = driver.clone();
     globals
         .set(
-            "__whaleflow_budget_spent",
+            "__workflow_budget_spent",
             Func::from(move || -> f64 { spent_driver.budget().spent as f64 }),
         )
         .map_err(init_err)?;
 
     globals
         .set(
-            "__whaleflow_budget_remaining",
+            "__workflow_budget_remaining",
             Func::from(move || -> f64 {
                 match driver.budget().remaining() {
                     Some(remaining) => remaining as f64,
@@ -459,8 +459,8 @@ fn install_host(
     Ok(())
 }
 
-fn init_err(err: rquickjs::Error) -> WhaleflowJsError {
-    WhaleflowJsError::VmInit(err.to_string())
+fn init_err(err: rquickjs::Error) -> WorkflowJsError {
+    WorkflowJsError::VmInit(err.to_string())
 }
 
 /// The `task()` host call. Everything that can go wrong is reported through
@@ -496,9 +496,9 @@ async fn task_host_inner(
         .transpose()?;
 
     // Lifetime backstop (design §4.3) — checked and bumped before any await.
-    if spawned.get() >= WHALEFLOW_LIFETIME_CAP {
+    if spawned.get() >= WORKFLOW_LIFETIME_CAP {
         return Err(format!(
-            "task(): WhaleFlow lifetime agent cap ({WHALEFLOW_LIFETIME_CAP}) reached for this run"
+            "task(): Workflow lifetime agent cap ({WORKFLOW_LIFETIME_CAP}) reached for this run"
         ));
     }
     // Fast-fail budget gate. The authoritative reservation lives in the
@@ -603,10 +603,10 @@ fn prelude() -> String {
 const PRELUDE_TEMPLATE: &str = r#""use strict";
 (() => {
   const banned = (name) => () => {
-    throw new Error(name + " is unavailable in WhaleFlow scripts: runs must be deterministic for record/replay");
+    throw new Error(name + " is unavailable in Workflow scripts: runs must be deterministic for record/replay");
   };
   const BannedDate = function Date() {
-    throw new Error("new Date()/Date() is unavailable in WhaleFlow scripts: runs must be deterministic for record/replay");
+    throw new Error("new Date()/Date() is unavailable in Workflow scripts: runs must be deterministic for record/replay");
   };
   BannedDate.now = banned("Date.now()");
   BannedDate.parse = banned("Date.parse()");
@@ -620,7 +620,7 @@ const PRELUDE_TEMPLATE: &str = r#""use strict";
     if (opts === null || typeof opts !== "object") {
       throw new TypeError("task(): expected an options object");
     }
-    const envelope = JSON.parse(await __whaleflow_task(JSON.stringify(opts)));
+    const envelope = JSON.parse(await __workflow_task(JSON.stringify(opts)));
     if (envelope.error !== undefined) {
       throw new Error(envelope.error);
     }
@@ -664,17 +664,17 @@ const PRELUDE_TEMPLATE: &str = r#""use strict";
   };
 
   globalThis.log = (message) => {
-    __whaleflow_log(typeof message === "string" ? message : (JSON.stringify(message) ?? String(message)));
+    __workflow_log(typeof message === "string" ? message : (JSON.stringify(message) ?? String(message)));
   };
   globalThis.phase = (title) => {
-    __whaleflow_phase(String(title));
+    __workflow_phase(String(title));
   };
 
-  const total = __whaleflow_budget_total();
+  const total = __workflow_budget_total();
   globalThis.budget = Object.freeze({
     total: Number.isNaN(total) ? null : total,
-    spent: () => __whaleflow_budget_spent(),
-    remaining: () => __whaleflow_budget_remaining(),
+    spent: () => __workflow_budget_spent(),
+    remaining: () => __workflow_budget_remaining(),
   });
 })();
 "#;

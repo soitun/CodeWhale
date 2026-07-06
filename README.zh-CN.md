@@ -151,7 +151,7 @@ codewhale exec --allowed-tools read_file,exec_shell --max-turns 10 "fix the fail
 多数编程 Agent 从加码开始：更多工具、更长上下文、更多自主性。CodeWhale
 从落实责任开始。
 
-（这是本版本正在落地的设计使命；memory、cost、remote orchestration 等具体形态仍在迭代，详见下方的 v0.9.0 轨道。）
+（这是本版本正在落地的设计使命；memory、cost、remote orchestration 等具体形态仍在迭代，详见下方的后续轨道。）
 
 一个会改你仓库的 Agent 应该有一个地址——这个终端、这个用户、这个分支、
 这个会话。不是人格面具，而是一个回信地址。出了问题，“是模型干的”不是答案；
@@ -198,9 +198,9 @@ README 承载理念和最快路径，细节放在文档和 [codewhale.net](https
 - [Model Lab](docs/MODEL_LAB.md) —— 开放模型发现与评测路线图。
 - [架构](docs/ARCHITECTURE.md) —— crate 布局、运行时流程、工具系统、扩展点与安全模型。
 
-## v0.9.0 轨道
+## 后续轨道
 
-v0.9.0 是当前的集成轨道，正在那里汇聚的工作包括：
+当前发布为 0.8.67（Fleet/Workflow 易用性）。下列方向作为后续工作推进，而非当前发布内容：
 
 - 更强的跨会话、跨 Agent 的 relay 与交接界面；
 - 高密度工具运行时更安静的转录；

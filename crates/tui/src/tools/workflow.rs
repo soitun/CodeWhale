@@ -1,6 +1,6 @@
 //! Model-facing Workflow runner over the live sub-agent runtime.
 //!
-//! The JS VM stays in `codewhale-whaleflow-js`; this module supplies the TUI
+//! The JS VM stays in `codewhale-workflow-js`; this module supplies the TUI
 //! driver that turns each `task(...)` call into a real `SubAgentManager` spawn.
 
 use std::collections::HashMap;
@@ -10,16 +10,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use codewhale_whaleflow::{
+use codewhale_workflow::{
     AgentType, BranchResult, BranchSpec, BudgetSpec, ControlNodeKind, ControlNodeResult,
     IsolationMode, LeafResult, LeafSpec, ReduceSpec, SequenceSpec, TaskMode,
     WorkflowExecution as IrWorkflowExecution, WorkflowMemoUsage, WorkflowNode,
     WorkflowRunStatus as IrWorkflowRunStatus, WorkflowSpec, WorkflowUsage,
     compile_javascript_workflow, compile_typescript_workflow,
 };
-use codewhale_whaleflow_js::{
+use codewhale_workflow_js::{
     BudgetSnapshot, DriverError, ProgressEvent, SpawnedTask, TaskCompletion, TaskRequest,
-    WhaleflowVm, WorkflowDriver,
+    WorkflowDriver, WorkflowVm,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -412,7 +412,7 @@ async fn run_workflow_vm(
     runs: SharedWorkflowRuns,
     controllers: SharedWorkflowControllers,
 ) {
-    let result = WhaleflowVm::new()
+    let result = WorkflowVm::new()
         .run_script(&source, args, driver.clone())
         .await;
     let mut status = WorkflowRunStatus::Completed;

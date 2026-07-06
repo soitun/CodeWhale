@@ -62,7 +62,7 @@ one bounded docs-note worker. It keeps secrets disabled and caps trust at
       "id": "map-docs",
       "name": "Map current docs",
       "objective": "Find the docs that describe Fleet and Workflow.",
-      "instructions": "Read docs/FLEET.md and docs/WHALEFLOW_AUTHORING.md. Report the command surfaces, current limitations, and any confusing gaps.",
+      "instructions": "Read docs/FLEET.md and docs/WORKFLOW_AUTHORING.md. Report the command surfaces, current limitations, and any confusing gaps.",
       "worker": {
         "role": "reviewer",
         "profile": "reviewer",
@@ -70,14 +70,14 @@ one bounded docs-note worker. It keeps secrets disabled and caps trust at
         "model_class": "fast"
       },
       "workspace": {
-        "required_files": ["docs/FLEET.md", "docs/WHALEFLOW_AUTHORING.md"],
+        "required_files": ["docs/FLEET.md", "docs/WORKFLOW_AUTHORING.md"],
         "writable_paths": [],
         "environment": {
           "required": [],
           "allowlist": []
         }
       },
-      "input_files": ["docs/FLEET.md", "docs/WHALEFLOW_AUTHORING.md"],
+      "input_files": ["docs/FLEET.md", "docs/WORKFLOW_AUTHORING.md"],
       "expected_artifacts": ["log", "report"],
       "scorer": {
         "kind": "manual"
@@ -207,11 +207,11 @@ export default workflow({
           {
             "agent": {
               "id": "workflow-docs",
-              "prompt": "Inspect docs/WHALEFLOW_AUTHORING.md for Workflow authoring coverage.",
+              "prompt": "Inspect docs/WORKFLOW_AUTHORING.md for Workflow authoring coverage.",
               "agent_type": "review",
               "mode": "read_only",
               "profile": "reviewer",
-              "file_scope": ["docs/WHALEFLOW_AUTHORING.md"]
+              "file_scope": ["docs/WORKFLOW_AUTHORING.md"]
             }
           }
         ]

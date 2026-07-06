@@ -27,7 +27,7 @@ use crate::error::DriverError;
 ///
 /// Field semantics mirror the `agent` tool's spawn options; `profile` is the
 /// Fleet roster profile token, already trimmed + lowercased and checked
-/// against the same token rule as `crates/whaleflow`'s leaf profiles. Roster
+/// against the same token rule as `crates/workflow`'s leaf profiles. Roster
 /// membership is resolved by the driver (tui) at spawn time — this crate
 /// never sees the saved Fleet roster.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,7 +131,7 @@ pub enum ProgressEvent {
     },
 }
 
-/// Host-side executor for a WhaleFlow run.
+/// Host-side executor for a Workflow run.
 ///
 /// Implementations must be cheap to call from the VM thread: `spawn_task`
 /// admits the task and returns immediately (fire-and-forget spawn — never
@@ -155,7 +155,7 @@ pub trait WorkflowDriver: Send + Sync {
 }
 
 /// Normalize and validate a Fleet profile token: trim, lowercase, then apply
-/// the same token rule as `crates/whaleflow`'s `validate_leaf_profile` —
+/// the same token rule as `crates/workflow`'s `validate_leaf_profile` —
 /// non-empty, no whitespace, and none of `"`, `'`, `` ` ``, `=`.
 pub fn normalize_profile(raw: &str) -> Result<String, String> {
     let normalized = raw.trim().to_lowercase();

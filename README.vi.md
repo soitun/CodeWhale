@@ -230,9 +230,9 @@ trên [codewhale.net](https://codewhale.net/):
 - [Architecture](docs/ARCHITECTURE.md) — bố cục crate, luồng runtime, hệ
   thống công cụ, điểm mở rộng và mô hình bảo mật.
 
-## Track v0.9.0
+## Track tiếp theo
 
-v0.9.0 là làn tích hợp hiện tại. Những việc đang tụ về đó:
+Bản phát hành hiện tại là 0.8.67 (cải thiện khả dụng Fleet/Workflow). Những hướng dưới đây là công việc sau này, không nằm trong bản phát hành này:
 
 - bề mặt relay và handoff mạnh hơn giữa các session và agent;
 - transcript gọn gàng hơn cho các chuỗi công cụ dày đặc;

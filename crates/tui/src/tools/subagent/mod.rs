@@ -4024,7 +4024,7 @@ async fn spawn_subagent_from_input(
 /// tool. Keeping this adapter inside the sub-agent module prevents the
 /// Workflow driver from copying Fleet roster/profile/depth/budget semantics.
 pub(crate) async fn spawn_workflow_task(
-    request: codewhale_whaleflow_js::TaskRequest,
+    request: codewhale_workflow_js::TaskRequest,
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
 ) -> Result<SubAgentResult, ToolError> {

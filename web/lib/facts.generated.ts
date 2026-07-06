@@ -18,7 +18,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-07-05T18:10:35.281Z",
+  "generatedAt": "2026-07-06T04:59:02.553Z",
   "version": "0.8.67",
   "crates": [
     "agent",
@@ -36,8 +36,8 @@ export const FACTS: RepoFacts = {
     "state",
     "tools",
     "tui",
-    "whaleflow",
-    "whaleflow-js"
+    "workflow",
+    "workflow-js"
   ],
   "sandboxBackends": [
     "bwrap",
@@ -200,7 +200,7 @@ export const FACTS: RepoFacts = {
   ],
   "defaultModel": "deepseek-v4-pro",
   "nodeEngines": ">=18",
-  "toolCount": 78,
+  "toolCount": 79,
   "license": "MIT",
   "latestRelease": null
 };

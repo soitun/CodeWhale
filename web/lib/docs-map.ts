@@ -193,7 +193,7 @@ export const DOC_TOPICS: DocTopic[] = [
       en: "Durable task execution, fleet management, and Workflow authoring.",
       zh: "持久任务执行、Fleet 管理和 Workflow 编写。",
     },
-    repoSource: ["docs/FLEET.md", "docs/WHALEFLOW_AUTHORING.md"],
+    repoSource: ["docs/FLEET.md", "docs/WORKFLOW_AUTHORING.md"],
     hasPage: false,
     category: "operations",
   },

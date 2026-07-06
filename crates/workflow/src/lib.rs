@@ -1,4 +1,4 @@
-//! Typed WhaleFlow workflow configuration and validation.
+//! Typed Workflow IR and validation for CodeWhale.
 //!
 //! This crate deliberately stops at the Rust-owned IR boundary. Runtime tool
 //! exposure, worktree application, replay, and model execution are layered on
@@ -1565,13 +1565,13 @@ pub enum WorkflowFleetLimitError {
         source: WorkflowExecutionError,
     },
     #[error(
-        "workflow would launch {total_agents} agents; Fleet WhaleFlow limit is {max_total_agents}"
+        "workflow would launch {total_agents} agents; Fleet Workflow limit is {max_total_agents}"
     )]
     TooManyAgents {
         total_agents: usize,
         max_total_agents: usize,
     },
-    #[error("workflow reaches recursion depth {depth}; Fleet WhaleFlow limit is {max_depth}")]
+    #[error("workflow reaches recursion depth {depth}; Fleet Workflow limit is {max_depth}")]
     RecursionTooDeep { depth: usize, max_depth: usize },
     #[error("expand node `{node}` must declare max_children before Fleet launch")]
     UnboundedExpand { node: String },
@@ -2382,7 +2382,7 @@ mod tests {
         let workflow = WorkflowSpec {
             id: Some("v090-readme-check".to_string()),
             goal: "tighten setup docs".to_string(),
-            description: Some("metadata-only typed WhaleFlow IR".to_string()),
+            description: Some("metadata-only typed Workflow IR".to_string()),
             budget: BudgetSpec {
                 max_steps: Some(30),
                 timeout_secs: Some(1_800),
@@ -2528,7 +2528,7 @@ mod tests {
 
         let shape = workflow
             .validate_for_fleet()
-            .expect("one hundred agents should fit the Fleet WhaleFlow limit");
+            .expect("one hundred agents should fit the Fleet Workflow limit");
 
         assert_eq!(shape.total_agents, DEFAULT_FLEET_WORKFLOW_MAX_AGENTS);
         assert_eq!(shape.max_depth, 1);
@@ -3448,7 +3448,7 @@ mod tests {
                     cost_microusd: 12,
                 },
                 required_tests: vec![StudentReplayTestResult {
-                    name: "cargo test -p codewhale-whaleflow".to_string(),
+                    name: "cargo test -p codewhale-workflow".to_string(),
                     passed: true,
                 }],
                 policy_violations: Vec::new(),

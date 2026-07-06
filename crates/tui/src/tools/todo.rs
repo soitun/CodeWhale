@@ -177,7 +177,7 @@ pub fn new_shared_todo_list() -> SharedTodoList {
 const TODO_ALIAS_FIRST_DEPRECATED_VERSION: &str = "0.8.53";
 const TODO_ALIAS_REMOVAL_VERSION: &str = "0.9.0";
 const CANONICAL_WORK_SURFACE: &str = "checklist";
-const DURABLE_WORK_OWNER: &str = "fleet_whaleflow_ledger";
+const DURABLE_WORK_OWNER: &str = "fleet_workflow_ledger";
 
 fn is_compat_alias(tool_name: &str) -> bool {
     tool_name.starts_with("todo_")
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(metadata["work_surface"]["model_visible"], true);
         assert_eq!(
             metadata["work_surface"]["durable_owner"],
-            "fleet_whaleflow_ledger"
+            "fleet_workflow_ledger"
         );
         assert_eq!(
             metadata["work_surface"]["progress_key"],

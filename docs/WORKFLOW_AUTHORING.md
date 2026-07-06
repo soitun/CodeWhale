@@ -5,10 +5,6 @@ Rust `WorkflowSpec`, Rust validates the IR, and the scheduler/headless worker
 runtime executes leaves. Authoring languages do not get hidden authority to own
 files, shell, network, providers, cancellation, or TUI state.
 
-This document keeps its legacy `WHALEFLOW_AUTHORING.md` path for compatibility.
-Public UI and docs should say Workflow; internal crate and package names may
-still use `whaleflow` where renaming would create churn.
-
 For a guided walkthrough from Fleet task specs to Workflow authoring and
 monitoring, see [Fleet + Workflow Tutorial](FLEET_WORKFLOW_TUTORIAL.md).
 
@@ -65,7 +61,7 @@ a familiar declaration format, not a second execution runtime.
 
 ## Verification
 
-- `cargo test -p codewhale-whaleflow --locked javascript`
+- `cargo test -p codewhale-workflow --locked javascript`
 
 Current example: `workflows/issue_audit.workflow.js`.
 

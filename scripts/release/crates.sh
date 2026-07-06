@@ -7,7 +7,7 @@ release_crates=(
   codewhale-release
   codewhale-secrets
   codewhale-state
-  codewhale-whaleflow
+  codewhale-workflow
   codewhale-execpolicy
   codewhale-hooks
   codewhale-tools

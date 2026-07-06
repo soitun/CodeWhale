@@ -1009,8 +1009,8 @@ dependencies = [
  "codewhale-release",
  "codewhale-secrets",
  "codewhale-tools",
- "codewhale-whaleflow",
- "codewhale-whaleflow-js",
+ "codewhale-workflow",
+ "codewhale-workflow-js",
  "colored",
  "crossterm",
  "cucumber",
@@ -1071,7 +1071,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "codewhale-whaleflow"
+name = "codewhale-workflow"
 version = "0.8.67"
 dependencies = [
  "serde",
@@ -1081,7 +1081,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "codewhale-whaleflow-js"
+name = "codewhale-workflow-js"
 version = "0.8.67"
 dependencies = [
  "async-trait",

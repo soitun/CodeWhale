@@ -1,18 +1,18 @@
-//! Error types for the dynamic WhaleFlow runtime.
+//! Error types for the dynamic Workflow runtime.
 
 use thiserror::Error;
 
-/// Errors surfaced by [`crate::WhaleflowVm::run_script`].
+/// Errors surfaced by [`crate::WorkflowVm::run_script`].
 ///
 /// Script-visible failures (thrown JS exceptions, rejected promises, host
 /// function errors that were not caught inside the script) all collapse into
-/// [`WhaleflowJsError::Script`] with the exception message and stack. The
+/// [`WorkflowJsError::Script`] with the exception message and stack. The
 /// remaining variants describe runtime-level failures that never reached the
 /// script.
 #[derive(Debug, Error)]
-pub enum WhaleflowJsError {
+pub enum WorkflowJsError {
     /// The QuickJS runtime or context could not be created.
-    #[error("failed to initialize the WhaleFlow JS VM: {0}")]
+    #[error("failed to initialize the Workflow JS VM: {0}")]
     VmInit(String),
     /// The script threw (or a promise rejected) and nothing caught it.
     /// Carries the exception message plus stack when available.
@@ -32,7 +32,7 @@ pub enum WhaleflowJsError {
     /// The dedicated VM thread exited without reporting a result (panic or
     /// spawn failure). Outstanding driver tasks are cancelled when this is
     /// observed.
-    #[error("WhaleFlow VM thread terminated unexpectedly: {0}")]
+    #[error("Workflow VM thread terminated unexpectedly: {0}")]
     VmTerminated(String),
 }
 

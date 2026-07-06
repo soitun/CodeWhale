@@ -1,10 +1,10 @@
 [package]
-name = "codewhale-whaleflow"
+name = "codewhale-workflow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typed WhaleFlow workflow IR and validation for CodeWhale"
+description = "Typed Workflow IR and validation for CodeWhale"
 
 [dependencies]
 serde.workspace = true
