@@ -3958,6 +3958,77 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
 }
 
 #[test]
+fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
+    let mut app = create_test_app();
+    app.hunt.quarry = Some("Ship the release lane".to_string());
+    app.hunt.verdict = crate::tui::app::HuntVerdict::Hunting;
+    app.hunt.started_at = Some(Instant::now());
+
+    // Pause the goal — the timer freezes.
+    let paused = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release lane".to_string()),
+        status: "paused".to_string(),
+        token_budget: None,
+        tokens_used: 100,
+        time_used_seconds: 10,
+        continuation_count: 0,
+        elapsed_seconds: Some(10),
+        evidence: None,
+        blocker: None,
+        completion_verification: None,
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &paused));
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
+    let frozen_at = app
+        .hunt
+        .finished_at
+        .expect("pausing must freeze the elapsed timer");
+
+    // Usage keeps accruing while paused (record_goal_usage_for_turn runs on
+    // every turn), so a later snapshot arrives with bumped usage but the goal
+    // still paused. The frozen timer must NOT silently re-arm.
+    let paused_with_usage = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release lane".to_string()),
+        status: "paused".to_string(),
+        token_budget: None,
+        tokens_used: 250,
+        time_used_seconds: 25,
+        continuation_count: 0,
+        elapsed_seconds: Some(25),
+        evidence: None,
+        blocker: None,
+        completion_verification: None,
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &paused_with_usage));
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
+    assert_eq!(
+        app.hunt.finished_at,
+        Some(frozen_at),
+        "a paused goal's frozen timer must stay frozen when usage updates arrive"
+    );
+
+    // Explicit resume still re-arms.
+    let resumed = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release lane".to_string()),
+        status: "active".to_string(),
+        token_budget: None,
+        tokens_used: 250,
+        time_used_seconds: 25,
+        continuation_count: 1,
+        elapsed_seconds: Some(25),
+        evidence: None,
+        blocker: None,
+        completion_verification: None,
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
+    assert!(
+        app.hunt.finished_at.is_none(),
+        "resuming a paused goal should re-arm the elapsed timer"
+    );
+}
+
+#[test]
 fn turn_liveness_watchdog_clears_stale_dispatch() {
     let mut app = create_test_app();
     app.is_loading = true;
