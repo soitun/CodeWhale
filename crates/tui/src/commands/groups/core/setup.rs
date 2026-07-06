@@ -54,6 +54,11 @@ impl RegisterCommand for SetupCmd {
                     step: SetupStep::Hotbar,
                 })
             }
+            Some("tools" | "tool" | "mcp" | "tools-mcp" | "tools_mcp" | "skills" | "plugins") => {
+                CommandResult::action(AppAction::OpenSetupWizardAt {
+                    step: SetupStep::ToolsMcp,
+                })
+            }
             Some(
                 "remote" | "remote-runtime" | "remote_runtime" | "cloud" | "bridge" | "mobile"
                 | "phone",
@@ -144,6 +149,13 @@ mod tests {
             ("constitution", SetupStep::Constitution),
             ("hotbar", SetupStep::Hotbar),
             ("shortcuts", SetupStep::Hotbar),
+            ("tools", SetupStep::ToolsMcp),
+            ("tool", SetupStep::ToolsMcp),
+            ("tools-mcp", SetupStep::ToolsMcp),
+            ("tools_mcp", SetupStep::ToolsMcp),
+            ("mcp", SetupStep::ToolsMcp),
+            ("skills", SetupStep::ToolsMcp),
+            ("plugins", SetupStep::ToolsMcp),
             ("remote", SetupStep::RemoteRuntime),
             ("cloud", SetupStep::RemoteRuntime),
         ];

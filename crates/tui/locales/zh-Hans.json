@@ -575,5 +575,11 @@
   "VoiceErrTooShort": "语音：未检测到有效语音，录制时间过短",
   "VoiceRecording": "🎙 正在录音...请说话",
   "VoiceProcessing": "🎙 正在转录...",
-  "VoiceTranscribed": "🎙 转录完成"
+  "VoiceTranscribed": "🎙 转录完成",
+  "SetupToolsMcpServersLabel": "MCP 服务器：",
+  "SetupToolsMcpSkillsLabel": "技能：",
+  "SetupToolsMcpToolsLabel": "工具目录：",
+  "SetupToolsMcpPluginsLabel": "插件目录：",
+  "SetupToolsMcpReviewHint": "按 Enter 记录当前工具/MCP 事实，不创建目录，也不连接服务器。",
+  "SetupToolsMcpReviewed": "已记录工具/MCP 就绪状态。"
 }

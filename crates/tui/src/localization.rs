@@ -451,6 +451,12 @@ pub enum MessageId {
     SetupHotbarActionsLabel,
     SetupHotbarReviewHint,
     SetupHotbarReviewed,
+    SetupToolsMcpServersLabel,
+    SetupToolsMcpSkillsLabel,
+    SetupToolsMcpToolsLabel,
+    SetupToolsMcpPluginsLabel,
+    SetupToolsMcpReviewHint,
+    SetupToolsMcpReviewed,
     SetupRemoteCloudsLabel,
     SetupRemoteBridgesLabel,
     SetupRemoteProvidersLabel,
@@ -1051,6 +1057,12 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SetupHotbarActionsLabel,
     MessageId::SetupHotbarReviewHint,
     MessageId::SetupHotbarReviewed,
+    MessageId::SetupToolsMcpServersLabel,
+    MessageId::SetupToolsMcpSkillsLabel,
+    MessageId::SetupToolsMcpToolsLabel,
+    MessageId::SetupToolsMcpPluginsLabel,
+    MessageId::SetupToolsMcpReviewHint,
+    MessageId::SetupToolsMcpReviewed,
     MessageId::SetupRemoteCloudsLabel,
     MessageId::SetupRemoteBridgesLabel,
     MessageId::SetupRemoteProvidersLabel,
@@ -1473,6 +1485,18 @@ mod tests {
             .collect()
     }
 
+    fn locale_json_source(locale: Locale) -> &'static str {
+        match locale {
+            Locale::En => include_str!("../locales/en.json"),
+            Locale::Ja => include_str!("../locales/ja.json"),
+            Locale::ZhHans => include_str!("../locales/zh-Hans.json"),
+            Locale::ZhHant => include_str!("../locales/zh-Hant.json"),
+            Locale::PtBr => include_str!("../locales/pt-BR.json"),
+            Locale::Es419 => include_str!("../locales/es-419.json"),
+            Locale::Vi => include_str!("../locales/vi.json"),
+        }
+    }
+
     #[test]
     fn shipped_first_pack_has_no_missing_core_messages() {
         for locale in Locale::shipped() {
@@ -1481,6 +1505,29 @@ mod tests {
                 "{} is missing messages",
                 locale.tag()
             );
+        }
+    }
+
+    #[test]
+    fn shipped_setup_strings_are_explicitly_localized() {
+        let setup_keys = ALL_MESSAGE_IDS
+            .iter()
+            .map(|id| format!("{id:?}"))
+            .filter(|id| id.starts_with("Setup"))
+            .collect::<Vec<_>>();
+
+        for locale in Locale::shipped() {
+            let messages = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                locale_json_source(*locale),
+            )
+            .unwrap_or_else(|err| panic!("{} locale json should parse: {err}", locale.tag()));
+            for key in &setup_keys {
+                assert!(
+                    messages.contains_key(key),
+                    "{} should define {key} explicitly",
+                    locale.tag()
+                );
+            }
         }
     }
 
