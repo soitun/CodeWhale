@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The TUI leaves xterm alternate-scroll mode off when mouse capture is disabled,
   preserving native terminal text selection in light-theme/no-mouse-capture
   sessions. Contributed by Nightt (@nightt5879) (#4088, #4026).
+- The public `/api/github/feed` endpoint is now forced dynamic on Cloudflare so
+  it returns live GitHub activity instead of a build-time empty feed.
 
 ### Changed
 
