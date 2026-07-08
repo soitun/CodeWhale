@@ -1339,6 +1339,19 @@ pub struct SubAgentForkContext {
 #[derive(Clone)]
 pub struct SubAgentRuntime {
     pub client: DeepSeekClient,
+    /// Session `Config` snapshot, used to build a *fresh* LLM client bound to a
+    /// different provider when a fleet roster member's profile pins one (#4193,
+    /// the interactive-TUI twin of the headless `codewhale exec --provider`
+    /// route from #4181). The engine threads it in via
+    /// [`SubAgentRuntime::with_api_config`]; `child_runtime`/`background_runtime`
+    /// clone the `Arc` so every descendant can re-derive a provider-B client.
+    ///
+    /// `None` for legacy/test runtimes that never threaded a config. When a
+    /// profile pins a provider different from the session's and this is `None`
+    /// (or the pinned provider's credentials cannot be resolved), the spawn
+    /// FAILS rather than silently reusing the session client — a silent reuse
+    /// would send model B's id to provider A's endpoint, the exact #4093 defect.
+    pub api_config: Option<std::sync::Arc<crate::config::Config>>,
     pub model: String,
     pub auto_model: bool,
     pub reasoning_effort: Option<String>,
@@ -1434,6 +1447,7 @@ impl SubAgentRuntime {
     ) -> Self {
         Self {
             client,
+            api_config: None,
             model,
             auto_model: false,
             reasoning_effort: None,
@@ -1573,6 +1587,49 @@ impl SubAgentRuntime {
         self
     }
 
+    /// Attach the session `Config` so a spawn can build a fresh LLM client for a
+    /// fleet profile's pinned provider (#4193). Without it, cross-provider
+    /// in-process spawns fail closed rather than misrouting (see the
+    /// [`api_config`](Self::api_config) field docs). Engine-only wiring; test
+    /// and legacy runtimes may leave it unset.
+    #[must_use]
+    pub fn with_api_config(mut self, config: crate::config::Config) -> Self {
+        self.api_config = Some(std::sync::Arc::new(config));
+        self
+    }
+
+    /// Build an LLM client bound to `provider` from the threaded session
+    /// `Config` (#4193). Mirrors the proven per-provider client factory used by
+    /// per-turn auto-routing (`model_routing`) and the engine's provider switch:
+    /// clone the session config, override only its `provider`, and let
+    /// [`DeepSeekClient::new`] re-resolve that provider's base URL + credentials
+    /// from config/env.
+    ///
+    /// Returns `Err` when no config was threaded in, or when the provider's
+    /// credentials/base URL cannot be resolved. Callers MUST surface that error
+    /// rather than fall back to the session client: a silent fallback would send
+    /// the pinned model id to the session provider's endpoint (#4093).
+    fn client_for_provider(
+        &self,
+        provider: crate::config::ApiProvider,
+    ) -> Result<DeepSeekClient, String> {
+        let Some(api_config) = self.api_config.as_ref() else {
+            return Err(
+                "session Config was not threaded into this runtime; cannot build a \
+                 provider-pinned client"
+                    .to_string(),
+            );
+        };
+        let mut provider_config = (**api_config).clone();
+        // EPIC #2608: the provider is taken verbatim from the profile pin
+        // (already parsed to a canonical `ApiProvider`), never inferred from the
+        // model id. Overriding only `provider` makes `Config::api_provider`,
+        // `deepseek_base_url`, and `deepseek_api_key` all re-resolve for the
+        // pinned provider.
+        provider_config.provider = Some(provider.as_str().to_string());
+        DeepSeekClient::new(&provider_config).map_err(|err| err.to_string())
+    }
+
     /// Install the merged fleet roster (#fleet-roster cutover (v0.8.67)).
     /// The engine builds it once per session config; children inherit it.
     #[must_use]
@@ -1631,6 +1688,7 @@ impl SubAgentRuntime {
         child_context.auto_approve = self.context.auto_approve;
         Self {
             client: self.client.clone(),
+            api_config: self.api_config.clone(),
             model: self.model.clone(),
             auto_model: self.auto_model,
             reasoning_effort: self.reasoning_effort.clone(),
@@ -3815,6 +3873,43 @@ async fn cancel_agent_from_input(
     Ok(tool_result)
 }
 
+/// Resolve the LLM client a freshly spawned in-process child should run on,
+/// honoring a fleet roster member's explicit provider pin (#4193).
+///
+/// - No member, a member pinning no provider (profile-less / `inherit`), or a
+///   member pinning the session's own provider: reuse the parent/session client
+///   unchanged. Preserves pre-#4193 behavior — no regression.
+/// - A member pinning a provider DIFFERENT from the session: build a fresh
+///   client for that provider (its base URL + credentials). This is the
+///   substantive fix; the `provider` metadata tag alone is inert while the
+///   client is shared, so without this the request still hits the session
+///   provider's endpoint with model B's id (#4093).
+///
+/// A pinned-but-unbuildable provider is a hard error — never a silent fallback
+/// to the session client (that silent fallback IS the #4093 misroute). The
+/// provider comes only from the explicit pin ([`explicit_fleet_provider`]),
+/// never inferred from the model id (EPIC #2608).
+fn child_client_for_member(
+    runtime: &SubAgentRuntime,
+    member: Option<&crate::fleet::profile::AgentProfile>,
+) -> Result<DeepSeekClient, ToolError> {
+    let session_provider = runtime.client.api_provider();
+    match crate::fleet::worker_runtime::explicit_fleet_provider(member) {
+        Some(pinned) if pinned != session_provider => {
+            runtime.client_for_provider(pinned).map_err(|err| {
+                ToolError::execution_failed(format!(
+                    "fleet profile pins provider '{}' but its client could not be built \
+                     ({err}). Configure that provider's credentials/base URL, or drop the \
+                     provider pin to inherit the session provider '{}'.",
+                    pinned.as_str(),
+                    session_provider.as_str()
+                ))
+            })
+        }
+        _ => Ok(runtime.client.clone()),
+    }
+}
+
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
@@ -3849,6 +3944,14 @@ async fn spawn_subagent_from_input(
     let child_workspace = prepare_child_workspace(&runtime.context.workspace, &spawn_request)?;
 
     let mut child_runtime = runtime.background_runtime();
+    // #4193 seam 3 (the substantive fix): if the resolved roster member's
+    // profile pins a provider different from the session's, rebind the child to
+    // a fresh client for that provider BEFORE any model normalization/routing.
+    // Every downstream model decision below derives its provider from
+    // `child_runtime.client.api_provider()`, so swapping the client here is what
+    // actually routes the request to provider B's endpoint with B's creds —
+    // rather than tagging `provider = B` on a client still pointed at A (#4093).
+    child_runtime.client = child_client_for_member(&runtime, profile_member.as_ref())?;
     child_runtime.max_spawn_depth = child_max_spawn_depth_for_spawn(
         child_runtime.max_spawn_depth,
         child_runtime.spawn_depth,
@@ -3860,14 +3963,18 @@ async fn spawn_subagent_from_input(
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace;
     }
+    // #4193 seam 2: normalize/validate the requested model against the CHILD's
+    // (pinned) provider, not the session provider. `child_runtime` carries the
+    // provider-B client set above, so a profile-less/`inherit` member still
+    // sees the session provider here (no regression).
     let configured_model = match spawn_request.model.clone() {
         Some(model) => Some(normalize_requested_subagent_model(
             &model,
             "model",
-            runtime.client.api_provider(),
+            child_runtime.client.api_provider(),
         )?),
         None => configured_model_for_role_or_type(
-            &runtime,
+            &child_runtime,
             spawn_request.assignment.role.as_deref(),
             &spawn_request.agent_type,
         )?,
@@ -3905,8 +4012,13 @@ async fn spawn_subagent_from_input(
         (spawn_request.prompt, None)
     };
 
+    // #4193 seam 2 (cont.): strength/inherit/faster routing and the final
+    // provider-namespace guard both read the provider from the runtime's client,
+    // so route them through `child_runtime` (pinned provider) instead of the
+    // session `runtime`. Router candidates, reasoning-effort defaults, and the
+    // fixed-model validation then all resolve against provider B.
     let route = resolve_subagent_assignment_route(
-        &runtime,
+        &child_runtime,
         configured_model,
         &effective_prompt,
         &spawn_request.agent_type,
@@ -3915,7 +4027,7 @@ async fn spawn_subagent_from_input(
     )
     .await;
     let effective_model =
-        ensure_subagent_model_for_provider(&runtime, &route.model_route, route.model)?;
+        ensure_subagent_model_for_provider(&child_runtime, &route.model_route, route.model)?;
     child_runtime.model = effective_model.clone();
     child_runtime.reasoning_effort = route.reasoning_effort.clone();
     child_runtime.reasoning_effort_auto = false;

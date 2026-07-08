@@ -4683,6 +4683,7 @@ fn stub_runtime() -> SubAgentRuntime {
     let context = ToolContext::new(workspace.clone());
     SubAgentRuntime {
         client: stub_client(),
+        api_config: None,
         model: "deepseek-v4-flash".to_string(),
         auto_model: false,
         reasoning_effort: None,
@@ -4778,6 +4779,154 @@ fn stub_client() -> DeepSeekClient {
         ..crate::config::Config::default()
     };
     DeepSeekClient::new(&config).expect("stub client should construct")
+}
+
+// ---- #4193: interactive-TUI in-process spawn honors a profile's pinned provider ----
+
+/// A `Config` with two fully-configured providers, each on a DISTINCT host so a
+/// test can prove a child client actually re-pointed: `deepseek` is the session
+/// route, `zai` is a pinned route. Provider-scoped keys/base URLs are used (root
+/// `api_key` intentionally unset) so `deepseek_api_key`/`deepseek_base_url`
+/// resolve each provider independently.
+fn cross_provider_config() -> crate::config::Config {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let providers = crate::config::ProvidersConfig {
+        deepseek: crate::config::ProviderConfig {
+            api_key: Some("session-key".to_string()),
+            base_url: Some("https://session-provider.example.com/v1".to_string()),
+            ..Default::default()
+        },
+        zai: crate::config::ProviderConfig {
+            api_key: Some("pinned-key".to_string()),
+            base_url: Some("https://pinned-provider.example.com/v1".to_string()),
+            ..Default::default()
+        },
+        ..crate::config::ProvidersConfig::default()
+    };
+    crate::config::Config {
+        provider: Some("deepseek".to_string()),
+        providers: Some(providers),
+        ..crate::config::Config::default()
+    }
+}
+
+/// A session runtime on `deepseek` with the cross-provider `Config` threaded in,
+/// exactly as the engine wires it via `with_api_config`.
+fn cross_provider_runtime() -> SubAgentRuntime {
+    let config = cross_provider_config();
+    let client = DeepSeekClient::new(&config).expect("session client builds");
+    let mut runtime = stub_runtime().with_api_config(config);
+    runtime.client = client;
+    runtime
+}
+
+/// A roster member whose profile explicitly pins `provider` (+ an arbitrary
+/// `model`), mirroring the on-disk `[fleet]` profile shape.
+fn member_pinning_provider(provider: &str, model: &str) -> crate::fleet::profile::AgentProfile {
+    let mut profile = custom_fleet_profile("worker");
+    profile.provider = Some(provider.to_string());
+    profile.model = Some(model.to_string());
+    crate::fleet::profile::AgentProfile {
+        id: format!("{provider}-worker"),
+        display_name: Some(format!("{provider} worker")),
+        description: None,
+        profile,
+        source: std::path::PathBuf::from(format!("{provider}-worker.toml")),
+        origin: crate::fleet::roster::ProfileOrigin::Workspace,
+    }
+}
+
+#[test]
+fn spawn_child_client_targets_profile_pinned_provider() {
+    // Session runs on DeepSeek; the roster member pins Z.ai. The in-process
+    // child must issue its request to a Z.ai client (Z.ai base URL + creds),
+    // not the shared session DeepSeek client (#4193 acceptance criterion).
+    let runtime = cross_provider_runtime();
+    assert_eq!(
+        runtime.client.api_provider(),
+        crate::config::ApiProvider::Deepseek,
+        "precondition: session is on DeepSeek"
+    );
+
+    let member = member_pinning_provider("zai", "glm-4.6");
+    let child_client = child_client_for_member(&runtime, Some(&member))
+        .expect("pinned-provider client builds when its creds are configured");
+
+    assert_eq!(
+        child_client.api_provider(),
+        crate::config::ApiProvider::Zai,
+        "child client must target the profile-pinned provider (#4193)"
+    );
+    assert!(
+        child_client
+            .base_url()
+            .contains("pinned-provider.example.com"),
+        "child must talk to the pinned provider's endpoint, got {}",
+        child_client.base_url()
+    );
+    assert!(
+        !child_client
+            .base_url()
+            .contains("session-provider.example.com"),
+        "child must NOT reuse the session provider's endpoint (the #4093 misroute)"
+    );
+}
+
+#[test]
+fn spawn_child_client_inherits_session_provider_without_pin() {
+    // Regression: profile-less members and members that pin no provider (or the
+    // session's own provider) keep the session client. No cross-provider build,
+    // no misroute, no behavior change from before #4193.
+    let runtime = cross_provider_runtime();
+
+    let inherited = child_client_for_member(&runtime, None)
+        .expect("profile-less spawn reuses the session client");
+    assert_eq!(
+        inherited.api_provider(),
+        crate::config::ApiProvider::Deepseek
+    );
+    assert!(
+        inherited
+            .base_url()
+            .contains("session-provider.example.com"),
+        "profile-less child stays on the session endpoint, got {}",
+        inherited.base_url()
+    );
+
+    // A member that pins the SAME provider as the session also stays put.
+    let same = member_pinning_provider("deepseek", "deepseek-v4-flash");
+    let same_client = child_client_for_member(&runtime, Some(&same))
+        .expect("same-provider pin reuses the session client");
+    assert_eq!(
+        same_client.api_provider(),
+        crate::config::ApiProvider::Deepseek
+    );
+    assert!(
+        same_client
+            .base_url()
+            .contains("session-provider.example.com")
+    );
+}
+
+#[test]
+fn spawn_child_client_fails_closed_when_pinned_provider_unavailable() {
+    // Defense in depth (#4093): if the pinned provider's client cannot be built
+    // (here: no session Config threaded in), fail the spawn instead of silently
+    // sending the pinned model id to the session provider's endpoint.
+    let mut runtime = cross_provider_runtime();
+    runtime.api_config = None; // simulate a legacy/untethered runtime
+
+    let member = member_pinning_provider("zai", "glm-4.6");
+    // `DeepSeekClient` is not `Debug`, so match instead of `expect_err`.
+    let err = match child_client_for_member(&runtime, Some(&member)) {
+        Ok(_) => panic!("must fail closed when the pinned client cannot be built"),
+        Err(err) => err,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("zai"),
+        "error must name the pinned provider so the failure is actionable: {msg}"
+    );
 }
 
 // ---- #405 session-boundary classification ----

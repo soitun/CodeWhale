@@ -443,7 +443,12 @@ fn effective_fleet_provider(agent_profile: Option<&AgentProfile>) -> ApiProvider
 /// `--provider` off the worker argv and preserve today's behavior for
 /// profile-less / provider-less workers (they resolve their provider from
 /// their own session default). EPIC #2608: never inferred from `model`.
-fn explicit_fleet_provider(agent_profile: Option<&AgentProfile>) -> Option<ApiProvider> {
+///
+/// `pub(crate)` so the interactive-TUI in-process spawn path
+/// (`tools::subagent`) resolves the pinned provider from the SAME
+/// explicit-only source as the headless `codewhale exec` launch route (#4193),
+/// instead of re-deriving it and risking a second, divergent policy.
+pub(crate) fn explicit_fleet_provider(agent_profile: Option<&AgentProfile>) -> Option<ApiProvider> {
     agent_profile
         .and_then(|profile| profile.profile.provider.as_deref())
         .and_then(ApiProvider::parse)

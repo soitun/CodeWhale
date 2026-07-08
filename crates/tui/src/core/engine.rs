@@ -1491,6 +1491,7 @@ impl Engine {
                             Arc::clone(&self.subagent_manager),
                         )
                         .with_role_models(self.subagent_role_models())
+                        .with_api_config(self.api_config.clone())
                         .with_fleet_roster(self.config.fleet_roster.clone())
                         .with_auto_model(self.session.auto_model)
                         .with_reasoning_effort(
@@ -2599,6 +2600,7 @@ impl Engine {
                     Arc::clone(&self.subagent_manager),
                 )
                 .with_role_models(self.subagent_role_models())
+                .with_api_config(self.api_config.clone())
                 .with_fleet_roster(self.config.fleet_roster.clone())
                 .with_auto_model(self.session.auto_model)
                 .with_reasoning_effort(
