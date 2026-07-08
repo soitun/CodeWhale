@@ -178,6 +178,7 @@ fn default_codewhale_tools_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::localization::Locale;
     use crate::tui::app::{App, TuiOptions};
     use tempfile::TempDir;
 
@@ -236,6 +237,7 @@ mod tests {
         .unwrap();
 
         let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
+        app.ui_locale = Locale::En;
         let result = plugins(&mut app, None);
         let msg = result.message.expect("should return list");
         assert!(msg.contains("Plugin tools (2):"));
@@ -251,6 +253,7 @@ mod tests {
     fn test_plugins_empty_directory() {
         let dir = TempDir::new().unwrap();
         let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
+        app.ui_locale = Locale::En;
         let result = plugins(&mut app, None);
         let msg = result.message.expect("should return message");
         assert!(msg.contains("No plugin tools discovered"));
@@ -289,6 +292,7 @@ mod tests {
         .unwrap();
 
         let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
+        app.ui_locale = Locale::En;
         let result = plugins(&mut app, Some("missing"));
         assert!(result.is_error);
         let msg = result.message.expect("should return error");
