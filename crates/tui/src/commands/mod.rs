@@ -655,9 +655,9 @@ mod tests {
                 has_config = true;
                 assert_eq!(
                     commands.len(),
-                    11,
+                    12,
                     "config group (group-local metadata exception) expected \
-                     exactly 11 commands, got {}",
+                     exactly 12 commands, got {}",
                     commands.len()
                 );
             }

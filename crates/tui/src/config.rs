@@ -6312,6 +6312,12 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         // login on disk.
         return crate::oauth::auth_file_path().exists();
     }
+    if provider == ApiProvider::Xai && crate::xai_oauth::credentials_present() {
+        // xAI supports both API keys and OAuth. A Grok-compatible token file is
+        // sufficient, but its absence must fall through to the ordinary API-key
+        // checks below instead of masking a configured key.
+        return true;
+    }
 
     // Self-hosted providers typically run without authentication.
     if provider.is_self_hosted() {

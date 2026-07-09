@@ -968,11 +968,33 @@ fn auth_status_for(
             ProviderAuthStatus::OAuthMissing
         };
     }
+    if provider == ApiProvider::Xai
+        && let Some(status) = xai_oauth_status(configured, crate::xai_oauth::credentials_present())
+    {
+        return status;
+    }
     if has_key {
         ProviderAuthStatus::Configured
     } else {
         ProviderAuthStatus::Missing
     }
+}
+
+fn xai_oauth_status(
+    configured: Option<&crate::config::ProviderConfig>,
+    credentials_present: bool,
+) -> Option<ProviderAuthStatus> {
+    let oauth_selected = configured
+        .and_then(|entry| entry.auth_mode.as_deref())
+        .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth);
+    if !oauth_selected && !credentials_present {
+        return None;
+    }
+    Some(if credentials_present {
+        ProviderAuthStatus::OAuthReady
+    } else {
+        ProviderAuthStatus::OAuthMissing
+    })
 }
 
 fn has_explicit_credential(
@@ -4291,6 +4313,27 @@ mod tests {
             picker.handle_key(key(KeyCode::Enter)),
             ViewAction::EmitAndClose(ViewEvent::ProviderPickerXaiOAuthRequested)
         ));
+    }
+
+    #[test]
+    fn xai_auth_status_distinguishes_oauth_from_api_key_auth() {
+        let oauth_config = crate::config::ProviderConfig {
+            auth_mode: Some("oauth".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            xai_oauth_status(Some(&oauth_config), false),
+            Some(ProviderAuthStatus::OAuthMissing)
+        );
+        assert_eq!(
+            xai_oauth_status(Some(&oauth_config), true),
+            Some(ProviderAuthStatus::OAuthReady)
+        );
+        assert_eq!(
+            xai_oauth_status(None, true),
+            Some(ProviderAuthStatus::OAuthReady)
+        );
+        assert_eq!(xai_oauth_status(None, false), None);
     }
 
     #[test]
