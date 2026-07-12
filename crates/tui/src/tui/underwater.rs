@@ -347,6 +347,7 @@ pub fn render_footer(area: Rect, buf: &mut Buffer, app: &App) {
         ),
     )];
     if tier != ShellTier::Compact
+        && phase != ShellPhase::Done
         && let Some(status) = app
             .status_message
             .as_deref()
