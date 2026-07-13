@@ -5335,11 +5335,10 @@ async fn run_event_loop(
                             .await;
                     }
                 }
-                KeyCode::BackTab => {
-                    if app.cycle_approval_posture() {
-                        sync_mode_update(app, &engine_handle).await;
-                    }
+                KeyCode::BackTab if app.cycle_approval_posture() => {
+                    sync_mode_update(app, &engine_handle).await;
                 }
+                KeyCode::BackTab => {}
                 // Transcript-nav shortcuts now require Alt, leaving most bare
                 // letters free to insert as text. Before v0.8.30, bare `g`,
                 // `G`, `[`, `]`, `?`, and `l` on an empty composer were

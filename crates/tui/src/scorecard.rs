@@ -370,7 +370,7 @@ impl Scorecard {
                 |provider| {
                     provider_scoped_cost(
                         provider,
-                        &turn.model,
+                        turn.model,
                         turn.usage,
                         &classes,
                         turn.created_at,
