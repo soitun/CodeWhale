@@ -2041,6 +2041,97 @@ fn permission_postures_persist_across_restart() {
 }
 
 #[test]
+fn legacy_yolo_migrates_root_policy_to_agent_full_access() {
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let settings_path = tmp.path().join("settings.toml");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(&config_path, "# keep\napproval_policy = \"on-request\"\n")
+        .expect("legacy config");
+    std::fs::write(&settings_path, "default_mode = \"yolo\"\n").expect("legacy settings");
+    let _config_env = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let _approval_env = EnvVarGuard::remove("DEEPSEEK_APPROVAL_POLICY");
+    let config = Config::load(Some(config_path.clone()), None).expect("load config");
+    let mut options = test_options(false);
+    options.start_in_agent_mode = false;
+    options.workspace = workspace;
+    options.config_path = Some(config_path.clone());
+
+    let app = App::new(options.clone(), &config);
+
+    assert_eq!(app.mode, AppMode::Agent);
+    assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+    assert!(!app.approval_policy_locked());
+    let saved_config = std::fs::read_to_string(&config_path).expect("saved config");
+    assert!(saved_config.contains("# keep"));
+    assert!(!saved_config.contains("approval_policy"));
+    let saved_settings = std::fs::read_to_string(&settings_path).expect("saved settings");
+    assert!(saved_settings.contains("default_mode = \"agent\""));
+    assert!(saved_settings.contains("permission_posture = \"full-access\""));
+
+    let restarted_config = Config::load(Some(config_path), None).expect("reload config");
+    let restarted = App::new(options, &restarted_config);
+    assert_eq!(restarted.mode, AppMode::Agent);
+    assert_eq!(restarted.approval_mode, ApprovalMode::Bypass);
+    assert!(!restarted.approval_policy_locked());
+}
+
+#[test]
+fn legacy_yolo_migrates_the_actual_fallback_config_not_a_missing_env_path() {
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let home_config_dir = home.join(codewhale_config::CODEWHALE_APP_DIR);
+    let override_dir = tmp.path().join("missing-override");
+    let missing_override = override_dir.join("config.toml");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&home_config_dir).expect("home config dir");
+    std::fs::create_dir_all(&override_dir).expect("override dir");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let home_config = home_config_dir.join("config.toml");
+    std::fs::write(
+        &home_config,
+        "# actual fallback\napproval_policy = \"on-request\"\n",
+    )
+    .expect("home config");
+    let override_settings = override_dir.join("settings.toml");
+    std::fs::write(&override_settings, "default_mode = \"yolo\"\n").expect("legacy settings");
+
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _user_profile = EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home = EnvVarGuard::remove("CODEWHALE_HOME");
+    let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _deepseek_config = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &missing_override);
+    let _approval_env = EnvVarGuard::remove("DEEPSEEK_APPROVAL_POLICY");
+
+    let config = Config::load(None, None).expect("load fallback config");
+    assert_eq!(config.approval_policy.as_deref(), Some("on-request"));
+    let mut options = test_options(false);
+    options.start_in_agent_mode = false;
+    options.workspace = workspace;
+    options.config_path = None;
+
+    let app = App::new(options, &config);
+
+    assert_eq!(app.mode, AppMode::Agent);
+    assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+    assert!(!app.approval_policy_locked());
+    assert!(
+        !missing_override.exists(),
+        "migration must not create the missing DEEPSEEK_CONFIG_PATH target"
+    );
+    let saved_home_config = std::fs::read_to_string(&home_config).expect("saved fallback config");
+    assert!(saved_home_config.contains("# actual fallback"));
+    assert!(!saved_home_config.contains("approval_policy"));
+    let saved_settings =
+        std::fs::read_to_string(&override_settings).expect("normalized override settings");
+    assert!(saved_settings.contains("default_mode = \"agent\""));
+    assert!(saved_settings.contains("permission_posture = \"full-access\""));
+}
+
+#[test]
 fn managed_requirements_ignore_saved_full_access_and_lock_changes() {
     let _env_lock = lock_test_env();
     let tmp = tempfile::tempdir().expect("tempdir");

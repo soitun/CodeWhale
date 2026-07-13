@@ -242,6 +242,7 @@ impl HistoryCell {
         }
     }
 
+    #[allow(dead_code)] // retained for focused/detail renderers and direct rendering tests
     pub fn lines_with_options(
         &self,
         width: u16,
@@ -367,6 +368,7 @@ impl HistoryCell {
                     let copy_prefix_width = tool_copy_prefix_width(&line);
                     RenderedTranscriptLine {
                         line,
+                        links: Vec::new(),
                         copy_prefix_width,
                         copy_separator_after: CopyLineSeparator::Newline,
                     }

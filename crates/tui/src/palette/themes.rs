@@ -927,4 +927,17 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn every_selectable_theme_separates_live_workers_from_completed_work() {
+        for theme_id in SELECTABLE_THEMES {
+            let ui = theme_id.ui_theme();
+            assert_ne!(
+                ui.info,
+                ui.success,
+                "theme '{}' makes live workers indistinguishable from completed work",
+                theme_id.name(),
+            );
+        }
+    }
 }

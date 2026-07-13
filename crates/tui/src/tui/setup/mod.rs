@@ -546,18 +546,22 @@ impl SetupRuntimePreset {
     pub fn default_mode(self) -> &'static str {
         match self {
             Self::AskFirst => "plan",
-            Self::NormalAgent => "agent",
-            Self::HighTrustLocal => "yolo",
+            Self::NormalAgent | Self::HighTrustLocal => "agent",
+        }
+    }
+
+    pub fn permission_posture(self) -> &'static str {
+        match self {
+            Self::AskFirst | Self::NormalAgent => "ask",
+            Self::HighTrustLocal => "full-access",
         }
     }
 
     pub fn approval_policy(self) -> Option<&'static str> {
         match self {
             Self::AskFirst | Self::NormalAgent => Some("on-request"),
-            // Full Access is restored through the legacy saved-mode value.
-            // `approval_policy = "bypass"` is intentionally not a persisted
-            // config value. Interactive Shift+Tab posture is stored separately
-            // in TUI settings and cannot override managed approval policy.
+            // Full Access lives in TUI settings; it is intentionally not a
+            // top-level approval_policy value.
             Self::HighTrustLocal => None,
         }
     }
@@ -579,11 +583,12 @@ impl SetupRuntimePreset {
     pub fn result_summary(self) -> String {
         let approval = self
             .approval_policy()
-            .unwrap_or("full-access (compatibility setting)");
+            .unwrap_or("unset (Full Access saved in TUI settings)");
         format!(
-            "preset={}, default_mode={}, approval_policy={}, allow_shell={}, sandbox_mode={}, network=unchanged, trust=unchanged",
+            "preset={}, default_mode={}, permission_posture={}, approval_policy={}, allow_shell={}, sandbox_mode={}, network=unchanged, trust=unchanged",
             self.id(),
             self.display_mode(),
+            self.permission_posture(),
             approval,
             self.allow_shell(),
             self.sandbox_mode()
@@ -3111,7 +3116,7 @@ fn runtime_preset_preview_text(
 
 fn runtime_preset_diff_rows(preset: SetupRuntimePreset, facts: &SetupRuntimeFacts) -> Vec<String> {
     let approval_target = preset.approval_policy().map_or_else(
-        || "unchanged; Full Access restored from compatibility setting".to_string(),
+        || "removed; Full Access comes from settings.permission_posture".to_string(),
         ToString::to_string,
     );
     let mut rows = vec![
@@ -3119,6 +3124,10 @@ fn runtime_preset_diff_rows(preset: SetupRuntimePreset, facts: &SetupRuntimeFact
             "settings.default_mode: {} -> {}",
             facts.default_mode,
             preset.display_mode()
+        ),
+        format!(
+            "settings.permission_posture: -> {}",
+            preset.permission_posture()
         ),
         format!(
             "config.approval_policy: {} -> {}",
@@ -6236,8 +6245,9 @@ mod tests {
         assert!(content.contains("Runtime Posture Preset Preview"));
         assert!(content.contains("settings.default_mode: agent -> act + full-access"));
         assert!(content.contains(
-            "config.approval_policy: never -> unchanged; Full Access restored from compatibility setting"
+            "config.approval_policy: never -> removed; Full Access comes from settings.permission_posture"
         ));
+        assert!(content.contains("settings.permission_posture: -> full-access"));
         assert!(content.contains("config.network.default: deny -> unchanged"));
 
         let action = view.handle_key(key(KeyCode::Char('a')));

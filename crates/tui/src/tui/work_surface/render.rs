@@ -387,7 +387,10 @@ fn row_style(
         WorkTone::Attention => app.ui_theme.error_fg,
         WorkTone::Success => app.ui_theme.success,
         WorkTone::Muted => app.ui_theme.text_muted,
-        WorkTone::Worker => app.ui_theme.accent_secondary,
+        // Workers are live actors, not completed work. Keep their identity in
+        // the sky/info lane so it is visually distinct from the green used by
+        // verified checklist items below.
+        WorkTone::Worker => app.ui_theme.info,
     };
     let mut style = Style::default().fg(fg).bg(app.ui_theme.surface_bg);
     if row.tone == WorkTone::Heading {
@@ -466,9 +469,12 @@ fn render_scrollbar(
     for row in 0..usize::from(rail_height) {
         let in_thumb = row >= thumb_start && row < thumb_start.saturating_add(thumb_height);
         frame.buffer_mut()[(x, area.y.saturating_add(row as u16))]
-            .set_symbol(if in_thumb { "█" } else { "│" })
+            // Match the transcript rail exactly: a fine border track with a
+            // brighter, narrow thumb. The old solid block looked like a
+            // separate native scrollbar bolted onto the work surface.
+            .set_symbol(if in_thumb { "┃" } else { "│" })
             .set_fg(if in_thumb {
-                app.ui_theme.text_hint
+                app.ui_theme.status_working
             } else {
                 app.ui_theme.border
             })

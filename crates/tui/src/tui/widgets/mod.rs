@@ -64,16 +64,15 @@ const JUMP_TO_LATEST_BUTTON_HEIGHT: u16 = 3;
 pub struct ChatWidget {
     content_area: Rect,
     lines: Vec<Line<'static>>,
+    line_links: Vec<Vec<crate::tui::osc8::LineLink>>,
     scrollbar: Option<TranscriptScrollbar>,
     jump_to_latest_button: Option<Rect>,
     background: Color,
-    ocean_ramp: Option<crate::tui::ocean::OceanRamp>,
+    ocean_column: Option<crate::tui::ocean::OceanColumn>,
     /// Ink for idle fish/bubbles. Present for every underwater treatment —
     /// flat and Terminal-owned keep ambient life without the ombre field.
     ambient_inks: Option<(Color, Color)>,
     ocean_elapsed_ms: u128,
-    completion_elapsed_ms: Option<u128>,
-    ocean_phase: ShellPhase,
     ocean_animated: bool,
     fish_flee_elapsed_ms: Option<u128>,
     ambient_life: bool,
@@ -117,8 +116,21 @@ impl ChatWidget {
         // fish appear to die.
         let underwater_motion_enabled =
             !app.low_motion && app.fancy_animations && !app.attention_hold_active();
+        let browsing_history = !app.viewport.transcript_scroll.is_at_tail();
         let ocean_animated = underwater_motion_enabled
-            && (render_empty_state || matches!(phase, ShellPhase::Working | ShellPhase::Verifying));
+            && (render_empty_state
+                || browsing_history
+                || matches!(phase, ShellPhase::Working | ShellPhase::Verifying));
+        let ocean_column = ocean_ramp.map(|ramp| {
+            crate::tui::ocean::OceanColumn::new(
+                ramp,
+                content_area,
+                ocean_elapsed_ms,
+                completion_elapsed_ms,
+                phase,
+                ocean_animated,
+            )
+        });
         let fish_flee_elapsed_ms = underwater_motion_enabled
             .then_some(())
             .and(app.turn_started_at)
@@ -143,14 +155,13 @@ impl ChatWidget {
             return Self {
                 content_area,
                 lines,
+                line_links: Vec::new(),
                 scrollbar: None,
                 jump_to_latest_button: None,
                 background,
-                ocean_ramp,
+                ocean_column,
                 ambient_inks,
                 ocean_elapsed_ms,
-                completion_elapsed_ms,
-                ocean_phase: phase,
                 ocean_animated,
                 fish_flee_elapsed_ms,
                 // Reduced-motion users still get the quiet, static scene;
@@ -404,6 +415,11 @@ impl ChatWidget {
         } else {
             app.viewport.transcript_cache.lines()[top..end].to_vec()
         };
+        let mut line_links = if total_lines == 0 {
+            vec![Vec::new()]
+        } else {
+            app.viewport.transcript_cache.line_links()[top..end].to_vec()
+        };
 
         if !app.low_motion
             && app.fancy_animations
@@ -460,8 +476,10 @@ impl ChatWidget {
         // place until scrolling is genuinely necessary. The old anchoring is
         // retained only inside the explicitly selected classic treatment.
         if app.ocean_treatment.is_classic() && app.viewport.transcript_scroll.is_at_tail() {
-            app.viewport.last_transcript_padding_top = visible_lines.saturating_sub(lines.len());
+            let padding_top = visible_lines.saturating_sub(lines.len());
+            app.viewport.last_transcript_padding_top = padding_top;
             pad_lines_to_bottom(&mut lines, visible_lines);
+            line_links.splice(0..0, std::iter::repeat_n(Vec::new(), padding_top));
         } else {
             app.viewport.last_transcript_padding_top = 0;
         }
@@ -484,26 +502,42 @@ impl ChatWidget {
         Self {
             content_area,
             lines,
+            line_links,
             scrollbar,
             jump_to_latest_button,
             background,
-            ocean_ramp,
+            ocean_column,
             ambient_inks,
             ocean_elapsed_ms,
-            completion_elapsed_ms,
-            ocean_phase: phase,
             ocean_animated,
             fish_flee_elapsed_ms,
-            // During an active turn, animate only in blank transcript cells.
-            // `render_ambient_life` collision-checks text, so this adds life
-            // without painting over messages or receipts.
+            // Fish also accompany intentional transcript browsing. They only
+            // occupy blank cells and are collision-checked, so history stays
+            // legible while the ocean remains playful when scrolling upward.
             ambient_life: !app.attention_hold_active()
-                && matches!(phase, ShellPhase::Working | ShellPhase::Verifying),
+                && (browsing_history
+                    || matches!(phase, ShellPhase::Working | ShellPhase::Verifying)),
             scroll_track,
             scroll_thumb,
             jump_border,
             jump_arrow,
         }
+    }
+
+    /// Sample the water field against the full terminal instead of restarting
+    /// it at the transcript's first row. Standalone widget callers keep the
+    /// local column, which is useful for previews and focused tests.
+    #[must_use]
+    pub(crate) fn with_ocean_viewport(mut self, viewport: Rect) -> Self {
+        self.ocean_column = self
+            .ocean_column
+            .map(|column| column.with_viewport(viewport));
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn ocean_column(&self) -> Option<crate::tui::ocean::OceanColumn> {
+        self.ocean_column
     }
 }
 
@@ -648,14 +682,16 @@ impl Renderable for ChatWidget {
 
         self.render_underwater_field(area, buf);
 
-        // #3029: the transcript carries OSC 8 hyperlinks in-band inside span
-        // content. Scan the rendered buffer for those payloads, blank the
-        // payload cells (so no cell ever holds `\x1b`/`]8;;` — fixes the
-        // column-drift corruption), and publish the recovered link regions
-        // for ColorCompatBackend::draw to re-emit out-of-band. This is the
-        // main transcript surface; the live-transcript overlay appends its
-        // own regions separately. Replaces the frame buffer each render.
-        let regions = crate::tui::osc8::extract_buffer_link_regions(buf, area);
+        // Link targets travel beside the wrapped lines, never inside Span
+        // content. Convert relative line columns to absolute viewport regions
+        // for the backend; clip the final column when a scrollbar owns it.
+        let link_area = Rect {
+            width: area
+                .width
+                .saturating_sub(u16::from(self.scrollbar.is_some())),
+            ..area
+        };
+        let regions = crate::tui::osc8::link_regions_for_lines(link_area, &self.line_links);
         crate::tui::osc8::set_frame_links(regions);
 
         if let Some(scrollbar) = self.scrollbar {
@@ -695,30 +731,23 @@ impl ChatWidget {
     /// theme surface and Terminal keeps its inherited background, but
     /// neither means a lifeless ocean.
     fn render_underwater_field(&self, area: Rect, buf: &mut Buffer) {
-        if let Some(ramp) = self.ocean_ramp {
+        if let Some(column) = self.ocean_column {
             for local_y in 0..area.height {
                 let protected = self
                     .lines
                     .get(usize::from(local_y))
                     .and_then(occupied_text_bounds);
-                let row_bg = if let Some(elapsed) = self.completion_elapsed_ms {
-                    ramp.color_at_completion(local_y, area.height, elapsed)
-                } else if self.ocean_animated {
-                    ramp.color_at_phase(
-                        local_y,
-                        area.height,
-                        self.ocean_elapsed_ms,
-                        self.ocean_phase,
-                    )
-                } else {
-                    ramp.color_at(local_y, area.height)
-                };
+                let row_bg = column.color_at_y(area.y.saturating_add(local_y));
                 for local_x in 0..area.width {
                     let is_protected = protected.is_some_and(|(start, end)| {
                         usize::from(local_x) >= start && usize::from(local_x) < end
                     });
-                    if !is_protected {
-                        buf[(area.x + local_x, area.y + local_y)].set_bg(row_bg);
+                    let cell = &mut buf[(area.x + local_x, area.y + local_y)];
+                    // Plain transcript text participates in the water column;
+                    // explicit semantic surfaces (selection, code, warnings)
+                    // retain their own background.
+                    if !is_protected || cell.bg == self.background {
+                        cell.set_bg(row_bg);
                     }
                 }
             }
@@ -798,6 +827,27 @@ fn render_ambient_life(
     } else {
         (0, true)
     };
+    let heading_sample_ms = u128::from(crate::tui::ui::UI_UNDERWATER_ANIMATION_MS);
+    let previous_elapsed_ms = elapsed_ms.saturating_sub(heading_sample_ms);
+    let next_elapsed_ms = elapsed_ms.saturating_add(heading_sample_ms);
+    let previous_drift_a = animated
+        .then(|| ambient_ping_pong(previous_elapsed_ms, 480, span_a, 0).0)
+        .unwrap_or(drift_a);
+    let next_drift_a = animated
+        .then(|| ambient_ping_pong(next_elapsed_ms, 480, span_a, 0).0)
+        .unwrap_or(drift_a);
+    let previous_drift_b = animated
+        .then(|| ambient_ping_pong(previous_elapsed_ms, 560, span_b, 1_900).0)
+        .unwrap_or(drift_b);
+    let next_drift_b = animated
+        .then(|| ambient_ping_pong(next_elapsed_ms, 560, span_b, 1_900).0)
+        .unwrap_or(drift_b);
+    let previous_drift_c = animated
+        .then(|| ambient_ping_pong(previous_elapsed_ms, 640, span_c, 3_700).0)
+        .unwrap_or(drift_c);
+    let next_drift_c = animated
+        .then(|| ambient_ping_pong(next_elapsed_ms, 640, span_c, 3_700).0)
+        .unwrap_or(drift_c);
     let rise = if animated {
         u16::try_from((elapsed_ms / 720) % 5).unwrap_or(0)
     } else {
@@ -809,25 +859,53 @@ fn render_ambient_life(
         "°"
     };
     let flee = fish_flee_elapsed_ms.map_or(0, fish_flee_offset);
+    let previous_flee = fish_flee_elapsed_ms
+        .map(|elapsed| fish_flee_offset(elapsed.saturating_sub(heading_sample_ms)))
+        .unwrap_or(flee);
+    let next_flee = fish_flee_elapsed_ms
+        .map(|elapsed| fish_flee_offset(elapsed.saturating_add(heading_sample_ms)))
+        .unwrap_or(flee);
+    let max_fish_x = area.width.saturating_sub(3);
+    let fish_a_x = (area.width / 12 + drift_a)
+        .saturating_sub(flee)
+        .min(max_fish_x);
+    let fish_a_previous_x = (area.width / 12 + previous_drift_a)
+        .saturating_sub(previous_flee)
+        .min(max_fish_x);
+    let fish_a_next_x = (area.width / 12 + next_drift_a)
+        .saturating_sub(next_flee)
+        .min(max_fish_x);
+    let fish_b_x = (area.width * 5 / 6)
+        .saturating_sub(drift_b)
+        .saturating_add(flee)
+        .min(max_fish_x);
+    let fish_b_previous_x = (area.width * 5 / 6)
+        .saturating_sub(previous_drift_b)
+        .saturating_add(previous_flee)
+        .min(max_fish_x);
+    let fish_b_next_x = (area.width * 5 / 6)
+        .saturating_sub(next_drift_b)
+        .saturating_add(next_flee)
+        .min(max_fish_x);
+    let fish_c_x = (area.width / 3 + drift_c)
+        .saturating_sub(flee / 2)
+        .min(max_fish_x);
+    let fish_c_previous_x = (area.width / 3 + previous_drift_c)
+        .saturating_sub(previous_flee / 2)
+        .min(max_fish_x);
+    let fish_c_next_x = (area.width / 3 + next_drift_c)
+        .saturating_sub(next_flee / 2)
+        .min(max_fish_x);
+    let fish_a_faces_right =
+        fish_heading(fish_a_previous_x, fish_a_x, fish_a_next_x, fish_a_forward);
+    let fish_b_faces_right =
+        fish_heading(fish_b_previous_x, fish_b_x, fish_b_next_x, !fish_b_forward);
+    let fish_c_faces_right =
+        fish_heading(fish_c_previous_x, fish_c_x, fish_c_next_x, fish_c_forward);
     let marks = [
-        (
-            (area.width / 12 + drift_a).saturating_sub(flee),
-            area.height * 3 / 4,
-            if fish_a_forward { "><>" } else { "<><" },
-        ),
-        (
-            (area.width * 5 / 6)
-                .saturating_sub(drift_b)
-                .saturating_add(flee)
-                .min(area.width.saturating_sub(3)),
-            area.height * 3 / 8,
-            if fish_b_forward { "><>" } else { "<><" },
-        ),
-        (
-            (area.width / 3 + drift_c).saturating_sub(flee / 2),
-            area.height / 6,
-            if fish_c_forward { "><>" } else { "<><" },
-        ),
+        (fish_a_x, area.height * 3 / 4, fish_mark(fish_a_faces_right)),
+        (fish_b_x, area.height * 3 / 8, fish_mark(fish_b_faces_right)),
+        (fish_c_x, area.height / 6, fish_mark(fish_c_faces_right)),
         (
             area.width * 3 / 4,
             (area.height / 4).saturating_sub(rise),
@@ -865,23 +943,45 @@ fn fish_flee_offset(elapsed_ms: u128) -> u16 {
     excursion.round().clamp(0.0, 9.0) as u16
 }
 
-/// Discrete cells cannot use CSS easing, so continuity matters more than raw
-/// speed. This triangular path reverses instead of wrapping/teleporting, and
-/// per-fish cadence/phase keeps the empty field from looking synchronized.
+#[must_use]
+fn fish_mark(facing_right: bool) -> &'static str {
+    if facing_right { "><>" } else { "<><" }
+}
+
+/// Prefer the next visible displacement, then the most recent displacement.
+/// The fallback matters only while easing leaves the fish in the same terminal
+/// cell for several frames. Crucially, callers pass the fallback in screen-x
+/// coordinates, so mirrored paths cannot accidentally swim backwards.
+#[must_use]
+fn fish_heading(previous_x: u16, current_x: u16, next_x: u16, fallback_right: bool) -> bool {
+    if next_x != current_x {
+        next_x > current_x
+    } else if current_x != previous_x {
+        current_x > previous_x
+    } else {
+        fallback_right
+    }
+}
+
+/// A cosine-eased ping-pong path keeps the fish continuous and lets it settle
+/// gently before turning. The event loop supplies the shared underwater
+/// cadence; this function only maps elapsed time and never requests frames.
 fn ambient_ping_pong(elapsed_ms: u128, step_ms: u128, span: u16, phase_ms: u128) -> (u16, bool) {
     if span == 0 || step_ms == 0 {
         return (0, true);
     }
-    let period = u128::from(span) * 2;
-    let phase = ((elapsed_ms + phase_ms) / step_ms) % period;
-    if phase <= u128::from(span) {
-        (u16::try_from(phase).unwrap_or(span), true)
+    let leg_ms = step_ms.saturating_mul(u128::from(span));
+    let period_ms = leg_ms.saturating_mul(2);
+    let phase = (elapsed_ms.saturating_add(phase_ms)) % period_ms;
+    let (leg_elapsed, forward) = if phase <= leg_ms {
+        (phase, true)
     } else {
-        (
-            u16::try_from(period.saturating_sub(phase)).unwrap_or(0),
-            false,
-        )
-    }
+        (phase.saturating_sub(leg_ms), false)
+    };
+    let progress = leg_elapsed as f64 / leg_ms as f64;
+    let eased = (1.0 - (progress * std::f64::consts::PI).cos()) * 0.5;
+    let position = if forward { eased } else { 1.0 - eased };
+    ((position * f64::from(span)).round() as u16, forward)
 }
 
 fn jump_to_latest_button_rect(area: Rect, has_scrollbar: bool) -> Option<Rect> {
@@ -926,6 +1026,66 @@ fn render_jump_to_latest_button(
     buf[(arrow_x, arrow_y)]
         .set_symbol("↓")
         .set_style(Style::default().fg(arrow).add_modifier(Modifier::BOLD));
+}
+
+const COMPOSER_PROMPT_GUTTER_WIDTH: u16 = 2;
+
+/// Canonical horizontal geometry for composer input text.
+///
+/// The prompt glyph occupies the first gutter column and the second column is
+/// breathing room. Every consumer that wraps or maps input must use
+/// `text_area`: rendering and cursor placement, viewport scroll bookkeeping,
+/// and mouse hit-to-character conversion. Keeping the inset here prevents the
+/// first typed character and exact wrap boundaries from using different
+/// effective widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ComposerContentGeometry {
+    pub(crate) text_area: Rect,
+    pub(crate) prompt_inset: u16,
+}
+
+impl ComposerContentGeometry {
+    #[must_use]
+    pub(crate) fn text_width(self) -> usize {
+        usize::from(self.text_area.width.max(1))
+    }
+
+    #[must_use]
+    fn prompt_padding(self) -> &'static str {
+        if self.prompt_inset == COMPOSER_PROMPT_GUTTER_WIDTH {
+            "  "
+        } else {
+            ""
+        }
+    }
+
+    #[must_use]
+    fn prompt_x(self) -> Option<u16> {
+        (self.prompt_inset > 0).then(|| self.text_area.x.saturating_sub(self.prompt_inset))
+    }
+}
+
+#[must_use]
+pub(crate) fn composer_content_geometry(
+    inner_area: Rect,
+    history_search_active: bool,
+) -> ComposerContentGeometry {
+    let prompt_inset = if !history_search_active
+        && inner_area.width >= COMPOSER_PROMPT_GUTTER_WIDTH.saturating_add(1)
+    {
+        COMPOSER_PROMPT_GUTTER_WIDTH
+    } else {
+        0
+    };
+    ComposerContentGeometry {
+        text_area: Rect {
+            x: inner_area.x.saturating_add(prompt_inset),
+            y: inner_area.y,
+            width: inner_area.width.saturating_sub(prompt_inset),
+            height: inner_area.height,
+        },
+        prompt_inset,
+    }
 }
 
 pub struct ComposerWidget<'a> {
@@ -1047,13 +1207,12 @@ impl Renderable for ComposerWidget<'_> {
         let menu_lines_for_budget = self.active_menu_reserved_rows().max(menu_lines);
         let input_rows_budget =
             composer_input_rows_budget(inner_area.height, menu_lines_for_budget);
+        // Menu rows span the full inner panel. Input text alone uses the
+        // prompt-adjusted geometry below.
         let content_width = usize::from(inner_area.width.max(1));
-        // Reserve a stable two-column gutter for the prompt. It used to
-        // vanish on the first keystroke, which made the composer look like it
-        // jumped or lagged before text appeared.
-        let prompt_inset =
-            usize::from(!self.app.is_history_search_active() && inner_area.width >= 3) * 2;
-        let input_content_width = content_width.saturating_sub(prompt_inset).max(1);
+        let content_geometry =
+            composer_content_geometry(inner_area, self.app.is_history_search_active());
+        let input_content_width = content_geometry.text_width();
 
         // Use the extended version that also returns character indices to avoid
         // redundant wrapping when rendering text selections (issue #3909).
@@ -1215,7 +1374,7 @@ impl Renderable for ComposerWidget<'_> {
                 )
             };
             input_lines.push(Line::from(vec![
-                Span::raw("  "),
+                Span::raw(content_geometry.prompt_padding()),
                 Span::styled(placeholder, style),
             ]));
         } else if let Some((sel_start, sel_end)) = self.app.selection_range() {
@@ -1235,16 +1394,16 @@ impl Renderable for ComposerWidget<'_> {
                     sel_end,
                     self.app.ui_theme.selection_bg,
                 );
-                if prompt_inset > 0 {
-                    spans.insert(0, Span::raw("  "));
+                if content_geometry.prompt_inset > 0 {
+                    spans.insert(0, Span::raw(content_geometry.prompt_padding()));
                 }
                 input_lines.push(Line::from(spans));
             }
         } else {
             for line in &visible_lines {
                 let mut spans = Vec::new();
-                if prompt_inset > 0 {
-                    spans.push(Span::raw("  "));
+                if content_geometry.prompt_inset > 0 {
+                    spans.push(Span::raw(content_geometry.prompt_padding()));
                 }
                 spans.push(Span::styled(
                     line.clone(),
@@ -1542,12 +1701,10 @@ impl Renderable for ComposerWidget<'_> {
         // The prompt is a persistent focus anchor, not empty-state chrome.
         // Rendering it on every input row keeps the first character from
         // causing a visible leftward jump.
-        if !self.app.is_history_search_active()
-            && inner_area.width >= 3
+        if let Some(prompt_x) = content_geometry.prompt_x()
             && let Some((cursor_x, cursor_y)) = self.cursor_pos(area)
         {
-            let prompt_x = inner_area.x;
-            debug_assert!(cursor_x >= prompt_x.saturating_add(2));
+            debug_assert!(cursor_x >= content_geometry.text_area.x);
             buf[(prompt_x, cursor_y)]
                 .set_symbol("❯")
                 .set_style(Style::default().fg(self.app.ui_theme.accent_primary));
@@ -1569,10 +1726,9 @@ impl Renderable for ComposerWidget<'_> {
         let inner_area = self.inner_area(area);
         let input_text = self.app.composer_display_input();
         let input_cursor = self.app.composer_display_cursor();
-        let content_width = usize::from(inner_area.width.max(1));
-        let prompt_inset =
-            usize::from(!self.app.is_history_search_active() && inner_area.width >= 3) * 2;
-        let input_content_width = content_width.saturating_sub(prompt_inset).max(1);
+        let content_geometry =
+            composer_content_geometry(inner_area, self.app.is_history_search_active());
+        let input_content_width = content_geometry.text_width();
         // Match the render path's locked-budget calculation so the cursor
         // lands on the same row the input is drawn on.
         let input_rows_budget =
@@ -1599,15 +1755,12 @@ impl Renderable for ComposerWidget<'_> {
         };
         let top_padding = composer_top_padding(visual_rows, input_rows_budget);
 
-        let prompt_inset = u16::try_from(prompt_inset).unwrap_or(u16::MAX);
-        let cursor_x = area
+        let cursor_x = content_geometry
+            .text_area
             .x
-            .saturating_add(inner_area.x.saturating_sub(area.x))
-            .saturating_add(prompt_inset)
             .saturating_add(u16::try_from(cursor_col).unwrap_or(u16::MAX));
-        let cursor_y = area
+        let cursor_y = inner_area
             .y
-            .saturating_add(inner_area.y.saturating_sub(area.y))
             .saturating_add(u16::try_from(top_padding + cursor_row).unwrap_or(u16::MAX));
         if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
             Some((cursor_x, cursor_y))
@@ -3944,9 +4097,10 @@ mod tests {
         ACTIVE_REVISION_DOMAIN, ApprovalWidget, COMPOSER_PANEL_HEIGHT, COMPOSER_PLACEHOLDER,
         ChatWidget, ComposerWidget, Renderable, SlashMenuEntry, active_entry_revision,
         ambient_ping_pong, apply_detail_target_highlight, apply_selection_to_line,
-        apply_send_flash, build_empty_state_lines, composer_height, composer_max_height,
-        composer_min_input_rows, composer_top_padding, cursor_row_col, empty_composer_visual_rows,
-        fish_flee_offset, history_entry_revision, layout_input, pad_lines_to_bottom,
+        apply_send_flash, build_empty_state_lines, composer_content_geometry, composer_height,
+        composer_max_height, composer_min_input_rows, composer_top_padding, cursor_row_col,
+        empty_composer_visual_rows, fish_flee_offset, fish_heading, fish_mark,
+        history_entry_revision, layout_input, layout_input_with_scroll, pad_lines_to_bottom,
         placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
         should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
         wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
@@ -5088,6 +5242,42 @@ mod tests {
     }
 
     #[test]
+    fn composer_content_geometry_is_the_single_prompt_adjusted_text_rect() {
+        let inner = Rect::new(10, 4, 7, 3);
+        let normal = composer_content_geometry(inner, false);
+        assert_eq!(normal.prompt_inset, 2);
+        assert_eq!(normal.text_area, Rect::new(12, 4, 5, 3));
+        assert_eq!(normal.text_width(), 5);
+
+        let history = composer_content_geometry(inner, true);
+        assert_eq!(history.prompt_inset, 0);
+        assert_eq!(history.text_area, inner);
+
+        let narrow = composer_content_geometry(Rect::new(3, 2, 2, 1), false);
+        assert_eq!(narrow.prompt_inset, 0);
+        assert_eq!(narrow.text_area, Rect::new(3, 2, 2, 1));
+    }
+
+    #[test]
+    fn composer_wrap_boundary_cursor_scroll_and_mouse_lines_share_text_width() {
+        let geometry = composer_content_geometry(Rect::new(0, 0, 7, 2), false);
+        let input = "abcde";
+        let cursor = input.chars().count();
+        let width = geometry.text_width();
+
+        let (absolute_row, absolute_col) = cursor_row_col(input, cursor, width);
+        let (visible, visible_row, visible_col, scroll_offset) =
+            layout_input_with_scroll(input, cursor, width, 1);
+        let mouse_lines = wrap_input_lines_for_mouse(input, width);
+
+        assert_eq!((absolute_row, absolute_col), (1, 0));
+        assert_eq!(scroll_offset, 1);
+        assert_eq!((visible_row, visible_col), (0, 0));
+        assert_eq!(visible, vec![String::new()]);
+        assert_eq!(mouse_lines[scroll_offset], (cursor, String::new()));
+    }
+
+    #[test]
     fn empty_composer_keeps_prompt_and_hint_on_one_row() {
         let mut app = create_test_app();
         // Pin density so the test is independent of any loaded user settings.
@@ -5433,6 +5623,41 @@ mod tests {
     }
 
     #[test]
+    fn chat_widget_publishes_wrapped_url_regions_without_touching_cells() {
+        let mut app = create_test_app();
+        app.low_motion = true;
+        let target = "https://example.test/a/very/long/path/that/wraps/across/chat/rows";
+        app.add_message(HistoryCell::Assistant {
+            content: target.to_string(),
+            streaming: false,
+        });
+
+        let area = Rect::new(4, 2, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let _ = crate::tui::osc8::take_frame_links();
+        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        let regions = crate::tui::osc8::take_frame_links();
+
+        assert!(regions.len() > 1, "narrow chat should wrap: {regions:?}");
+        assert!(regions.iter().all(|region| region.target == target));
+        assert!(regions.iter().all(|region| {
+            area.contains(ratatui::layout::Position {
+                x: region.col_start,
+                y: region.row,
+            }) && area.contains(ratatui::layout::Position {
+                x: region.col_end,
+                y: region.row,
+            })
+        }));
+        assert!((area.y..area.bottom()).all(|y| {
+            (area.x..area.right()).all(|x| {
+                let symbol = buf[(x, y)].symbol();
+                !symbol.contains('\x1b') && !symbol.contains("]8;;")
+            })
+        }));
+    }
+
+    #[test]
     fn waiting_state_freezes_the_whole_ocean_field() {
         let mut app = create_test_app();
         app.low_motion = false;
@@ -5520,7 +5745,15 @@ mod tests {
         let context_cell = (0..area.height)
             .find_map(|y| (buf[(context_x, y)].symbol() == "c").then_some((context_x, y)))
             .expect("context line");
-        assert_eq!(buf[context_cell].bg, base);
+        assert_eq!(
+            buf[context_cell].bg,
+            buf[(0, context_cell.1)].bg,
+            "ordinary transcript text must share its row's water color"
+        );
+        assert_ne!(
+            buf[context_cell].bg, base,
+            "the water column should continue behind ordinary text"
+        );
     }
 
     #[test]
@@ -5533,7 +5766,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("/fleet setup"));
-        assert!(!rendered.contains("____/"));
+        assert!(!rendered.contains("▗▄▄"));
     }
 
     #[test]
@@ -5552,7 +5785,7 @@ mod tests {
             );
             if height < 14 {
                 assert!(
-                    !rendered.contains("____/"),
+                    !rendered.contains("▗▄▄"),
                     "the decorative whale must yield before the Fleet action at {width}x{height}"
                 );
             }
@@ -5683,9 +5916,59 @@ mod tests {
         let span = 11;
         assert_eq!(ambient_ping_pong(0, step, span, 0), (0, true));
         assert_eq!(ambient_ping_pong(step * 11, step, span, 0), (11, true));
-        assert_eq!(ambient_ping_pong(step * 12, step, span, 0), (10, false));
-        assert_eq!(ambient_ping_pong(step * 21, step, span, 0), (1, false));
+        let after_turn = ambient_ping_pong(step * 12, step, span, 0);
+        assert!(!after_turn.1);
+        assert!(
+            after_turn.0 >= 10,
+            "the eased turn must not jump: {after_turn:?}"
+        );
+        let near_origin = ambient_ping_pong(step * 21, step, span, 0);
+        assert!(!near_origin.1);
+        assert!(
+            near_origin.0 <= 1,
+            "the eased return should settle: {near_origin:?}"
+        );
         assert_eq!(ambient_ping_pong(step * 22, step, span, 0), (0, true));
+    }
+
+    #[test]
+    fn fish_glyph_always_matches_screen_direction() {
+        assert_eq!(fish_mark(true), "><>");
+        assert_eq!(fish_mark(false), "<><");
+        assert!(fish_heading(8, 9, 10, false));
+        assert!(!fish_heading(10, 9, 8, true));
+        assert!(fish_heading(8, 9, 9, false));
+        assert!(!fish_heading(10, 9, 9, true));
+
+        // Mirrored tracks are the regression case: a forward path flag can
+        // correspond to decreasing screen x. Heading follows x, not the flag.
+        assert!(!fish_heading(74, 73, 72, true));
+    }
+
+    #[test]
+    fn browsing_history_keeps_fish_in_available_water() {
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = true;
+        for index in 0..30 {
+            app.add_message(HistoryCell::Assistant {
+                content: format!("history row {index}"),
+                streaming: false,
+            });
+        }
+        app.viewport.transcript_scroll = TranscriptScroll::at_line(0);
+        let area = Rect::new(0, 0, 100, 20);
+        let widget = ChatWidget::new(&mut app, area);
+        assert!(widget.ambient_life);
+        assert!(widget.ocean_animated);
+
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+        assert!(
+            rendered.contains("><>") || rendered.contains("<><"),
+            "scrollback should keep fish in collision-free cells:\n{rendered}"
+        );
     }
 
     /// Probe: confirm `cell.lines_with_motion` returns no Line whose total

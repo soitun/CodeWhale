@@ -15,6 +15,10 @@ pub mod key {
         b"\r".to_vec()
     }
 
+    pub fn esc() -> Vec<u8> {
+        vec![0x1b]
+    }
+
     pub fn text(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
     }

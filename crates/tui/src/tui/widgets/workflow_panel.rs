@@ -1258,30 +1258,6 @@ impl WorkflowPanel {
         }
     }
 
-    /// Handle a key while the panel has keyboard focus.
-    /// Returns true when the key was consumed.
-    pub fn handle_key(&mut self, ch: char) -> bool {
-        if !self.keyboard_focus {
-            return false;
-        }
-        match ch {
-            't' | 'T' | ' ' => self.toggle_expanded(),
-            // Cancellation is host-owned because it must arm the exact
-            // `/workflow cancel <id>` command before dispatch. The widget
-            // never mutates lifecycle state optimistically.
-            'c' | 'C' | 'x' | 'X' => false,
-            'n' | 'N' | 'j' | 'J' => {
-                self.select_next_phase();
-                true
-            }
-            'p' | 'P' | 'k' | 'K' => {
-                self.select_prev_phase();
-                true
-            }
-            _ => false,
-        }
-    }
-
     #[must_use]
     pub fn done_total(&self) -> (usize, usize) {
         let mut done = 0usize;
@@ -1443,7 +1419,7 @@ impl WorkflowPanel {
         if self.keyboard_focus {
             lines.push(Line::from(Span::styled(
                 truncate_line_to_width(
-                    "[t] toggle  [c] cancel  [j/k] phase  click header to toggle",
+                    "[enter] toggle  [del] cancel  [up/down] phase  [esc] chat",
                     content_width,
                 ),
                 Style::default()
@@ -1985,25 +1961,13 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_and_mouse_toggle_and_cancel() {
+    fn panel_toggle_is_independent_of_text_input_routing() {
         let mut panel = started_panel();
         assert!(panel.expanded);
         assert!(panel.toggle_expanded());
         assert!(!panel.expanded);
         assert!(panel.toggle_expanded());
         assert!(panel.expanded);
-
-        // Without focus, keys ignored
-        assert!(!panel.handle_key('t'));
-
-        panel.keyboard_focus = true;
-        assert!(panel.handle_key('t'));
-        assert!(!panel.expanded);
-
-        assert!(
-            !panel.handle_key('c'),
-            "host owns armed workflow cancellation"
-        );
     }
 
     #[test]

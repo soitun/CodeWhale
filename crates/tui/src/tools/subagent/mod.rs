@@ -13,7 +13,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -112,7 +112,7 @@ fn resolve_max_steps(role: SubAgentType, explicit: Option<u32>, configured: Opti
 
 fn child_wall_time_exhausted_reason(limit: Duration) -> String {
     format!(
-        "child wall-time budget exhausted (limit: {}s); raise it with wall_time_secs, or use max_depth/max_steps/token_budget to change other child budgets",
+        "child wall-time budget exhausted (limit: {}s); raise it with wall_time_secs or split the work into smaller independent tasks",
         limit.as_secs()
     )
 }
@@ -150,6 +150,8 @@ const SUBAGENT_CHECKPOINT_MESSAGE_BUDGET_BYTES: usize = 256 * 1024;
 /// keeps a bounded tail plus the true `message_count` so inspection stays
 /// useful without pinning a whole unbounded transcript in RAM.
 const SUBAGENT_TRANSCRIPT_MESSAGE_BUDGET_BYTES: usize = 1024 * 1024;
+const SUBAGENT_TRANSCRIPT_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+const SUBAGENT_TRANSCRIPT_ARTIFACT_DIR: &str = "subagent-transcripts";
 const SUBAGENT_STATE_SCHEMA_VERSION: u32 = 1;
 const SUBAGENT_STATE_FILE: &str = "subagents.v1.json";
 const SUBAGENT_WORKTREE_ROOT_DIR: &str = ".codewhale-worktrees";
@@ -1021,9 +1023,8 @@ fn default_subagent_artifacts(run_id: &str) -> Vec<AgentRunArtifactRef> {
             kind: "transcript".to_string(),
             name: "transcript_handle".to_string(),
             target: format!("agent:{run_id}"),
-            description:
-                "Use the projection transcript_handle with handle_read for the child transcript."
-                    .to_string(),
+            description: "Open loads the complete private chat artifact; use the bounded transcript_handle with handle_read for slices and artifact metadata."
+                .to_string(),
         },
         AgentRunArtifactRef {
             kind: "receipt".to_string(),
@@ -1922,6 +1923,12 @@ pub struct SubAgent {
     /// agent as in-session vs prior-session at list time.
     pub session_boot_id: String,
     pub workspace: PathBuf,
+    /// Internal completion/cancellation arbitration bit. While set, the task
+    /// has won the right to publish its terminal notifications, but the public
+    /// status deliberately remains `Running` until those notifications are
+    /// queued (#1961). Competing cancellation/interrupt paths must treat the
+    /// claim as terminal ownership and leave the task to finalize.
+    completion_claimed: bool,
     input_tx: Option<mpsc::UnboundedSender<SubAgentInput>>,
     task_handle: Option<JoinHandle<()>>,
 }
@@ -1964,6 +1971,7 @@ impl SubAgent {
             allowed_tools,
             session_boot_id,
             workspace,
+            completion_claimed: false,
             input_tx: Some(input_tx),
             task_handle: None,
         }
@@ -2386,6 +2394,7 @@ impl SubAgentManager {
                 // manager treats that the same as a non-matching id —
                 // i.e. agent classified as prior-session.
                 session_boot_id: persisted.session_boot_id,
+                completion_claimed: false,
                 input_tx: None,
                 task_handle: None,
             };
@@ -2500,7 +2509,7 @@ impl SubAgentManager {
         let remaining = limit.saturating_sub(spent);
         if remaining < MIN_SUBAGENT_SPAWN_TOKEN_RESERVE {
             return Err(anyhow!(
-                "Sub-agent token budget exhausted for scope {scope_id}: {spent}/{limit} tokens spent, {remaining} remaining. Wait for the parent/Workflow to summarize results or start a new agent run with an explicit token_budget override."
+                "Sub-agent token budget exhausted for scope {scope_id}: {spent}/{limit} tokens spent, {remaining} remaining. Wait for the parent/Workflow to summarize results or start a fresh agent run."
             ));
         }
         Ok(Some(AgentUsageBudgetScope {
@@ -2723,7 +2732,7 @@ impl SubAgentManager {
                 .agents
                 .get_mut(&agent_id)
                 .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
-            if agent.status != SubAgentStatus::Running {
+            if agent.status != SubAgentStatus::Running || agent.completion_claimed {
                 return Ok(agent.snapshot());
             }
             agent.status = SubAgentStatus::Cancelled;
@@ -2892,7 +2901,12 @@ impl SubAgentManager {
         }
 
         let prior = self.get_result_by_ref(&agent_id)?;
-        if prior.status != SubAgentStatus::Running {
+        if prior.status != SubAgentStatus::Running
+            || self
+                .agents
+                .get(&agent_id)
+                .is_some_and(|agent| agent.completion_claimed)
+        {
             return Ok((prior.clone(), prior));
         }
 
@@ -3494,11 +3508,20 @@ impl SubAgentManager {
     pub fn cleanup(&mut self, max_age: Duration) -> usize {
         let before = self.agents.len();
         let before_workers = self.worker_records.len();
+        let mut transcript_candidates: Vec<String> = self
+            .agents
+            .keys()
+            .chain(self.worker_records.keys())
+            .cloned()
+            .collect();
+        transcript_candidates.sort();
+        transcript_candidates.dedup();
         let mut auto_cancelled = 0;
         let timeout = self.running_heartbeat_timeout;
         let mut worker_cancellations = Vec::new();
         for agent in self.agents.values_mut() {
             if agent.status == SubAgentStatus::Running
+                && !agent.completion_claimed
                 && agent.task_handle.is_some()
                 && agent.last_activity_at.elapsed() >= timeout
             {
@@ -3555,6 +3578,23 @@ impl SubAgentManager {
             let anchor_ms = record.completed_at_ms.unwrap_or(record.updated_at_ms);
             now_ms.saturating_sub(anchor_ms) < max_age_ms
         });
+        // The transcript artifact follows the same retention lifecycle as the
+        // worker ledger. Keep it while either the agent or worker record is
+        // inspectable; once both age out, remove the one deterministic file so
+        // long-lived workspaces do not accumulate silent transcript copies.
+        for agent_id in transcript_candidates {
+            if self.agents.contains_key(&agent_id) || self.worker_records.contains_key(&agent_id) {
+                continue;
+            }
+            if let Err(err) = remove_subagent_transcript_artifact(&self.workspace, &agent_id) {
+                tracing::warn!(
+                    target: "subagent",
+                    ?err,
+                    agent_id,
+                    "failed to remove expired sub-agent transcript artifact"
+                );
+            }
+        }
         if self.agents.len() != before
             || auto_cancelled > 0
             || self.worker_records.len() != before_workers
@@ -3575,40 +3615,68 @@ impl SubAgentManager {
             .is_none_or(|last| last.elapsed() >= min_interval)
     }
 
-    fn update_from_result(&mut self, agent_id: &str, result: SubAgentResult) {
-        let mut changed = false;
-        if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.status = result.status.clone();
-            agent.assignment = result.assignment.clone();
-            agent.result = result.result.clone();
-            agent.steps_taken = result.steps_taken;
-            agent.checkpoint = result.checkpoint.clone();
-            agent.needs_input = result.needs_input.clone();
-            if result.status != SubAgentStatus::Running {
-                agent.input_tx = None;
-            }
-            agent.task_handle = None;
-            changed = true;
+    /// Claim terminal delivery if this task is still the running owner.
+    ///
+    /// The claim excludes cancellation while deliberately leaving the public
+    /// status `Running`. `run_subagent_task` can therefore queue completion to
+    /// the parent before the running-child gate closes (#1961), without
+    /// holding this manager lock across any external send.
+    fn claim_terminal_delivery(&mut self, agent_id: &str) -> bool {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return false;
+        };
+        if agent.status != SubAgentStatus::Running || agent.completion_claimed {
+            return false;
         }
-        self.complete_worker_from_result(agent_id, &result);
-        if changed {
-            self.persist_state_best_effort();
-        }
+        agent.completion_claimed = true;
+        true
     }
 
-    fn update_failed(&mut self, agent_id: &str, error: String) {
-        let mut changed = false;
-        if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.status = SubAgentStatus::Failed(error.clone());
-            release_resident_leases_for(agent_id);
+    /// Commit a claimed natural task result.
+    ///
+    /// Returns `true` only when the prior claim still owns the terminal
+    /// transition. External notification is deliberately queued between
+    /// [`Self::claim_terminal_delivery`] and this commit.
+    fn update_from_result(&mut self, agent_id: &str, result: SubAgentResult) -> bool {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return false;
+        };
+        if agent.status != SubAgentStatus::Running || !agent.completion_claimed {
+            return false;
+        }
+        agent.status = result.status.clone();
+        agent.assignment = result.assignment.clone();
+        agent.result = result.result.clone();
+        agent.steps_taken = result.steps_taken;
+        agent.checkpoint = result.checkpoint.clone();
+        agent.needs_input = result.needs_input.clone();
+        if result.status != SubAgentStatus::Running {
             agent.input_tx = None;
-            agent.task_handle = None;
-            changed = true;
         }
+        agent.completion_claimed = false;
+        agent.task_handle = None;
+        self.complete_worker_from_result(agent_id, &result);
+        self.persist_state_best_effort();
+        true
+    }
+
+    /// Commit a claimed task failure.
+    /// See [`Self::update_from_result`] for the external-delivery contract.
+    fn update_failed(&mut self, agent_id: &str, error: String) -> bool {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return false;
+        };
+        if agent.status != SubAgentStatus::Running || !agent.completion_claimed {
+            return false;
+        }
+        agent.status = SubAgentStatus::Failed(error.clone());
+        agent.completion_claimed = false;
+        release_resident_leases_for(agent_id);
+        agent.input_tx = None;
+        agent.task_handle = None;
         self.fail_worker(agent_id, error);
-        if changed {
-            self.persist_state_best_effort();
-        }
+        self.persist_state_best_effort();
+        true
     }
 
     fn update_checkpoint(&mut self, agent_id: &str, checkpoint: SubAgentCheckpoint) -> bool {
@@ -3863,6 +3931,183 @@ async fn subagent_session_projection(
     }
 }
 
+/// Append-only, per-run backing store for the worker's complete structured
+/// message stream. The in-memory `full_transcript` handle deliberately keeps a
+/// bounded tail; this artifact is the durable source used by the TUI's Open
+/// action when the conversation is larger than that tail.
+struct SubAgentTranscriptArtifactWriter {
+    workspace: PathBuf,
+    path: PathBuf,
+    relative_path: PathBuf,
+    persisted_messages: usize,
+}
+
+impl SubAgentTranscriptArtifactWriter {
+    async fn for_runtime(runtime: &SubAgentRuntime, agent_id: &str) -> Result<Self> {
+        let workspace = runtime.manager.read().await.workspace.clone();
+        Self::create(&workspace, agent_id)
+    }
+
+    fn create(workspace: &Path, agent_id: &str) -> Result<Self> {
+        let workspace = normalize_subagent_workspace(workspace);
+        let relative_path = subagent_transcript_artifact_relative_path(agent_id);
+        let path = checked_subagent_transcript_artifact_path(&workspace, agent_id)?;
+        let header = json!({
+            "kind": "subagent_transcript_header",
+            "schema_version": SUBAGENT_TRANSCRIPT_ARTIFACT_SCHEMA_VERSION,
+            "agent_id": agent_id,
+        });
+        create_private_subagent_transcript(&workspace, &path, &json_line(&header)?)?;
+        Ok(Self {
+            workspace,
+            path,
+            relative_path,
+            persisted_messages: 0,
+        })
+    }
+
+    fn sync_messages(&mut self, messages: &[Message], durable: bool) -> Result<()> {
+        if messages.len() < self.persisted_messages {
+            return Err(anyhow!(
+                "sub-agent transcript history shrank from {} to {} messages",
+                self.persisted_messages,
+                messages.len()
+            ));
+        }
+
+        let mut encoded = Vec::new();
+        for (index, message) in messages.iter().enumerate().skip(self.persisted_messages) {
+            encoded.extend(json_line(&json!({
+                "kind": "message",
+                "index": index,
+                "message": message,
+            }))?);
+        }
+
+        if !encoded.is_empty() || durable {
+            append_private_subagent_transcript(&self.workspace, &self.path, &encoded, durable)?;
+        }
+        self.persisted_messages = messages.len();
+        Ok(())
+    }
+
+    fn metadata(&self, complete: bool) -> Value {
+        json!({
+            "kind": "subagent_transcript_jsonl",
+            "schema_version": SUBAGENT_TRANSCRIPT_ARTIFACT_SCHEMA_VERSION,
+            "relative_path": self.relative_path,
+            "persisted_messages": self.persisted_messages,
+            "complete": complete,
+            "contains_session_content": true,
+        })
+    }
+}
+
+fn json_line(value: &Value) -> Result<Vec<u8>> {
+    let mut encoded = serde_json::to_vec(value)?;
+    encoded.push(b'\n');
+    Ok(encoded)
+}
+
+fn subagent_transcript_artifact_relative_path(agent_id: &str) -> PathBuf {
+    let digest = crate::hashing::sha256_hex(agent_id.as_bytes());
+    Path::new(".codewhale")
+        .join("state")
+        .join(SUBAGENT_TRANSCRIPT_ARTIFACT_DIR)
+        .join(format!("{digest}.jsonl"))
+}
+
+fn checked_subagent_transcript_artifact_path(workspace: &Path, agent_id: &str) -> Result<PathBuf> {
+    checked_subagent_state_path(
+        workspace,
+        &subagent_transcript_artifact_relative_path(agent_id),
+    )
+}
+
+/// Read the complete structured worker chat for the TUI Open action. The path
+/// is derived from `agent_id` rather than accepted from handle JSON, so a
+/// corrupted or model-supplied payload cannot redirect the reader outside the
+/// manager workspace.
+pub(crate) fn load_subagent_transcript_artifact(
+    workspace: &Path,
+    agent_id: &str,
+) -> Result<Vec<Message>> {
+    let workspace = normalize_subagent_workspace(workspace);
+    let path = checked_subagent_transcript_artifact_path(&workspace, agent_id)?;
+    let raw = read_subagent_state_file(&workspace, &path)?;
+    let mut lines = raw.lines();
+    let header_line = lines
+        .next()
+        .ok_or_else(|| anyhow!("sub-agent transcript artifact is empty"))?;
+    let header: Value = serde_json::from_str(header_line)?;
+    if header.get("kind").and_then(Value::as_str) != Some("subagent_transcript_header")
+        || header.get("schema_version").and_then(Value::as_u64)
+            != Some(u64::from(SUBAGENT_TRANSCRIPT_ARTIFACT_SCHEMA_VERSION))
+        || header.get("agent_id").and_then(Value::as_str) != Some(agent_id)
+    {
+        return Err(anyhow!(
+            "sub-agent transcript artifact header does not match agent {agent_id}"
+        ));
+    }
+
+    let mut messages = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let record: Value = serde_json::from_str(line)?;
+        if record.get("kind").and_then(Value::as_str) != Some("message") {
+            return Err(anyhow!("unknown sub-agent transcript artifact record"));
+        }
+        let index = record
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| anyhow!("sub-agent transcript message is missing its index"))?;
+        if index != messages.len() {
+            return Err(anyhow!(
+                "sub-agent transcript message index {index} does not follow {}",
+                messages.len()
+            ));
+        }
+        let message = serde_json::from_value::<Message>(
+            record
+                .get("message")
+                .cloned()
+                .ok_or_else(|| anyhow!("sub-agent transcript record is missing its message"))?,
+        )?;
+        messages.push(message);
+    }
+    Ok(messages)
+}
+
+fn remove_subagent_transcript_artifact(workspace: &Path, agent_id: &str) -> Result<bool> {
+    let workspace = normalize_subagent_workspace(workspace);
+    let path = checked_subagent_transcript_artifact_path(&workspace, agent_id)?;
+    reject_workspace_relative_symlinks(&workspace, &path)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(anyhow!(
+            "sub-agent transcript artifact is not a regular file: {}",
+            path.display()
+        ));
+    }
+    fs::remove_file(path)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn write_subagent_transcript_artifact_for_test(
+    workspace: &Path,
+    agent_id: &str,
+    messages: &[Message],
+) -> Result<PathBuf> {
+    let mut writer = SubAgentTranscriptArtifactWriter::create(workspace, agent_id)?;
+    writer.sync_messages(messages, true)?;
+    Ok(writer.path)
+}
+
 fn default_state_path(workspace: &Path) -> Result<PathBuf> {
     let workspace = normalize_subagent_workspace(workspace);
     // Canonical post-rebrand state path. On first run the file won't exist yet;
@@ -3993,6 +4238,76 @@ fn open_subagent_state_file(path: &Path) -> Result<fs::File> {
 #[cfg(not(unix))]
 fn open_subagent_state_file(path: &Path) -> Result<fs::File> {
     fs::File::open(path).map_err(Into::into)
+}
+
+fn prepare_subagent_transcript_parent(workspace: &Path, path: &Path) -> Result<()> {
+    reject_workspace_relative_symlinks(workspace, path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("sub-agent transcript artifact must have a parent directory"))?;
+    fs::create_dir_all(parent)?;
+    // Re-check after creation so a pre-existing component cannot redirect the
+    // private transcript outside the workspace.
+    reject_workspace_relative_symlinks(workspace, path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn create_private_subagent_transcript(workspace: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    prepare_subagent_transcript_parent(workspace, path)?;
+    let mut file = open_private_subagent_transcript(path, false)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn append_private_subagent_transcript(
+    workspace: &Path,
+    path: &Path,
+    bytes: &[u8],
+    durable: bool,
+) -> Result<()> {
+    reject_workspace_relative_symlinks(workspace, path)?;
+    let mut file = open_private_subagent_transcript(path, true)?;
+    if !bytes.is_empty() {
+        file.write_all(bytes)?;
+    }
+    if durable {
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_private_subagent_transcript(path: &Path, append: bool) -> Result<fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .write(true)
+        .append(append)
+        .create(!append)
+        .truncate(!append)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600);
+    let file = options.open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_private_subagent_transcript(path: &Path, append: bool) -> Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .append(append)
+        .create(!append)
+        .truncate(!append)
+        .open(path)
+        .map_err(Into::into)
 }
 
 fn epoch_millis_now() -> u64 {
@@ -4166,7 +4481,7 @@ impl ToolSpec for AgentTool {
     fn description(&self) -> &'static str {
         concat!(
             "Start a focused child agent task. Prefer deliberate delegation: declare type (or profile), ",
-            "workspace_policy, expected_artifact, write_authority, and token_budget (enforced when declared; deliberate=true makes them required). ",
+            "workspace_policy, expected_artifact, and write_authority (deliberate=true makes them required). ",
             "For coordination after spawn, use agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait — ",
             "do not poll. Pass profile to spawn a saved Fleet roster member. ",
             "Legacy action=status|peek|wait|cancel remain for compatibility; prefer the narrow agents/* tools."
@@ -4268,11 +4583,6 @@ impl ToolSpec for AgentTool {
                     "maximum": 86400,
                     "description": "Optional child wall-clock budget in seconds. Default 1800; clamped to 86400."
                 },
-                "token_budget": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Optional aggregate emergency cap for this child and descendants. Omit it for normal work; only set it when the user explicitly asks for a strict limit."
-                },
                 "workspace_policy": {
                     "type": "string",
                     "enum": ["shared", "worktree"],
@@ -4289,7 +4599,7 @@ impl ToolSpec for AgentTool {
                 },
                 "deliberate": {
                     "type": "boolean",
-                    "description": "When true, require type (or profile), workspace_policy, expected_artifact, and write_authority. Token budget remains optional."
+                    "description": "When true, require type (or profile), workspace_policy, expected_artifact, and write_authority."
                 }
             },
             "required": []
@@ -5238,7 +5548,7 @@ async fn run_subagent_task(task: SubAgentTask) {
     // (`codewhale:subagent.done`) to avoid collision with normal user
     // text.
     let model_id = task.runtime.model.clone();
-    let (summary, sentinel) = match &result {
+    let (summary, sentinel, failure_error) = match &result {
         Ok(res) => {
             // Issue #2652: the child's free-text result is its self-report, not
             // verified evidence. Stamp it with a provenance marker: a soft
@@ -5254,7 +5564,7 @@ async fn run_subagent_task(task: SubAgentTask) {
                 }
                 _ => subagent_done_sentinel(&task.agent_id, res, truncated),
             };
-            (summary, sentinel)
+            (summary, sentinel, None)
         }
         Err(err) => {
             crate::logging::warn(format!(
@@ -5267,12 +5577,31 @@ async fn run_subagent_task(task: SubAgentTask) {
                 task.runtime.client.api_provider(),
                 &task.runtime.worker_profile.model,
             );
-            (
-                format!("Failed: {annotated}"),
-                subagent_failed_sentinel(&task.agent_id, &annotated),
-            )
+            let sentinel = subagent_failed_sentinel(&task.agent_id, &annotated);
+            (format!("Failed: {annotated}"), sentinel, Some(annotated))
         }
     };
+
+    let payload = format!("{summary}\n{sentinel}");
+    let agent_id = task.agent_id.clone();
+
+    // Claim terminal ownership under the manager lock, then release it before
+    // touching external sinks. The public status stays Running while claimed:
+    // this preserves #1961's running-child gate until parent completion is
+    // queued, while cancel/interrupt/cleanup paths cannot steal the terminal
+    // outcome between notification sends.
+    let completion_claimed = {
+        let mut manager = task.manager_handle.write().await;
+        manager.claim_terminal_delivery(&agent_id)
+    };
+    if !completion_claimed {
+        tracing::debug!(
+            target: "subagent",
+            agent_id = %agent_id,
+            "suppressing late task completion after another terminal outcome won"
+        );
+        return;
+    }
 
     if let Some(mb) = task.runtime.mailbox.as_ref() {
         let envelope = match &result {
@@ -5288,50 +5617,50 @@ async fn run_subagent_task(task: SubAgentTask) {
                     summary: summary.clone(),
                 },
             },
-            Err(err) => MailboxMessage::Failed {
+            Err(_) => MailboxMessage::Failed {
                 agent_id: task.agent_id.clone(),
-                error: annotate_child_model_error(
-                    &subagent_failure_message(err),
-                    &model_id,
-                    task.runtime.client.api_provider(),
-                    &task.runtime.worker_profile.model,
-                ),
+                error: failure_error
+                    .as_ref()
+                    .expect("failed task should carry annotated error")
+                    .clone(),
             },
         };
         let _ = mb.send(envelope);
     }
 
-    let payload = format!("{summary}\n{sentinel}");
-    let agent_id = task.agent_id.clone();
-
     // Wake the engine's parent turn loop if this is one of its direct
-    // children (issue #756). Issue #1961 also requires emit to happen
-    // before marking the manager terminal state so the parent can observe the
-    // completion while its "running children" gate is still open. If we
-    // update first, the parent can finalize before the completion arrives.
+    // children (issue #756). The manager lock is deliberately not held while
+    // sending to any external consumer.
     emit_parent_completion(&task.runtime, &agent_id, &payload);
 
-    let mut manager = task.manager_handle.write().await;
-    match &result {
-        Ok(res) => manager.update_from_result(&agent_id, res.clone()),
-        Err(err) => {
-            manager.update_failed(
-                &agent_id,
-                annotate_child_model_error(
-                    &subagent_failure_message(err),
-                    &model_id,
-                    task.runtime.client.api_provider(),
-                    &task.runtime.worker_profile.model,
-                ),
-            );
-        }
-    }
-
-    if let Some(event_tx) = task.runtime.event_tx {
+    if let Some(event_tx) = task.runtime.event_tx.as_ref() {
         let _ = event_tx.try_send(Event::AgentComplete {
             id: agent_id.clone(),
             result: payload,
         });
+    }
+
+    // All external sends above are nonblocking and occur without the manager
+    // lock. Only after they are queued do we close the public Running state.
+    let terminal_committed = {
+        let mut manager = task.manager_handle.write().await;
+        match &result {
+            Ok(res) => manager.update_from_result(&agent_id, res.clone()),
+            Err(_) => manager.update_failed(
+                &agent_id,
+                failure_error
+                    .as_ref()
+                    .expect("failed task should carry annotated error")
+                    .clone(),
+            ),
+        }
+    };
+    if !terminal_committed {
+        tracing::error!(
+            target: "subagent",
+            agent_id = %agent_id,
+            "claimed task completion could not commit terminal state"
+        );
     }
 }
 
@@ -5600,6 +5929,7 @@ async fn insert_subagent_full_transcript_handle(
     status: &SubAgentStatus,
     result: Option<&String>,
     checkpoint: Option<&SubAgentCheckpoint>,
+    transcript_artifact: Option<&mut SubAgentTranscriptArtifactWriter>,
     messages: &[Message],
     steps_taken: u32,
     duration_ms: u64,
@@ -5617,6 +5947,21 @@ async fn insert_subagent_full_transcript_handle(
         messages: Vec::new(),
         ..checkpoint.clone()
     });
+    let transcript_artifact = transcript_artifact.map(|writer| {
+        let synced = match writer.sync_messages(messages, *status != SubAgentStatus::Running) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(
+                    target: "subagent",
+                    ?err,
+                    agent_id,
+                    "failed to persist complete sub-agent transcript artifact"
+                );
+                false
+            }
+        };
+        writer.metadata(synced && writer.persisted_messages == messages.len())
+    });
     let payload = json!({
         "kind": "subagent_full_transcript",
         "agent_id": agent_id,
@@ -5631,7 +5976,9 @@ async fn insert_subagent_full_transcript_handle(
         "checkpoint": checkpoint_meta,
         "message_count": messages.len(),
         "omitted_messages": omitted_messages,
+        "messages_complete": omitted_messages == 0,
         "messages": bounded_messages,
+        "complete_transcript_artifact": transcript_artifact,
     });
     let mut store = runtime.context.runtime.handle_store.lock().await;
     store.insert_json(format!("agent:{agent_id}"), "full_transcript", payload)
@@ -5651,6 +5998,7 @@ async fn publish_live_subagent_transcript(
     assignment: &SubAgentAssignment,
     result: Option<&String>,
     checkpoint: Option<&SubAgentCheckpoint>,
+    transcript_artifact: Option<&mut SubAgentTranscriptArtifactWriter>,
     messages: &[Message],
     steps_taken: u32,
     started_at: Instant,
@@ -5665,6 +6013,7 @@ async fn publish_live_subagent_transcript(
         &SubAgentStatus::Running,
         result,
         checkpoint,
+        transcript_artifact,
         messages,
         steps_taken,
         duration_ms,
@@ -6042,6 +6391,29 @@ async fn run_subagent(
     let request_system = subagent_request_system_prompt(&system_prompt);
     let mut messages =
         build_initial_subagent_messages(&prompt, &assignment, &agent_type, fork_context);
+    let mut transcript_artifact =
+        match SubAgentTranscriptArtifactWriter::for_runtime(runtime, &agent_id).await {
+            Ok(mut writer) => {
+                if let Err(err) = writer.sync_messages(&messages, false) {
+                    tracing::warn!(
+                        target: "subagent",
+                        ?err,
+                        agent_id,
+                        "failed to persist initial sub-agent transcript"
+                    );
+                }
+                Some(writer)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "subagent",
+                    ?err,
+                    agent_id,
+                    "failed to initialize complete sub-agent transcript artifact"
+                );
+                None
+            }
+        };
     let (runtime_for_tools, mut child_completion_rx) = runtime_for_nested_agent_tools(
         runtime,
         &agent_id,
@@ -6096,7 +6468,6 @@ async fn run_subagent(
     // genuine success; everything else must surface its stop reason instead of
     // reporting a completed child with no payload.
     let mut stopped_naturally = false;
-
     // A worker is inspectable as soon as it is launched, not only after its
     // first model round trip. This gives Open a real conversation destination
     // while the worker is waiting on the provider.
@@ -6107,6 +6478,7 @@ async fn run_subagent(
         &assignment,
         None,
         None,
+        transcript_artifact.as_mut(),
         &messages,
         steps,
         started_at,
@@ -6139,6 +6511,7 @@ async fn run_subagent(
                 &status,
                 None,
                 latest_checkpoint.as_ref(),
+                transcript_artifact.as_mut(),
                 &messages,
                 steps,
                 duration_ms,
@@ -6249,6 +6622,7 @@ async fn run_subagent(
             &assignment,
             final_result.as_ref(),
             latest_checkpoint.as_ref(),
+            transcript_artifact.as_mut(),
             &messages,
             steps,
             started_at,
@@ -6282,6 +6656,7 @@ async fn run_subagent(
                     &status,
                     None,
                     latest_checkpoint.as_ref(),
+                    transcript_artifact.as_mut(),
                     &messages,
                     steps,
                     duration_ms,
@@ -6347,6 +6722,7 @@ async fn run_subagent(
                             &status,
                             Some(&reason),
                             Some(&checkpoint),
+                            transcript_artifact.as_mut(),
                             &messages,
                             steps,
                             duration_ms,
@@ -6446,6 +6822,7 @@ async fn run_subagent(
                 &status,
                 final_result.as_ref(),
                 latest_checkpoint.as_ref(),
+                transcript_artifact.as_mut(),
                 &messages,
                 steps,
                 duration_ms,
@@ -6517,6 +6894,7 @@ async fn run_subagent(
             &assignment,
             final_result.as_ref(),
             latest_checkpoint.as_ref(),
+            transcript_artifact.as_mut(),
             &messages,
             steps,
             started_at,
@@ -6566,6 +6944,7 @@ async fn run_subagent(
                 &assignment,
                 final_result.as_ref(),
                 latest_checkpoint.as_ref(),
+                transcript_artifact.as_mut(),
                 &messages,
                 steps,
                 started_at,
@@ -6607,6 +6986,7 @@ async fn run_subagent(
                     &assignment,
                     final_result.as_ref(),
                     latest_checkpoint.as_ref(),
+                    transcript_artifact.as_mut(),
                     &messages,
                     steps,
                     started_at,
@@ -6732,6 +7112,7 @@ async fn run_subagent(
                 &assignment,
                 final_result.as_ref(),
                 latest_checkpoint.as_ref(),
+                transcript_artifact.as_mut(),
                 &messages,
                 steps,
                 started_at,
@@ -6758,7 +7139,7 @@ async fn run_subagent(
     } else {
         SubAgentStatus::Failed(format!(
             "child step budget exhausted (limit: {max_steps} steps; used: {steps}); \
-             raise it with max_steps, or use max_depth/token_budget for other child budgets"
+             raise it with max_steps or split the work into smaller independent tasks"
         ))
     };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -6777,6 +7158,7 @@ async fn run_subagent(
         &status,
         final_result.as_ref(),
         latest_checkpoint.as_ref(),
+        transcript_artifact.as_mut(),
         &messages,
         steps,
         duration_ms,
@@ -7094,7 +7476,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
 
     // Deliberate delegation contract: when `deliberate=true`, require the
     // model to declare task type (or profile), workspace policy, expected
-    // artifact, write authority, and token budget. The declared values are
+    // artifact, and write authority. The declared values are
     // parsed and ENFORCED whenever present (deliberate or not): declaring
     // authority the runtime ignores would be a false affordance
     // (TUI-DOG-017).

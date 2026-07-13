@@ -1401,13 +1401,12 @@ struct SidebarToolRow {
 /// Row sets shared by the Tasks panel line renderer and hover-text builder.
 ///
 /// Computed once per frame in `render_sidebar_tasks` (#3898): both consumers
-/// previously recomputed `active_tool_rows` / `reasoning_task_rows` /
-/// `background_task_rows` (a clone+sort of `app.task_panel`) independently,
+/// previously recomputed `active_tool_rows` / `background_task_rows` (a
+/// clone+sort of `app.task_panel`) independently,
 /// doubling the work and risking the two passes disagreeing across an
 /// `Instant::elapsed` TTL boundary within the same frame.
 struct TaskPanelRowSets {
     active: Vec<SidebarToolRow>,
-    reasoning: Vec<TaskPanelEntry>,
     background: Vec<TaskPanelEntry>,
     recent: Vec<SidebarToolRow>,
 }
@@ -1415,10 +1414,6 @@ struct TaskPanelRowSets {
 fn task_panel_row_sets(app: &App) -> TaskPanelRowSets {
     let explicit_tasks_focus = app.sidebar_focus == SidebarFocus::Tasks;
     let active = active_tool_rows(app);
-    // Model reasoning belongs to the optional transcript detail, never to the
-    // activity surface. Keeping it out of this top-level panel prevents a
-    // long thinking stream from crowding out workers and real work.
-    let reasoning = Vec::new();
     // Auto/Pinned mode deliberately skips live-tool dedup (passes an empty
     // slice), matching the previous per-consumer call sites.
     let background = background_task_rows(app, if explicit_tasks_focus { &active } else { &[] });
@@ -1429,7 +1424,6 @@ fn task_panel_row_sets(app: &App) -> TaskPanelRowSets {
     };
     TaskPanelRowSets {
         active,
-        reasoning,
         background,
         recent,
     }
@@ -1478,12 +1472,6 @@ fn task_panel_rows(
     if explicit_tasks_focus && !active_rows.is_empty() && lines.len() < max_rows {
         push_sidebar_label_theme(&mut lines, "Live tools", theme);
         push_tool_rows(&mut lines, active_rows, content_width, max_rows, theme);
-    }
-
-    let reasoning_rows = &row_sets.reasoning;
-    if explicit_tasks_focus && !reasoning_rows.is_empty() && lines.len() < max_rows {
-        push_sidebar_label_theme(&mut lines, "Model reasoning", theme);
-        push_reasoning_rows(&mut lines, reasoning_rows, content_width, max_rows, theme);
     }
 
     let background_rows = &row_sets.background;
@@ -1609,7 +1597,6 @@ fn task_panel_rows(
         || (lines.len() == 1
             && app.runtime_turn_id.is_some()
             && active_rows.is_empty()
-            && reasoning_rows.is_empty()
             && background_rows.is_empty())
     {
         lines.push(Line::from(Span::styled(
@@ -1637,12 +1624,6 @@ fn task_panel_hover_texts(app: &App, row_sets: &TaskPanelRowSets, max_rows: usiz
     if explicit_tasks_focus && !active_rows.is_empty() && texts.len() < max_rows {
         texts.push("Live tools".to_string());
         push_tool_row_hover_texts(&mut texts, active_rows, max_rows);
-    }
-
-    let reasoning_rows = &row_sets.reasoning;
-    if explicit_tasks_focus && !reasoning_rows.is_empty() && texts.len() < max_rows {
-        texts.push("Model reasoning".to_string());
-        push_reasoning_row_hover_texts(&mut texts, reasoning_rows, max_rows);
     }
 
     let background_rows = &row_sets.background;
@@ -1715,7 +1696,6 @@ fn task_panel_hover_texts(app: &App, row_sets: &TaskPanelRowSets, max_rows: usiz
         || (texts.len() == 1
             && app.runtime_turn_id.is_some()
             && active_rows.is_empty()
-            && reasoning_rows.is_empty()
             && background_rows.is_empty())
     {
         texts.push("No live tools or background jobs".to_string());
@@ -1745,69 +1725,6 @@ fn push_tool_row_hover_texts(texts: &mut Vec<String>, rows: &[SidebarToolRow], m
         texts.push(label);
         if !row.summary.trim().is_empty() && texts.len() < max_rows {
             texts.push(format!("  {}", row.summary));
-        }
-    }
-}
-
-fn push_reasoning_rows(
-    lines: &mut Vec<Line<'static>>,
-    rows: &[TaskPanelEntry],
-    content_width: usize,
-    max_rows: usize,
-    theme: &palette::UiTheme,
-) {
-    for task in rows {
-        if lines.len() >= max_rows {
-            break;
-        }
-        let color = match task.status.as_str() {
-            "running" => theme.warning,
-            "completed" => theme.success,
-            "failed" => theme.error_fg,
-            _ => theme.text_muted,
-        };
-        let duration = task
-            .duration_ms
-            .map(format_duration_ms)
-            .unwrap_or_else(|| "-".to_string());
-        lines.push(Line::from(Span::styled(
-            truncate_line_to_width(
-                &format!("thinking {} {duration}", task.status),
-                content_width,
-            ),
-            Style::default().fg(color),
-        )));
-        if !task.prompt_summary.trim().is_empty() && lines.len() < max_rows {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {}",
-                    truncate_line_to_width(
-                        &task.prompt_summary,
-                        content_width.saturating_sub(2).max(1)
-                    )
-                ),
-                Style::default().fg(theme.text_dim),
-            )));
-        }
-    }
-}
-
-fn push_reasoning_row_hover_texts(
-    texts: &mut Vec<String>,
-    rows: &[TaskPanelEntry],
-    max_rows: usize,
-) {
-    for task in rows {
-        if texts.len() >= max_rows {
-            break;
-        }
-        let duration = task
-            .duration_ms
-            .map(format_duration_ms)
-            .unwrap_or_else(|| "-".to_string());
-        texts.push(format!("thinking {} {duration}", task.status));
-        if !task.prompt_summary.trim().is_empty() && texts.len() < max_rows {
-            texts.push(format!("  {}", task.prompt_summary));
         }
     }
 }
@@ -2910,12 +2827,12 @@ fn indented_detail_line(indent: &str, body: &str, content_width: usize) -> Strin
     )
 }
 
-/// #4094: reference to a worker's full output transcript, surfaced as a
+/// #4094: reference to a worker's transcript projection, surfaced as a
 /// `handle_read` handle instead of dumping the (possibly huge) transcript
 /// inline — the inline dump is the freeze/emptiness risk this issue tracks.
 /// The child transcript is addressable as the `agent:<id>/full_transcript` var
-/// handle (see `subagent_session_projection`), so the panel hands the user a
-/// copyable reference to the fuller artifact rather than the bytes themselves.
+/// handle (see `subagent_session_projection`); its JSON names the private
+/// complete artifact, while clicking Open loads that artifact directly.
 ///
 /// Returns `None` for workers that have not produced anything inspectable yet,
 /// so an empty transcript is never advertised. This is the one place a raw
@@ -3088,10 +3005,10 @@ fn subagent_panel_rows(
             agent_id: row.id.clone(),
         }));
 
-        // #4094: hand the user a copyable handle to the worker's *full* output
-        // transcript instead of dumping it inline — the inline dump is this
-        // issue's freeze/emptiness risk. The bounded dossier above is the
-        // preview; this is the "inspect/copy more" affordance the AC calls for.
+        // #4094: hand the user a copyable bounded projection instead of
+        // dumping the transcript inline — the inline dump is this issue's
+        // freeze/emptiness risk. Clicking the row opens the complete private
+        // artifact; handle_read exposes bounded slices and its artifact path.
         // Guarded by `max_rows` so the panel stays bounded, and width-clamped so
         // narrow terminals never overflow.
         if let Some(handle) = subagent_output_handle(row) {
@@ -3101,7 +3018,7 @@ fn subagent_panel_rows(
             lines.push(Line::from(Span::styled(
                 indented_detail_line(
                     "  ",
-                    &format!("\u{25B8} full output \u{00B7} handle_read {handle}"),
+                    &format!("\u{25B8} complete chat: open \u{00B7} handle_read {handle}"),
                     content_width.max(1),
                 ),
                 Style::default().fg(theme.text_muted),
@@ -5230,36 +5147,6 @@ mod tests {
     }
 
     #[test]
-    fn tasks_panel_hides_model_reasoning_from_activity() {
-        let mut app = create_test_app();
-        app.sidebar_focus = SidebarFocus::Tasks;
-        app.task_panel.push(TaskPanelEntry {
-            id: "reasoning-1".to_string(),
-            status: "running".to_string(),
-            prompt_summary: "model reasoning".to_string(),
-            duration_ms: Some(4_200),
-            kind: TaskPanelEntryKind::ModelReasoning,
-            stale: false,
-            elapsed_since_output_ms: None,
-            owner_agent_id: None,
-            owner_agent_name: None,
-        });
-
-        let text = lines_to_text(&task_panel_lines(&app, 80, 8));
-
-        assert!(
-            !text
-                .iter()
-                .any(|line| line.contains("Model reasoning") || line.contains("thinking")),
-            "reasoning must stay out of the Activity panel: {text:?}"
-        );
-        assert!(
-            !text.iter().any(|line| line.contains("Bash jobs")),
-            "reasoning must not be counted as a background command: {text:?}"
-        );
-    }
-
-    #[test]
     fn tasks_panel_auto_mode_shows_only_live_background_jobs() {
         let mut app = create_test_app();
         app.low_motion = false;
@@ -5292,17 +5179,6 @@ mod tests {
                 output_summary: Some("found AgentProgress".to_string()),
                 is_diff: false,
             })));
-        app.task_panel.push(TaskPanelEntry {
-            id: "reasoning-1".to_string(),
-            status: "running".to_string(),
-            prompt_summary: "model reasoning".to_string(),
-            duration_ms: Some(4_200),
-            kind: TaskPanelEntryKind::ModelReasoning,
-            stale: false,
-            elapsed_since_output_ms: None,
-            owner_agent_id: None,
-            owner_agent_name: None,
-        });
         app.task_panel.push(TaskPanelEntry {
             id: "shell_live".to_string(),
             status: "running".to_string(),
@@ -5340,6 +5216,30 @@ mod tests {
                 "auto Tasks should not show {hidden:?}: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn tasks_panel_keeps_model_reasoning_in_transcript_only() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Tasks;
+        app.runtime_turn_id = Some("turn_reasoning".to_string());
+        app.runtime_turn_status = Some("in_progress".to_string());
+        app.history.push(HistoryCell::Thinking {
+            content: "private chain of thought".to_string(),
+            streaming: true,
+            duration_secs: Some(1.0),
+        });
+
+        let text = lines_to_text(&task_panel_lines(&app, 96, 12));
+
+        assert!(
+            !text.iter().any(|line| {
+                line.contains("Model reasoning")
+                    || line.contains("private chain of thought")
+                    || line.contains("thinking")
+            }),
+            "reasoning belongs to transcript detail, not Activity: {text:?}"
+        );
     }
 
     #[test]

@@ -507,6 +507,28 @@ fn work_surface_real_rows_own_click_wheel_resize_and_stop_confirm() -> anyhow::R
     let (stop_row, stop_col) = h.frame().find_text("stop").expect("rendered Stop control");
     h.send(keys::mouse::click(stop_row, stop_col))?;
     h.wait_for_text("confirm", KEY_TIMEOUT)?;
+
+    // Reject the row-local Stop with Esc. A second Esc only releases the work
+    // surface's focus; neither keypress may leak through and cancel the live
+    // command. This is the real-PTY counterpart to the interaction unit tests
+    // and protects the dialog-vs-active-work ownership boundary.
+    h.send(keys::key::esc())?;
+    h.wait_for(
+        |frame| frame.contains("run running") && !frame.contains("confirm"),
+        KEY_TIMEOUT,
+    )?;
+    h.send(keys::key::esc())?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    assert!(
+        h.frame().contains("run running"),
+        "repeated Esc after rejecting Stop cancelled active work:\n{}",
+        h.debug_dump()
+    );
+
+    // Re-arm from the rendered control after focus was released, then accept.
+    let (stop_row, stop_col) = h.frame().find_text("stop").expect("rendered Stop control");
+    h.send(keys::mouse::click(stop_row, stop_col))?;
+    h.wait_for_text("confirm", KEY_TIMEOUT)?;
     // Confirm the mouse-armed, row-selected action with Enter. Unit coverage
     // separately proves the armed control strip's second-click hitbox.
     h.send(keys::key::enter())?;

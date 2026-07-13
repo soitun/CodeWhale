@@ -457,7 +457,7 @@ impl ToolSpec for WorkflowTool {
                 "token_budget": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional shared Workflow budget hint and default child token budget ceiling."
+                    "description": "Optional shared Workflow admission hint. Usage is reconciled when children report completion; already-running parallel children can take aggregate spent past the hint, while later and descendant spawns are rejected once exhausted."
                 },
                 "wait": {
                     "type": "boolean",

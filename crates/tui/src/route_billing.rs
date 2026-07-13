@@ -82,7 +82,7 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
         // Z.ai's dedicated Coding endpoint is the GLM Coding Plan route. Its
         // quota is subscription-backed, so a public API price estimate is not
         // truthful spend and must not appear as dollars in the UI.
-        ApiProvider::Zai if provider_config.is_some_and(uses_zai_coding_plan) => {
+        ApiProvider::Zai if uses_zai_coding_plan(provider_config) => {
             BillingPresentation::Subscription("Z.ai Coding Plan quota")
         }
         ApiProvider::XiaomiMimo if !xiaomi_is_explicit_pay_as_you_go(provider_config) => {
@@ -104,12 +104,17 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
     }
 }
 
-fn uses_zai_coding_plan(config: &ProviderConfig) -> bool {
-    config.base_url.as_deref().is_some_and(|url| {
-        url.trim()
-            .trim_end_matches('/')
-            .ends_with("/api/coding/paas/v4")
-    })
+fn uses_zai_coding_plan(config: Option<&ProviderConfig>) -> bool {
+    // The configured URL is optional because the Coding Plan endpoint is also
+    // CodeWhale's Z.ai default. A credentials-only `[providers.zai]` entry
+    // must therefore remain plan-billed rather than falling through to fake
+    // per-token dollars.
+    let url = config
+        .and_then(|config| config.base_url.as_deref())
+        .unwrap_or(crate::config::DEFAULT_ZAI_BASE_URL);
+    url.trim()
+        .trim_end_matches('/')
+        .ends_with("/api/coding/paas/v4")
 }
 
 /// Billing for a child route when its full dispatch config is not present in
@@ -131,7 +136,8 @@ pub fn for_child_route(
         | ApiProvider::Xai
         | ApiProvider::Moonshot
         | ApiProvider::Anthropic
-        | ApiProvider::XiaomiMimo => BillingPresentation::Subscription("provider quota"),
+        | ApiProvider::XiaomiMimo
+        | ApiProvider::Zai => BillingPresentation::Subscription("provider quota"),
         ApiProvider::Custom => BillingPresentation::Unknown,
         _ => BillingPresentation::Metered,
     }
@@ -384,6 +390,27 @@ mod tests {
             None,
         );
         assert!(!format_usage_line(&chip).contains('$'));
+    }
+
+    #[test]
+    fn zai_default_coding_endpoint_never_claims_api_dollars() {
+        let config = config_with(ApiProvider::Zai, ProviderConfig::default());
+        assert_eq!(
+            for_route(&config, ApiProvider::Zai),
+            BillingPresentation::Subscription("Z.ai Coding Plan quota")
+        );
+    }
+
+    #[test]
+    fn routed_zai_child_never_claims_api_dollars_without_full_route_config() {
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::Zai,
+            ),
+            BillingPresentation::Subscription("provider quota")
+        );
     }
 
     #[test]

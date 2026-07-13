@@ -286,7 +286,7 @@ pub struct Settings {
     /// session directly; resume remains available in-session.
     #[serde(default)]
     pub launch_screen: bool,
-    /// Default mode: "agent", "plan", "operate". Legacy permission
+    /// Default mode: "agent" or "plan". Legacy permission
     /// shorthands are accepted for migration but never advertised as modes.
     pub default_mode: String,
     /// Sidebar width as percentage of terminal width
@@ -376,6 +376,12 @@ pub struct Settings {
     /// One-time YOLO deprecation toast has been shown. Suppresses the repeat
     /// toast after the first sighting per install (persisted across sessions).
     pub yolo_deprecation_shown: bool,
+    /// True only for the current load when `default_mode = "yolo"` was read
+    /// from an older settings file. App startup uses this provenance to migrate
+    /// the old bundled Full Access choice without weakening project or managed
+    /// approval policy. It is never written back to disk.
+    #[serde(skip)]
+    pub(crate) legacy_yolo_default: bool,
 }
 
 impl Default for Settings {
@@ -430,6 +436,7 @@ impl Default for Settings {
             workspace_follow_symlinks: false,
             feature_intro_shown: false,
             yolo_deprecation_shown: false,
+            legacy_yolo_default: false,
         }
     }
 }
@@ -527,7 +534,17 @@ impl Settings {
                     Self::default()
                 }
             };
-            s.default_mode = normalize_mode(&s.default_mode).to_string();
+            // "yolo" used to bundle two independent choices: Agent mode and
+            // unrestricted approvals.  Keep that behavior on upgrade, but
+            // store/show the two choices explicitly so Settings does not claim
+            // the app starts in a fictional mode.
+            let legacy_yolo_default = s.default_mode.trim().eq_ignore_ascii_case("yolo");
+            s.legacy_yolo_default = legacy_yolo_default;
+            s.default_mode = if legacy_yolo_default {
+                "agent".to_string()
+            } else {
+                normalize_mode(&s.default_mode).to_string()
+            };
             s.composer_density = normalize_composer_density(&s.composer_density).to_string();
             s.transcript_spacing = normalize_transcript_spacing(&s.transcript_spacing).to_string();
             s.tool_collapse_mode = normalize_tool_collapse_mode(&s.tool_collapse_mode).to_string();
@@ -560,10 +577,21 @@ impl Settings {
                 .permission_posture
                 .as_deref()
                 .and_then(normalize_permission_posture);
+            if legacy_yolo_default && s.permission_posture.is_none() {
+                s.permission_posture = Some("full-access".to_string());
+            }
             s
         };
         migrate_settings_file_to_primary_if_needed(&write_path, &read_path);
         Ok(settings)
+    }
+
+    /// Whether this load normalized a legacy `default_mode = "yolo"` value.
+    ///
+    /// This is migration provenance, not a user-facing mode. New writes accept
+    /// only Agent or Plan and serialize the independent permission posture.
+    pub(crate) fn legacy_yolo_default_detected(&self) -> bool {
+        self.legacy_yolo_default
     }
 
     /// Whether the user explicitly persisted an `auto_compact` preference.
@@ -865,13 +893,16 @@ impl Settings {
                 self.workspace_follow_symlinks = parse_bool(value)?;
             }
             "default_mode" | "mode" => {
-                let normalized = normalize_mode(value);
-                if !["agent", "plan", "operate", "yolo"].contains(&normalized) {
-                    anyhow::bail!(
-                        "Failed to update setting: invalid mode '{value}'. Expected: agent, plan, operate."
-                    );
-                }
-                self.default_mode = normalized.to_string();
+                // Loading remains deliberately liberal so old `operate` and
+                // `yolo` files migrate safely. New writes are strict: these
+                // are session actions/permission aliases, not startup modes.
+                self.default_mode = match value.trim().to_ascii_lowercase().as_str() {
+                    "agent" | "normal" => "agent".to_string(),
+                    "plan" => "plan".to_string(),
+                    _ => anyhow::bail!(
+                        "Failed to update setting: invalid mode '{value}'. Expected: agent or plan."
+                    ),
+                };
             }
             "sidebar_width" | "sidebar" => {
                 let width: u16 = value
@@ -1182,7 +1213,7 @@ impl Settings {
                 "workspace_follow_symlinks",
                 "Follow symbolic links during workspace file discovery walks: on/off (default off). Enable for symlink-based multi-project workspaces. Has built-in cycle detection but may increase latency on large symlinked trees.",
             ),
-            ("default_mode", "Default mode: agent, plan, operate"),
+            ("default_mode", "Default mode: agent or plan"),
             ("sidebar_width", "Sidebar width percentage: 10-50"),
             (
                 "sidebar_focus",
@@ -1469,8 +1500,12 @@ fn normalize_mode(value: &str) -> &str {
         "normal" => "agent",
         "agent" => "agent",
         "plan" => "plan",
-        "operate" | "operation" | "ops" => "operate",
-        "yolo" => "yolo",
+        // Operate is a session action, not a startup personality. Old saved
+        // values fall back to the safe general-purpose Agent startup mode.
+        "operate" | "operation" | "ops" => "agent",
+        // Kept as a migration input in `load_persisted`; new settings never
+        // advertise it as a mode because permission posture is separate.
+        "yolo" => "agent",
         _ => value,
     }
 }
@@ -2930,6 +2965,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn startup_mode_writes_only_accept_agent_or_plan() {
+        let mut settings = Settings::default();
+
+        settings.set("default_mode", "plan").expect("plan mode");
+        assert_eq!(settings.default_mode, "plan");
+        settings
+            .set("default_mode", "normal")
+            .expect("legacy normal alias remains harmless");
+        assert_eq!(settings.default_mode, "agent");
+
+        for removed in ["operate", "ops", "yolo"] {
+            let err = settings
+                .set("default_mode", removed)
+                .expect_err("session actions must not become saved startup modes");
+            assert!(err.to_string().contains("agent or plan"), "{err}");
+        }
+    }
+
+    #[test]
+    fn legacy_startup_modes_migrate_without_losing_permission_intent() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let codewhale_home = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_mode = \"yolo\"\n",
+        )
+        .expect("legacy settings");
+        let _config_override = EnvVarRestore::remove("DEEPSEEK_CONFIG_PATH");
+        let _codewhale_home = EnvVarRestore::set("CODEWHALE_HOME", &codewhale_home);
+        let _home = EnvVarRestore::set("HOME", tmp.path());
+
+        let loaded = Settings::load_persisted().expect("load legacy settings");
+
+        assert_eq!(loaded.default_mode, "agent");
+        assert_eq!(loaded.permission_posture.as_deref(), Some("full-access"));
+
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_mode = \"operate\"\n",
+        )
+        .expect("legacy operate settings");
+        let loaded = Settings::load_persisted().expect("load legacy operate settings");
+        assert_eq!(loaded.default_mode, "agent");
+        assert_eq!(loaded.permission_posture, None);
     }
 
     #[test]

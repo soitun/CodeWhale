@@ -248,7 +248,6 @@ pub enum WorkSurfacePlacementValue {
 pub enum DefaultModeValue {
     Agent,
     Plan,
-    Yolo,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -335,7 +334,7 @@ pub fn parse_mode(arg: Option<&str>) -> Result<ConfigUiMode, String> {
 }
 
 pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
-    let settings = Settings::load().unwrap_or_default();
+    let settings = Settings::load_persisted().unwrap_or_default();
     let reasoning_effort = config
         .reasoning_effort()
         .map(ReasoningEffortValue::from_setting)
@@ -694,7 +693,7 @@ fn reload_runtime_config(app: &mut App, config: &mut Config) -> Result<()> {
     app.update_model_compaction_budget();
     app.mcp_config_path = reloaded.mcp_config_path();
     app.skills_dir = reloaded.skills_dir();
-    app.ui_locale = resolve_locale(&Settings::load().unwrap_or_default().locale);
+    app.ui_locale = resolve_locale(&Settings::load_persisted().unwrap_or_default().locale);
     Ok(())
 }
 
@@ -905,7 +904,6 @@ impl DefaultModeValue {
         match self {
             Self::Agent => "agent",
             Self::Plan => "plan",
-            Self::Yolo => "yolo",
         }
     }
 }
@@ -1015,10 +1013,9 @@ impl From<&str> for TranscriptSpacingValue {
 impl From<&str> for DefaultModeValue {
     fn from(value: &str) -> Self {
         match AppMode::from_setting(value) {
-            AppMode::Agent | AppMode::Operate => Self::Agent,
+            AppMode::Agent | AppMode::Operate | AppMode::Yolo => Self::Agent,
             AppMode::Plan => Self::Plan,
             AppMode::Auto => Self::Agent,
-            AppMode::Yolo => Self::Yolo,
         }
     }
 }
@@ -1193,6 +1190,16 @@ mod tests {
     }
 
     #[test]
+    fn legacy_startup_mode_values_project_to_agent_in_config_ui() {
+        assert_eq!(DefaultModeValue::from("agent"), DefaultModeValue::Agent);
+        assert_eq!(DefaultModeValue::from("operate"), DefaultModeValue::Agent);
+        assert_eq!(DefaultModeValue::from("yolo"), DefaultModeValue::Agent);
+        assert_eq!(DefaultModeValue::from("plan"), DefaultModeValue::Plan);
+        assert_eq!(DefaultModeValue::Agent.as_setting(), "agent");
+        assert_eq!(DefaultModeValue::Plan.as_setting(), "plan");
+    }
+
+    #[test]
     fn build_document_reflects_cost_currency_from_settings() {
         let _lock = lock_test_env();
         let nanos = SystemTime::now()
@@ -1286,6 +1293,8 @@ background_color = "#1A1B26"
             approval_mode,
             &serde_json::json!(["auto", "bypass", "suggest", "never"])
         );
+        let default_mode = &schema["$defs"]["DefaultModeValue"]["enum"];
+        assert_eq!(default_mode, &serde_json::json!(["agent", "plan"]));
         let locale = &schema["$defs"]["UiLocale"]["enum"];
         assert_eq!(
             locale,

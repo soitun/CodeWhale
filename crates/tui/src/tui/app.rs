@@ -2429,7 +2429,6 @@ pub struct TaskPanelEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskPanelEntryKind {
     Background,
-    ModelReasoning,
 }
 
 impl QueuedMessage {
@@ -2560,7 +2559,61 @@ impl App {
             initial_input,
         } = options;
 
-        let settings = Settings::load().unwrap_or_else(|_| Settings::default());
+        // Start from disk-only preferences so one-time migrations can never
+        // persist terminal/environment overlays such as NO_ANIMATIONS. Apply
+        // those overlays only after any normalized settings write succeeds.
+        let mut settings = Settings::load_persisted().unwrap_or_else(|_| Settings::default());
+        let legacy_yolo_default = settings.legacy_yolo_default_detected();
+        let legacy_yolo_full_access = if legacy_yolo_default {
+            let control = config.approval_policy_control(
+                config_path.as_deref(),
+                config_profile.as_deref(),
+                &workspace,
+            );
+            match control {
+                crate::config::ApprovalPolicyControl::Unset => {
+                    if let Err(error) = settings.save() {
+                        tracing::warn!(
+                            "failed to normalize legacy YOLO settings; retrying next launch: {error:#}"
+                        );
+                    }
+                    true
+                }
+                crate::config::ApprovalPolicyControl::RootConfig => {
+                    let active_config_path =
+                        crate::config::resolve_load_config_path(config_path.clone());
+                    match crate::config_persistence::persist_unset_root_key(
+                        active_config_path.as_deref(),
+                        "approval_policy",
+                    ) {
+                        Ok(_) => {
+                            if let Err(error) = settings.save() {
+                                tracing::warn!(
+                                    "removed legacy approval_policy but could not normalize settings; retrying next launch: {error:#}"
+                                );
+                            }
+                            true
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "could not migrate legacy YOLO approval policy; keeping the controlling policy: {error:#}"
+                            );
+                            false
+                        }
+                    }
+                }
+                source => {
+                    tracing::warn!(
+                        "legacy YOLO setting was not allowed to override {}",
+                        source.label()
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        settings.apply_env_overrides();
         let launch_visible =
             settings.launch_screen && resume_session_id.is_none() && initial_input.is_none();
         let launch = LaunchState::new(launch_visible, &workspace);
@@ -2785,11 +2838,12 @@ impl App {
         // documented, while an explicit `allow_shell = false` still hides it.
         // Trust is never part of the Agent baseline (it is YOLO-only authority).
         // Approval mirrors the configured policy.
-        let explicit_approval_mode = config
-            .approval_policy
-            .as_deref()
+        let explicit_approval_mode = (!legacy_yolo_full_access)
+            .then_some(config.approval_policy.as_deref())
+            .flatten()
             .and_then(ApprovalMode::from_config_value);
-        let approval_policy_locked = config.approval_policy_is_managed();
+        let approval_policy_locked =
+            !legacy_yolo_full_access && config.approval_policy_is_managed();
         let approval_policy_requirements_managed = config.approval_policy_is_requirements_managed();
         let saved_permission_posture = if approval_policy_locked {
             None
@@ -3237,7 +3291,7 @@ impl App {
         if self.onboarding_needs_api_key {
             return;
         }
-        let mut settings = Settings::load().unwrap_or_default();
+        let mut settings = Settings::load_persisted().unwrap_or_default();
         if settings.feature_intro_shown {
             return;
         }
@@ -3257,7 +3311,7 @@ impl App {
     /// and rewrites on exit, mirroring the pattern used by the `/config`
     /// surface.
     pub fn set_locale_from_onboarding(&mut self, tag: &str) -> anyhow::Result<()> {
-        let mut settings = Settings::load().unwrap_or_else(|_| Settings::default());
+        let mut settings = Settings::load_persisted().unwrap_or_else(|_| Settings::default());
         settings.set("locale", tag)?;
         settings.save()?;
         self.ui_locale = crate::localization::resolve_locale(&settings.locale);
@@ -3352,7 +3406,7 @@ impl App {
         }
         // Persist the flag best-effort; toast still fires even if the write
         // fails (retries on the next attempt).
-        if let Ok(mut settings) = crate::settings::Settings::load() {
+        if let Ok(mut settings) = crate::settings::Settings::load_persisted() {
             settings.yolo_deprecation_shown = true;
             let _ = settings.save();
         }
@@ -3435,7 +3489,7 @@ impl App {
         }
         if self.mode == AppMode::Plan {
             self.push_status_toast(
-                "Plan is Read Only; switch to Act or Operate to change permissions".to_string(),
+                "Plan is Read Only; switch to Act to change permissions".to_string(),
                 StatusToastLevel::Info,
                 Some(5_000),
             );
@@ -3459,7 +3513,7 @@ impl App {
             ApprovalMode::Never => "never",
         };
         let persistence_result = (|| -> anyhow::Result<()> {
-            let mut settings = Settings::load()?;
+            let mut settings = Settings::load_persisted()?;
             settings.permission_posture = Some(persisted.to_string());
             settings.save()
         })();
@@ -3480,10 +3534,21 @@ impl App {
         true
     }
 
-    /// Update the durable Act/Operate baseline and project it onto the live
-    /// runtime when the current mode uses that baseline. Plan remains read-only.
-    pub fn set_agent_approval_posture(&mut self, next: ApprovalMode) {
-        self.mode_prefs.agent_approval_mode = next;
+    /// Replace the complete durable Act baseline and project it onto the live
+    /// runtime when the current mode uses that baseline. Keeping these three
+    /// fields together prevents setup presets from updating a live mirror while
+    /// leaving the next Plan → Act transition stale.
+    pub fn set_agent_runtime_baseline(
+        &mut self,
+        allow_shell: bool,
+        trust_mode: bool,
+        approval_mode: ApprovalMode,
+    ) {
+        self.mode_prefs = ModeSessionPrefs {
+            agent_allow_shell: allow_shell,
+            agent_trust_mode: trust_mode,
+            agent_approval_mode: approval_mode,
+        };
         if self.mode.uses_agent_baseline() {
             let policy = base_policy_for_mode(self.mode, &self.mode_prefs);
             self.allow_shell = policy.allow_shell;
@@ -3491,6 +3556,31 @@ impl App {
             self.approval_mode = policy.approval_mode;
             self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
         }
+    }
+
+    #[must_use]
+    pub(crate) fn agent_trust_baseline(&self) -> bool {
+        self.mode_prefs.agent_trust_mode
+    }
+
+    /// Update the durable Act shell choice without disturbing trust or
+    /// approval. The live mirror changes only while Act owns the runtime.
+    pub fn set_agent_shell_access(&mut self, allow_shell: bool) {
+        self.set_agent_runtime_baseline(
+            allow_shell,
+            self.mode_prefs.agent_trust_mode,
+            self.mode_prefs.agent_approval_mode,
+        );
+    }
+
+    /// Update the durable Act approval choice without changing its saved shell
+    /// or trust choices. Plan remains read-only.
+    pub fn set_agent_approval_posture(&mut self, next: ApprovalMode) {
+        self.set_agent_runtime_baseline(
+            self.mode_prefs.agent_allow_shell,
+            self.mode_prefs.agent_trust_mode,
+            next,
+        );
     }
 
     #[must_use]
@@ -3534,6 +3624,12 @@ impl App {
 
     pub fn mark_approval_policy_locked(&mut self) {
         self.approval_policy_locked = true;
+    }
+
+    pub fn clear_saved_approval_policy_lock(&mut self) {
+        if !self.approval_policy_requirements_managed {
+            self.approval_policy_locked = false;
+        }
     }
 
     /// Execute hooks for a specific event with the given context

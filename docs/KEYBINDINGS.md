@@ -99,7 +99,7 @@ When `[memory] enabled = true`, typing `# foo` and pressing `Enter` appends `foo
 | `Esc`                | Return focus to composer                           |
 | `y`                  | Yank selected region to clipboard                  |
 | `v`                  | Begin / extend visual selection                    |
-| `o`                  | Open URL under cursor (OSC 8 capable terminals)    |
+| `Cmd-click` (macOS) / `Ctrl-click` (Linux/Windows) | Open an OSC 8 link in a supporting terminal (terminal-owned) |
 
 ## Sidebar (when sidebar has focus)
 

@@ -109,17 +109,17 @@ fn handle_sidebar_resize_mouse(app: &mut App, mouse: MouseEvent) -> bool {
 }
 
 /// Map a mouse (column, row) within the composer area to a char index
-/// in the composer input string. Uses the inner content rect (border-aware)
+/// in the composer input string. Uses the canonical prompt-adjusted text rect
 /// for coordinate mapping, and accounts for vertical padding and scroll offset.
-fn mouse_pos_to_char_index(app: &App, col: u16, row: u16, inner: Rect) -> Option<usize> {
-    let rel_col = col.saturating_sub(inner.x) as usize;
-    let rel_row = row.saturating_sub(inner.y) as usize;
+fn mouse_pos_to_char_index(app: &App, col: u16, row: u16, text_area: Rect) -> Option<usize> {
+    let rel_col = col.saturating_sub(text_area.x) as usize;
+    let rel_row = row.saturating_sub(text_area.y) as usize;
 
     if app.input.is_empty() {
         return Some(0);
     }
 
-    let width = inner.width.max(1) as usize;
+    let width = text_area.width.max(1) as usize;
     let wrapped = crate::tui::widgets::wrap_input_lines_for_mouse(&app.input, width);
 
     // Subtract the vertical top-padding (centering of short inputs).
@@ -175,12 +175,12 @@ fn composer_wrapped_cursor_row_col(
     (row, col)
 }
 
-fn move_composer_cursor_by_wrapped_rows(app: &mut App, inner: Rect, rows: isize) {
+fn move_composer_cursor_by_wrapped_rows(app: &mut App, text_area: Rect, rows: isize) {
     if app.input.is_empty() || rows == 0 {
         return;
     }
 
-    let width = inner.width.max(1) as usize;
+    let width = text_area.width.max(1) as usize;
     let wrapped = crate::tui::widgets::wrap_input_lines_for_mouse(&app.input, width);
     if wrapped.len() <= 1 {
         return;
@@ -272,24 +272,32 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     {
         return false;
     }
-    // Use inner content rect for coordinate-to-char mapping (border-aware).
+    // Resolve the border-aware inner rect through the same persistent prompt
+    // geometry used by rendering, cursor placement, and viewport bookkeeping.
     let inner = app.viewport.last_composer_content.unwrap_or(area);
+    let text_area =
+        crate::tui::widgets::composer_content_geometry(inner, app.is_history_search_active())
+            .text_area;
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             move_composer_cursor_by_wrapped_rows(
                 app,
-                inner,
+                text_area,
                 -(COMPOSER_MOUSE_SCROLL_LINES as isize),
             );
             true
         }
         MouseEventKind::ScrollDown => {
-            move_composer_cursor_by_wrapped_rows(app, inner, COMPOSER_MOUSE_SCROLL_LINES as isize);
+            move_composer_cursor_by_wrapped_rows(
+                app,
+                text_area,
+                COMPOSER_MOUSE_SCROLL_LINES as isize,
+            );
             true
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(pos) = mouse_pos_to_char_index(app, mouse.column, mouse.row, inner) {
+            if let Some(pos) = mouse_pos_to_char_index(app, mouse.column, mouse.row, text_area) {
                 app.cursor_position = pos;
                 app.selection_anchor = None;
                 app.needs_redraw = true;
@@ -297,7 +305,7 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             true
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(pos) = mouse_pos_to_char_index(app, mouse.column, mouse.row, inner) {
+            if let Some(pos) = mouse_pos_to_char_index(app, mouse.column, mouse.row, text_area) {
                 if app.selection_anchor.is_none() {
                     app.selection_anchor = Some(app.cursor_position);
                 }
@@ -759,17 +767,57 @@ fn open_agent_chat_pager(app: &mut App, agent_id: &str) -> bool {
     let payload = match app.runtime_services.handle_store.try_lock() {
         Ok(store) => match store.get(&lookup) {
             Some(record) => match &record.value {
-                HandleValue::Json(value) => value.clone(),
-                HandleValue::Text(_) => return false,
+                HandleValue::Json(value) => Some(value.clone()),
+                HandleValue::Text(_) => None,
             },
-            None => return false,
+            None => None,
         },
         Err(_) => return false,
+    };
+
+    // The handle is a deliberately bounded live projection. Prefer the private
+    // on-disk message stream so Open means the entire chat, including early
+    // turns that no longer fit in the 1 MiB resident tail. While the worker is
+    // live, require its artifact count to match the latest handle count; a
+    // failed/stale append must fall back to the explicit omission banner. With
+    // no process-local handle (for example after restart), the validated
+    // artifact remains the durable source of truth.
+    if let Ok(messages) =
+        crate::tools::subagent::load_subagent_transcript_artifact(&app.workspace, agent_id)
+    {
+        let matches_resident_count = payload.as_ref().is_none_or(|resident| {
+            resident
+                .get("message_count")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok())
+                == Some(messages.len())
+                && resident
+                    .get("complete_transcript_artifact")
+                    .and_then(|artifact| artifact.get("complete"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true)
+        });
+        if matches_resident_count {
+            let text = agent_messages_text(&messages);
+            if !text.trim().is_empty() {
+                push_agent_chat_pager(app, agent_id, &text);
+                return true;
+            }
+        }
+    }
+
+    let Some(payload) = payload else {
+        return false;
     };
     let text = agent_transcript_text(&payload);
     if text.trim().is_empty() {
         return false;
     }
+    push_agent_chat_pager(app, agent_id, &text);
+    true
+}
+
+fn push_agent_chat_pager(app: &mut App, agent_id: &str, text: &str) {
     let width = app
         .viewport
         .last_transcript_area
@@ -777,10 +825,9 @@ fn open_agent_chat_pager(app: &mut App, agent_id: &str) -> bool {
         .unwrap_or(80);
     app.view_stack.push(PagerView::from_text(
         format!("Agent chat — {agent_id}"),
-        &text,
+        text,
         width.saturating_sub(2),
     ));
-    true
 }
 
 /// Turn the agent transcript handle into a readable conversation. The worker
@@ -810,11 +857,18 @@ fn agent_transcript_text(payload: &serde_json::Value) -> String {
         ));
     }
 
-    for raw in messages {
-        let Ok(message) = serde_json::from_value::<Message>(raw.clone()) else {
-            continue;
-        };
-        let body = agent_message_text(&message);
+    let parsed: Vec<Message> = messages
+        .iter()
+        .filter_map(|raw| serde_json::from_value::<Message>(raw.clone()).ok())
+        .collect();
+    text.push_str(&agent_messages_text(&parsed));
+    text
+}
+
+fn agent_messages_text(messages: &[Message]) -> String {
+    let mut text = String::new();
+    for message in messages {
+        let body = agent_message_text(message);
         if body.trim().is_empty() {
             continue;
         }
@@ -1470,16 +1524,22 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_transcript_text, build_context_menu_entries, sidebar_click_action};
+    use super::{
+        agent_transcript_text, build_context_menu_entries, open_agent_chat_pager,
+        sidebar_click_action,
+    };
     use crate::config::Config;
+    use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
         App, SidebarHoverRow, SidebarHoverSection, SidebarRowAction, TuiOptions,
     };
+    use crate::tui::pager::PagerView;
     use crate::tui::views::ContextMenuAction;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use serde_json::json;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn create_test_app() -> App {
         let options = TuiOptions {
@@ -1802,5 +1862,76 @@ mod tests {
         assert!(transcript.contains("→ list_dir"));
         assert!(transcript.contains("I found the workspace."));
         assert!(!transcript.contains("private chain of thought"));
+    }
+
+    #[test]
+    fn worker_open_reads_first_and_last_turns_from_complete_artifact() {
+        let tmp = tempdir().expect("tempdir");
+        let agent_id = "agent_large_chat";
+        let early = format!("EARLY-OPEN-MARKER\n{}", "a".repeat(1_100_000));
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: early,
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "LAST-OPEN-MARKER".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+        let artifact = crate::tools::subagent::write_subagent_transcript_artifact_for_test(
+            tmp.path(),
+            agent_id,
+            &messages,
+        )
+        .expect("write complete worker transcript");
+        assert!(
+            std::fs::metadata(artifact)
+                .expect("artifact metadata")
+                .len()
+                > 1024 * 1024,
+            "regression requires a transcript larger than the resident handle budget"
+        );
+
+        let mut app = create_test_app();
+        app.workspace = tmp.path().to_path_buf();
+        {
+            let mut store = app
+                .runtime_services
+                .handle_store
+                .try_lock()
+                .expect("handle store");
+            let _ = store.insert_json(
+                format!("agent:{agent_id}"),
+                "full_transcript",
+                json!({
+                    "kind": "subagent_full_transcript",
+                    "message_count": 2,
+                    "omitted_messages": 1,
+                    "messages_complete": false,
+                    "messages": [messages[1].clone()],
+                }),
+            );
+        }
+
+        assert!(open_agent_chat_pager(&mut app, agent_id));
+        let mut view = app.view_stack.pop().expect("agent chat pager");
+        let pager = view
+            .as_any_mut()
+            .downcast_mut::<PagerView>()
+            .expect("Open should push a pager");
+        let body = pager.body_text();
+        assert!(body.contains("EARLY-OPEN-MARKER"));
+        assert!(body.contains("LAST-OPEN-MARKER"));
+        assert!(
+            !body.contains("Earlier messages were omitted"),
+            "Open must use the complete artifact, not the compacted resident tail"
+        );
     }
 }

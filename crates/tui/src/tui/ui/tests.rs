@@ -38,6 +38,112 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
+#[test]
+fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
+    let app = create_test_app();
+
+    assert_eq!(
+        animation_interval_ms(&app, true, false),
+        UI_STATUS_ANIMATION_MS
+    );
+    assert_eq!(
+        animation_interval_ms(&app, false, true),
+        UI_UNDERWATER_ANIMATION_MS
+    );
+    assert_eq!(
+        animation_interval_ms(&app, true, true),
+        UI_UNDERWATER_ANIMATION_MS,
+        "the slower status spinner must not throttle ambient fish"
+    );
+}
+
+#[test]
+fn config_update_preview_suppresses_only_success_message_not_action_or_errors() {
+    let preview = prepare_config_update_result(
+        commands::CommandResult::with_message_and_action(
+            "preview confirmation",
+            AppAction::UpdateStreamChunkTimeout(42),
+        ),
+        false,
+    );
+    assert!(preview.message.is_none());
+    assert!(matches!(
+        preview.action,
+        Some(AppAction::UpdateStreamChunkTimeout(42))
+    ));
+
+    let persisted =
+        prepare_config_update_result(commands::CommandResult::message("saved confirmation"), true);
+    assert_eq!(persisted.message.as_deref(), Some("saved confirmation"));
+
+    let error =
+        prepare_config_update_result(commands::CommandResult::error("invalid value"), false);
+    assert!(error.is_error);
+    assert!(
+        error
+            .message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("invalid value"))
+    );
+}
+
+#[test]
+fn workflow_panel_plain_letters_return_to_composer() {
+    let mut app = create_test_app();
+    app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
+        "workflow_typing",
+        "typing regression",
+        0,
+    ));
+
+    for ch in ['t', 'c', 'j', 'k'] {
+        app.workflow_panel
+            .as_mut()
+            .expect("workflow panel")
+            .keyboard_focus = true;
+        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+        assert!(
+            !handle_workflow_panel_key(&mut app, &key),
+            "plain {ch:?} must fall through to the composer"
+        );
+        assert!(
+            !app.workflow_panel
+                .as_ref()
+                .expect("workflow panel")
+                .keyboard_focus,
+            "typing releases panel focus"
+        );
+        app.insert_char(ch);
+    }
+
+    assert_eq!(app.input, "tcjk");
+}
+
+#[test]
+fn workflow_panel_uses_non_text_keys_for_controls() {
+    let mut app = create_test_app();
+    let mut panel = crate::tui::widgets::workflow_panel::WorkflowPanel::new(
+        "workflow_keys",
+        "keyboard controls",
+        0,
+    );
+    panel.keyboard_focus = true;
+    let was_expanded = panel.expanded;
+    app.workflow_panel = Some(panel);
+
+    assert!(handle_workflow_panel_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    ));
+    assert_ne!(
+        app.workflow_panel
+            .as_ref()
+            .expect("workflow panel")
+            .expanded,
+        was_expanded
+    );
+}
+
 struct ConfigPathEnvGuard {
     _tmp: TempDir,
     previous: Option<OsString>,
@@ -1604,6 +1710,54 @@ fn composer_mouse_wheel_up_moves_within_wrapped_draft() {
 }
 
 #[test]
+fn composer_mouse_first_visible_character_maps_to_zero_after_prompt_gutter() {
+    let mut app = create_test_app();
+    app.input = "abcdef".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.viewport.last_composer_area = Some(Rect {
+        x: 10,
+        y: 10,
+        width: 12,
+        height: 4,
+    });
+    // Border-aware inner rect. The shared composer geometry reserves x=10..12
+    // for the persistent prompt and places the first visible character at 12.
+    app.viewport.last_composer_content = Some(Rect {
+        x: 10,
+        y: 11,
+        width: 12,
+        height: 3,
+    });
+    app.viewport.last_composer_scroll_offset = 0;
+    app.viewport.last_composer_top_padding = 0;
+
+    assert!(handle_composer_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+    assert_eq!(
+        app.cursor_position, 0,
+        "the first rendered character must not inherit the prompt's two-column inset"
+    );
+
+    assert!(handle_composer_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 13,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+    assert_eq!(app.cursor_position, 1);
+}
+
+#[test]
 fn copy_shortcut_accepts_cmd_and_ctrl_shift_only() {
     assert!(crate::tui::key_shortcuts::is_copy_shortcut(&KeyEvent::new(
         KeyCode::Char('c'),
@@ -2142,6 +2296,7 @@ fn setup_runtime_preset_apply_persists_settings_config_and_state() {
     assert!(summary.contains("preset=ask-first"));
     let settings = Settings::load().expect("load saved settings");
     assert_eq!(settings.default_mode, "plan");
+    assert_eq!(settings.permission_posture.as_deref(), Some("ask"));
     assert_eq!(app.mode, AppMode::Plan);
     assert!(!app.allow_shell);
     assert_eq!(app.approval_mode, ApprovalMode::Suggest);
@@ -2168,6 +2323,165 @@ fn setup_runtime_preset_apply_persists_settings_config_and_state() {
     assert_eq!(
         saved_state.runtime_posture_source,
         codewhale_config::RuntimePostureSource::Confirmed
+    );
+}
+
+#[test]
+fn setup_high_trust_persists_full_access_without_legacy_yolo_mode() {
+    let _home = SettingsHomeGuard::new();
+    let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("config parent exists");
+    std::fs::write(
+        &config_path,
+        "# keep me\napproval_policy = \"on-request\"\nallow_shell = false\n",
+    )
+    .expect("seed config");
+
+    let mut app = create_test_app();
+    app.config_path = Some(config_path.clone());
+    let mut config = Config {
+        approval_policy: Some("on-request".to_string()),
+        ..Config::default()
+    };
+    let preset = crate::tui::setup::SetupRuntimePreset::HighTrustLocal;
+
+    apply_setup_runtime_preset(
+        &mut app,
+        &mut config,
+        preset,
+        codewhale_config::SetupState::default(),
+    )
+    .expect("apply high trust");
+
+    let settings = Settings::load().expect("load saved settings");
+    assert_eq!(settings.default_mode, "agent");
+    assert_eq!(settings.permission_posture.as_deref(), Some("full-access"));
+    assert_eq!(config.approval_policy, None);
+    assert_eq!(app.mode, AppMode::Agent);
+    assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+    assert!(app.allow_shell);
+    assert!(app.trust_mode);
+
+    app.set_mode(AppMode::Plan);
+    assert!(!app.allow_shell);
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    app.set_mode(AppMode::Agent);
+    assert!(app.allow_shell, "High Trust shell must survive Plan → Act");
+    assert!(app.trust_mode, "High Trust trust must survive Plan → Act");
+    assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+
+    let body = std::fs::read_to_string(&config_path).expect("read saved config");
+    assert!(body.contains("# keep me"), "comment lost: {body}");
+    assert!(
+        !body.contains("approval_policy"),
+        "top-level policy would override the saved Full Access posture: {body}"
+    );
+}
+
+#[test]
+fn setup_high_trust_cannot_override_project_approval_policy() {
+    let _home = SettingsHomeGuard::new();
+    let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("config parent exists");
+    std::fs::write(&config_path, "approval_policy = \"on-request\"\n").expect("root config");
+    let workspace = config_path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("temporary home")
+        .join("project");
+    let project_dir = workspace.join(codewhale_config::CODEWHALE_APP_DIR);
+    std::fs::create_dir_all(&project_dir).expect("project config dir");
+    std::fs::write(
+        project_dir.join("config.toml"),
+        "approval_policy = \"never\"\n",
+    )
+    .expect("project config");
+
+    let mut app = create_test_app();
+    app.workspace = workspace;
+    app.config_path = Some(config_path.clone());
+    let mut config = Config {
+        approval_policy: Some("never".to_string()),
+        ..Config::default()
+    };
+
+    let error = apply_setup_runtime_preset(
+        &mut app,
+        &mut config,
+        crate::tui::setup::SetupRuntimePreset::HighTrustLocal,
+        codewhale_config::SetupState::default(),
+    )
+    .expect_err("project policy must control the live session");
+
+    assert!(
+        error.to_string().contains("project runtime configuration"),
+        "{error:#}"
+    );
+    assert_eq!(config.approval_policy.as_deref(), Some("never"));
+    assert!(
+        std::fs::read_to_string(config_path)
+            .expect("root config remains")
+            .contains("approval_policy = \"on-request\"")
+    );
+}
+
+#[test]
+fn setup_presets_cannot_override_managed_runtime_requirements() {
+    let _home = SettingsHomeGuard::new();
+    let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("config parent exists");
+    std::fs::write(&config_path, "# managed posture stays intact\n").expect("root config");
+    let requirements_path = config_path
+        .parent()
+        .expect("config parent")
+        .join("requirements.toml");
+    std::fs::write(
+        &requirements_path,
+        "allowed_approval_policies = [\"never\"]\nallowed_sandbox_modes = [\"read-only\"]\n",
+    )
+    .expect("requirements");
+
+    let mut app = create_test_app();
+    app.config_path = Some(config_path.clone());
+    app.allow_shell = false;
+    app.approval_mode = ApprovalMode::Never;
+    let mut config = Config {
+        approval_policy: Some("never".to_string()),
+        sandbox_mode: Some("read-only".to_string()),
+        allow_shell: Some(false),
+        requirements_path: Some(requirements_path.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+
+    for preset in [
+        crate::tui::setup::SetupRuntimePreset::AskFirst,
+        crate::tui::setup::SetupRuntimePreset::NormalAgent,
+        crate::tui::setup::SetupRuntimePreset::HighTrustLocal,
+    ] {
+        let error = apply_setup_runtime_preset(
+            &mut app,
+            &mut config,
+            preset,
+            codewhale_config::SetupState::default(),
+        )
+        .expect_err("managed requirements must win");
+        assert!(
+            error.to_string().contains("managed runtime requirements"),
+            "{error:#}"
+        );
+    }
+
+    assert_eq!(config.approval_policy.as_deref(), Some("never"));
+    assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+    assert_eq!(config.allow_shell, Some(false));
+    assert_eq!(app.approval_mode, ApprovalMode::Never);
+    assert!(!app.allow_shell);
+    assert_eq!(
+        std::fs::read_to_string(config_path).expect("root config"),
+        "# managed posture stays intact\n"
     );
 }
 
@@ -4888,27 +5202,9 @@ fn sidebar_auto_idle_false_for_explicit_focus() {
 }
 
 #[test]
-fn jobs_panel_ignores_model_reasoning_but_shows_for_real_jobs() {
+fn jobs_panel_ignores_completed_history_but_shows_for_real_jobs() {
     let mut app = create_test_app();
     app.sidebar_focus = SidebarFocus::Auto;
-
-    // Per-turn model reasoning must NOT bring the jobs/tasks panel up — an
-    // ordinary reasoning turn stays idle (full-width transcript).
-    app.task_panel = vec![crate::tui::app::TaskPanelEntry {
-        id: "reasoning".to_string(),
-        status: "running".to_string(),
-        prompt_summary: "thinking".to_string(),
-        duration_ms: None,
-        kind: crate::tui::app::TaskPanelEntryKind::ModelReasoning,
-        stale: false,
-        elapsed_since_output_ms: None,
-        owner_agent_id: None,
-        owner_agent_name: None,
-    }];
-    assert!(
-        crate::tui::sidebar::sidebar_auto_idle(&mut app),
-        "model reasoning alone must not surface the jobs panel"
-    );
 
     // Completed background history must not reopen the auto Tasks panel.
     app.task_panel.push(crate::tui::app::TaskPanelEntry {
@@ -8388,27 +8684,6 @@ fn active_rlm_task_entries_surface_foreground_rlm_work() {
     assert_eq!(entries[0].prompt_summary, "RLM: file_path: Cargo.lock");
     assert_eq!(entries[0].kind, TaskPanelEntryKind::Background);
     assert!(entries[0].duration_ms.unwrap_or_default() >= 3000);
-}
-
-#[test]
-fn active_reasoning_task_entries_surface_reasoning_only_turns() {
-    let mut app = create_test_app();
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(2));
-    let mut active = ActiveCell::new();
-    active.push_thinking(HistoryCell::Thinking {
-        content: "reasoning text".to_string(),
-        streaming: true,
-        duration_secs: None,
-    });
-    app.active_cell = Some(active);
-
-    let entries = active_reasoning_task_entries(&app);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, "reasoning-1");
-    assert_eq!(entries[0].status, "running");
-    assert_eq!(entries[0].prompt_summary, "model reasoning");
-    assert_eq!(entries[0].kind, TaskPanelEntryKind::ModelReasoning);
-    assert!(entries[0].duration_ms.unwrap_or_default() >= 2000);
 }
 
 #[test]

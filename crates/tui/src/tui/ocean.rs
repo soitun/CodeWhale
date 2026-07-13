@@ -1,11 +1,11 @@
 //! Terminal-native underwater field for the CodeWhale transcript.
 //!
-//! The field is atmosphere, never content: callers paint it only into cells
-//! outside occupied transcript text. Reduced motion freezes the field but does
-//! not remove it, so choosing an underwater treatment always has a visible
-//! result.
+//! The field is atmosphere, never content: ordinary shell cells share its
+//! water column while semantic surfaces such as selections, errors, and code
+//! keep their own backgrounds. Reduced motion freezes the field but does not
+//! remove it, so choosing an underwater treatment always has a visible result.
 
-use ratatui::style::Color;
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use crate::palette::{PaletteMode, UiTheme};
 use crate::tui::underwater::ShellPhase;
@@ -89,6 +89,79 @@ pub struct OceanRamp {
     pub middle: Color,
     pub deep: Color,
     pub ambient: Color,
+}
+
+/// One continuous water column shared by every shell band in a frame.
+///
+/// Individual widgets still own their foreground and semantic surfaces, but
+/// ordinary shell backgrounds sample this column with their absolute row.
+/// That keeps the header, work strip, transcript, phase line, and composer
+/// from each restarting the same miniature gradient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OceanColumn {
+    ramp: OceanRamp,
+    top: u16,
+    height: u16,
+    elapsed_ms: u128,
+    completion_elapsed_ms: Option<u128>,
+    phase: ShellPhase,
+    animated: bool,
+}
+
+impl OceanColumn {
+    #[must_use]
+    pub fn new(
+        ramp: OceanRamp,
+        viewport: Rect,
+        elapsed_ms: u128,
+        completion_elapsed_ms: Option<u128>,
+        phase: ShellPhase,
+        animated: bool,
+    ) -> Self {
+        Self {
+            ramp,
+            top: viewport.y,
+            height: viewport.height.max(1),
+            elapsed_ms,
+            completion_elapsed_ms,
+            phase,
+            animated,
+        }
+    }
+
+    #[must_use]
+    pub fn color_at_y(self, y: u16) -> Color {
+        let row = y.saturating_sub(self.top).min(self.height - 1);
+        if let Some(elapsed) = self.completion_elapsed_ms {
+            self.ramp.color_at_completion(row, self.height, elapsed)
+        } else if self.animated {
+            self.ramp
+                .color_at_phase(row, self.height, self.elapsed_ms, self.phase)
+        } else {
+            self.ramp.color_at(row, self.height)
+        }
+    }
+
+    #[must_use]
+    pub fn with_viewport(mut self, viewport: Rect) -> Self {
+        self.top = viewport.y;
+        self.height = viewport.height.max(1);
+        self
+    }
+
+    /// Continue the shared column through a shell-owned surface without
+    /// flattening semantic highlights (selection, hover, error, code blocks).
+    pub fn paint_matching(self, area: Rect, buf: &mut Buffer, background: Color) {
+        for y in area.top()..area.bottom() {
+            let row_bg = self.color_at_y(y);
+            for x in area.left()..area.right() {
+                let cell = &mut buf[(x, y)];
+                if cell.bg == background {
+                    cell.set_bg(row_bg);
+                }
+            }
+        }
+    }
 }
 
 impl OceanRamp {
@@ -359,5 +432,39 @@ mod tests {
         assert_ne!(start, peak);
         assert_ne!(peak, settled);
         assert_eq!(settled, ramp.color_at(0, 20));
+    }
+
+    #[test]
+    fn split_shell_surfaces_share_one_absolute_row_column() {
+        let theme = crate::palette::UI_THEME;
+        let ramp = OceanRamp::for_theme(&theme).expect("RGB theme");
+        let viewport = Rect::new(0, 0, 12, 12);
+        let header = Rect::new(0, 0, 12, 2);
+        let composer = Rect::new(0, 10, 12, 2);
+        let mut buf = Buffer::empty(viewport);
+        for y in header.top()..header.bottom() {
+            for x in header.left()..header.right() {
+                buf[(x, y)].set_bg(theme.header_bg);
+            }
+        }
+        for y in composer.top()..composer.bottom() {
+            for x in composer.left()..composer.right() {
+                buf[(x, y)].set_bg(theme.composer_bg);
+            }
+        }
+        buf[(4, 10)].set_bg(theme.selection_bg);
+
+        let column = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false);
+        column.paint_matching(header, &mut buf, theme.header_bg);
+        column.paint_matching(composer, &mut buf, theme.composer_bg);
+
+        assert_eq!(buf[(0, 0)].bg, ramp.color_at(0, 12));
+        assert_eq!(buf[(0, 11)].bg, ramp.color_at(11, 12));
+        assert_ne!(buf[(0, 1)].bg, buf[(0, 10)].bg);
+        assert_eq!(
+            buf[(4, 10)].bg,
+            theme.selection_bg,
+            "semantic surfaces must survive the shell ombre pass"
+        );
     }
 }

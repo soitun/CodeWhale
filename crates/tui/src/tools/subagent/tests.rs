@@ -1906,6 +1906,10 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "thinking description should teach child thinking control: {thinking}"
     );
     assert!(agent_schema["properties"].get("model").is_some());
+    assert!(
+        agent_schema["properties"].get("token_budget").is_none(),
+        "ad-hoc children should inherit the generous runtime budget; exposing an optional cap invites accidental micromanagement"
+    );
     let worktree = schema_property_description(&agent_schema, "worktree");
     assert!(
         worktree.contains("git worktree") && worktree.contains("parallel edit"),
@@ -2076,6 +2080,157 @@ async fn agent_tool_cancel_stops_running_child() {
         .get_result("agent_cancel_probe")
         .expect("agent remains listed");
     assert_eq!(snapshot.status, SubAgentStatus::Cancelled);
+
+    let second = tool
+        .execute(
+            json!({"action": "cancel", "agent_id": "agent_cancel_probe"}),
+            &context,
+        )
+        .await
+        .expect("repeated cancel stays idempotent");
+    assert_eq!(second.metadata.as_ref().unwrap()["action"], json!("cancel"));
+    let record = manager
+        .read()
+        .await
+        .get_worker_record("agent_cancel_probe")
+        .expect("worker record remains inspectable");
+    assert_eq!(
+        record
+            .events
+            .iter()
+            .filter(|event| event.status == AgentWorkerStatus::Cancelled)
+            .count(),
+        1,
+        "repeated stop must not append a second terminal outcome"
+    );
+}
+
+#[tokio::test]
+async fn late_completion_does_not_overwrite_cancelled_outcome() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_cancel_completion_race".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "race".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+
+    manager.cancel_agent(&agent_id).expect("cancel wins race");
+    let mut late = manager
+        .get_result(&agent_id)
+        .expect("cancelled snapshot exists");
+    late.status = SubAgentStatus::Completed;
+    late.result = Some("late success".to_string());
+    assert!(
+        !manager.update_from_result(&agent_id, late),
+        "late completion must lose the terminal transition"
+    );
+
+    let snapshot = manager
+        .get_result(&agent_id)
+        .expect("terminal snapshot remains");
+    assert_eq!(snapshot.status, SubAgentStatus::Cancelled);
+    assert_eq!(
+        snapshot.result.as_deref(),
+        Some("Cancelled by parent request.")
+    );
+    let record = manager
+        .get_worker_record(&agent_id)
+        .expect("worker record remains");
+    let terminal = record
+        .events
+        .iter()
+        .filter(|event| event.status.is_terminal())
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].status, AgentWorkerStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn completion_claim_preserves_running_gate_and_excludes_late_cancel() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_completion_claim".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "claim".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    agent.task_handle = Some(tokio::spawn(async {}));
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+
+    assert!(manager.claim_terminal_delivery(&agent_id));
+    assert_eq!(manager.running_count(), 1);
+    assert_eq!(
+        manager.get_result(&agent_id).unwrap().status,
+        SubAgentStatus::Running,
+        "claimed completion must keep the running-child gate open until delivery"
+    );
+    assert_eq!(
+        manager.cancel_agent(&agent_id).unwrap().status,
+        SubAgentStatus::Running,
+        "cancellation after the claim must not steal terminal ownership"
+    );
+
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let runtime = runtime_with_depth(1, Some(completion_tx));
+    assert!(emit_parent_completion(
+        &runtime,
+        &agent_id,
+        "summary\n<sentinel/>"
+    ));
+    assert_eq!(
+        completion_rx.try_recv().unwrap().agent_id,
+        agent_id,
+        "parent completion must be queued before closing Running"
+    );
+    assert_eq!(
+        manager.get_result(&agent_id).unwrap().status,
+        SubAgentStatus::Running
+    );
+    assert_eq!(
+        manager.running_count(),
+        1,
+        "child remains counted until parent delivery is queued"
+    );
+
+    let mut result = manager.get_result(&agent_id).unwrap();
+    result.status = SubAgentStatus::Completed;
+    result.result = Some("done".to_string());
+    assert!(manager.update_from_result(&agent_id, result));
+    assert_eq!(
+        manager.get_result(&agent_id).unwrap().status,
+        SubAgentStatus::Completed
+    );
+    assert_eq!(manager.running_count(), 0);
+    let terminal = manager
+        .get_worker_record(&agent_id)
+        .unwrap()
+        .events
+        .iter()
+        .filter(|event| event.status.is_terminal())
+        .count();
+    assert_eq!(terminal, 1, "exactly one terminal outcome is recorded");
 }
 
 #[test]
@@ -4687,6 +4842,20 @@ fn child_cancellation_cascades_from_parent() {
 }
 
 #[test]
+fn detached_background_children_survive_parent_cancellation() {
+    let parent = stub_runtime();
+    let first = parent.background_runtime();
+    let second = parent.background_runtime();
+    parent.cancel_token.cancel();
+
+    assert!(parent.cancel_token.is_cancelled());
+    assert!(
+        !first.cancel_token.is_cancelled() && !second.cancel_token.is_cancelled(),
+        "parent stop must leave every detached child running until explicitly cancelled"
+    );
+}
+
+#[test]
 fn mailbox_propagates_through_child_runtime_chain() {
     use crate::tools::subagent::mailbox::Mailbox;
     let parent_token = CancellationToken::new();
@@ -5573,7 +5742,7 @@ fn terminal_results_excluding_returns_only_current_root_undelivered_agents() {
 }
 
 #[tokio::test]
-async fn run_subagent_task_emits_parent_completion_before_terminal_update() {
+async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
     let manager = Arc::new(RwLock::new(SubAgentManager::new(PathBuf::from("."), 2)));
     let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
     let agent_id = "agent_noop".to_string();
@@ -5616,31 +5785,138 @@ async fn run_subagent_task_emits_parent_completion_before_terminal_update() {
     let manager_lock = manager.write().await;
     let task_handle = tokio::spawn(run_subagent_task(task));
 
-    // While the manager write lock is held, completion can be emitted only if it
-    // is sent before the terminal-state manager update (the ordering fixed by
-    // issue #1961).
+    // External delivery must wait for the terminal claim. Holding the manager
+    // lock keeps that claim pending and therefore keeps the parent-completion
+    // inbox empty.
+    let premature = tokio::time::timeout(Duration::from_millis(100), completion_rx.recv()).await;
+    assert!(
+        premature.is_err(),
+        "completion escaped before the manager terminal claim"
+    );
+    drop(manager_lock);
+
     let completion = tokio::time::timeout(Duration::from_secs(1), completion_rx.recv())
         .await
-        .expect("completion should be emitted while manager write lock is still held");
+        .expect("completion should follow the successful terminal claim");
     let completion = completion.expect("completion channel should remain open");
     assert_eq!(completion.agent_id, agent_id);
 
-    drop(manager_lock);
     task_handle
         .await
         .expect("run_subagent_task should complete after lock release");
 
-    let snapshot = {
-        let manager = manager.read().await;
-        manager
-            .get_result(&agent_id)
-            .expect("completed agent should be present")
-    };
+    let snapshot = manager
+        .read()
+        .await
+        .get_result(&agent_id)
+        .expect("completed agent should be present");
     assert!(
         matches!(snapshot.status, SubAgentStatus::Failed(_)),
         "0 max_steps cannot produce a final summary, so the child must fail: {:?}",
         snapshot.status
     );
+}
+
+#[tokio::test]
+async fn run_subagent_task_suppresses_external_completion_when_cancellation_wins() {
+    use tokio_util::sync::CancellationToken;
+
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent_id = "agent_cancelled_at_epilogue".to_string();
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "noop".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        task_input_tx,
+        tmp.path().to_path_buf(),
+        "boot_test".to_string(),
+    );
+    agent.status = SubAgentStatus::Running;
+
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let mut runtime = runtime_with_depth(1, Some(completion_tx));
+    runtime.manager = Arc::clone(&manager);
+    runtime.mailbox = Some(mailbox);
+    runtime.event_tx = Some(event_tx);
+
+    let task = SubAgentTask {
+        manager_handle: manager.clone(),
+        runtime,
+        agent_id: agent_id.clone(),
+        agent_type: SubAgentType::General,
+        prompt: "no-op child run".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: None,
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 0,
+        token_budget: None,
+        wall_time: DEFAULT_CHILD_WALL_TIME,
+        input_rx: task_input_rx,
+        launch_gate: None,
+    };
+
+    let mut manager_lock = manager.write().await;
+    manager_lock.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    manager_lock.agents.insert(agent_id.clone(), agent);
+    let task_handle = tokio::spawn(run_subagent_task(task));
+
+    // max_steps=0 reaches the task epilogue without provider I/O. Keep the
+    // terminal lock occupied long enough for that epilogue to queue behind us,
+    // then let cancellation win the same transition point deterministically.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let cancelled = manager_lock
+        .cancel_agent(&agent_id)
+        .expect("cancellation should win");
+    assert_eq!(cancelled.status, SubAgentStatus::Cancelled);
+    drop(manager_lock);
+
+    task_handle
+        .await
+        .expect("late task epilogue should exit cleanly");
+
+    let snapshot = {
+        let manager = manager.read().await;
+        manager
+            .get_result(&agent_id)
+            .expect("cancelled agent should remain present")
+    };
+    assert_eq!(snapshot.status, SubAgentStatus::Cancelled);
+    assert_eq!(
+        snapshot.result.as_deref(),
+        Some("Cancelled by parent request.")
+    );
+
+    assert!(
+        completion_rx.try_recv().is_err(),
+        "cancelled task must not wake the parent with a late completion"
+    );
+    assert!(
+        mailbox_rx.drain().into_iter().all(|envelope| !matches!(
+            envelope.message,
+            MailboxMessage::Completed { agent_id: ref id, .. }
+                | MailboxMessage::Failed { agent_id: ref id, .. }
+                if id == &agent_id
+        )),
+        "cancelled task must not publish a late terminal mailbox result"
+    );
+    while let Ok(event) = event_rx.try_recv() {
+        assert!(
+            !matches!(event, Event::AgentComplete { id, .. } if id == agent_id),
+            "cancelled task must not publish a late AgentComplete event"
+        );
+    }
 }
 
 #[test]
@@ -5719,7 +5995,7 @@ fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
 #[test]
 fn subagent_completion_from_result_surfaces_step_limit_not_silent_success() {
     let snap = make_snapshot(SubAgentStatus::Failed(
-        "child step budget exhausted (limit: 12 steps; used: 12); raise it with max_steps, or use max_depth/token_budget for other child budgets".to_string(),
+        "child step budget exhausted (limit: 12 steps; used: 12); raise it with max_steps or split the work into smaller independent tasks".to_string(),
     ));
     let completion = subagent_completion_from_result(&snap);
     assert!(
@@ -6247,13 +6523,9 @@ fn child_wall_timeout_reason_is_typed_and_actionable() {
     let reason = child_wall_time_exhausted_reason(Duration::from_millis(1));
     assert!(reason.contains("wall-time budget exhausted"), "{reason}");
     assert!(reason.contains("limit: 0s"), "{reason}");
-    assert!(
-        reason.contains("wall_time_secs")
-            && reason.contains("max_depth")
-            && reason.contains("max_steps")
-            && reason.contains("token_budget"),
-        "{reason}"
-    );
+    assert!(reason.contains("wall_time_secs"), "{reason}");
+    assert!(reason.contains("smaller independent tasks"), "{reason}");
+    assert!(!reason.contains("token_budget"), "{reason}");
 }
 
 // ── #3095: sub-agent launch gate ─────────────────────────────────────────────
@@ -6811,6 +7083,35 @@ fn cleanup_evicts_stale_terminal_worker_records_and_keeps_live_ones() {
 }
 
 #[test]
+fn cleanup_removes_complete_transcript_after_worker_retention_expires() {
+    let tmp = tempdir().expect("tempdir");
+    let agent_id = "agent_expired_transcript";
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    manager.register_worker(make_worker_spec(agent_id, tmp.path().to_path_buf()));
+    let record = manager
+        .worker_records
+        .get_mut(agent_id)
+        .expect("worker record");
+    record.status = AgentWorkerStatus::Completed;
+    let expired = epoch_millis_now().saturating_sub(2 * 60 * 60 * 1000);
+    record.completed_at_ms = Some(expired);
+    record.updated_at_ms = expired;
+
+    let messages = vec![text_message("user", "retained until ledger cleanup")];
+    let artifact = write_subagent_transcript_artifact_for_test(tmp.path(), agent_id, &messages)
+        .expect("write transcript artifact");
+    assert!(artifact.exists());
+
+    manager.cleanup(Duration::from_secs(60 * 60));
+
+    assert!(manager.get_worker_record(agent_id).is_none());
+    assert!(
+        !artifact.exists(),
+        "artifact must share the terminal worker retention lifecycle"
+    );
+}
+
+#[test]
 fn cleanup_due_gates_write_locked_cleanup_to_a_bounded_cadence() {
     // #3803: a fresh manager is always due (never cleaned); right after a
     // cleanup it is not due again until the interval elapses, so the sidebar
@@ -6894,6 +7195,123 @@ fn bounded_tail_messages_always_keeps_the_final_message() {
     );
     assert_eq!(omitted, 1);
     assert!(message_text(&kept[0]).starts_with('b'));
+}
+
+#[tokio::test]
+async fn complete_transcript_artifact_survives_resident_handle_compaction() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_complete_transcript";
+    let early = format!("EARLY-TURN-MARKER\n{}", "x".repeat(1_100_000));
+    let messages = vec![
+        text_message("user", &early),
+        text_message("assistant", "LAST-TURN-MARKER"),
+    ];
+    let mut artifact = SubAgentTranscriptArtifactWriter::for_runtime(&runtime, agent_id)
+        .await
+        .expect("create private transcript artifact");
+    let artifact_path = artifact.path.clone();
+
+    let handle = insert_subagent_full_transcript_handle(
+        &runtime,
+        agent_id,
+        &SubAgentType::General,
+        &make_assignment(),
+        &SubAgentStatus::Completed,
+        Some(&"LAST-TURN-MARKER".to_string()),
+        None,
+        Some(&mut artifact),
+        &messages,
+        1,
+        10,
+        false,
+    )
+    .await;
+
+    let store = runtime.context.runtime.handle_store.lock().await;
+    let record = store.get(&handle).expect("resident transcript handle");
+    let crate::tools::handle::HandleValue::Json(payload) = &record.value else {
+        panic!("sub-agent transcript handle must remain JSON");
+    };
+    assert_eq!(payload["omitted_messages"], json!(1));
+    assert_eq!(payload["messages_complete"], json!(false));
+    assert_eq!(
+        payload["complete_transcript_artifact"]["complete"],
+        json!(true)
+    );
+    assert!(
+        !payload.to_string().contains("EARLY-TURN-MARKER"),
+        "the >1 MiB early turn must not remain resident in the bounded handle"
+    );
+    drop(store);
+
+    let restored = load_subagent_transcript_artifact(tmp.path(), agent_id)
+        .expect("load complete transcript artifact");
+    assert_eq!(restored.len(), messages.len());
+    assert!(message_text(&restored[0]).starts_with("EARLY-TURN-MARKER"));
+    assert_eq!(message_text(&restored[1]), "LAST-TURN-MARKER");
+    assert!(artifact_path.starts_with(tmp.path().canonicalize().unwrap()));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&artifact_path)
+                .expect("artifact metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "worker chats may contain credentials and must stay private"
+        );
+    }
+}
+
+#[test]
+fn malformed_transcript_artifact_fails_closed_instead_of_showing_partial_chat() {
+    let tmp = tempdir().expect("tempdir");
+    let agent_id = "agent_malformed_transcript";
+    let artifact = write_subagent_transcript_artifact_for_test(
+        tmp.path(),
+        agent_id,
+        &[text_message("user", "valid first turn")],
+    )
+    .expect("write transcript artifact");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&artifact)
+        .expect("open artifact")
+        .write_all(b"{not valid json}\n")
+        .expect("append malformed record");
+
+    let error = load_subagent_transcript_artifact(tmp.path(), agent_id)
+        .expect_err("a malformed stream must not masquerade as a complete chat");
+    assert!(error.to_string().contains("line"), "{error:#}");
+}
+
+#[cfg(unix)]
+#[test]
+fn transcript_artifact_reader_rejects_symlink_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().expect("tempdir");
+    let agent_id = "agent_symlink_transcript";
+    let artifact = write_subagent_transcript_artifact_for_test(
+        tmp.path(),
+        agent_id,
+        &[text_message("user", "private worker chat")],
+    )
+    .expect("write transcript artifact");
+    let outside = tmp.path().join("outside.jsonl");
+    std::fs::write(&outside, "not a transcript").expect("outside file");
+    std::fs::remove_file(&artifact).expect("remove artifact");
+    symlink(&outside, &artifact).expect("replace with symlink");
+
+    let error = load_subagent_transcript_artifact(tmp.path(), agent_id)
+        .expect_err("transcript reader must reject symlink replacement");
+    assert!(error.to_string().contains("must not traverse symlinks"));
 }
 
 #[test]

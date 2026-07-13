@@ -6889,7 +6889,20 @@ fn preserve_interrupted_checkpoint_for_explicit_resume(launch_workspace: &Path) 
 /// overrides on top of the global config (#485).
 /// Only explicitly set fields in the project file are applied; everything
 /// else falls back to the global value.
+#[cfg(test)]
 fn merge_project_config(config: &mut Config, workspace: &Path) {
+    merge_project_config_with_approval_baseline(config, workspace, None);
+}
+
+/// Apply project config while evaluating approval tightening against the
+/// user's effective interactive baseline. `Config::approval_policy` remains
+/// authoritative when present; the saved TUI posture is used only when the
+/// root config leaves approval unset.
+fn merge_project_config_with_approval_baseline(
+    config: &mut Config,
+    workspace: &Path,
+    saved_permission_posture: Option<&str>,
+) {
     // When the workspace is the user's home directory, the project-scope
     // config file is also the global config file. Skip the merge to avoid
     // redundant processing and a misleading "project-scope config key
@@ -6993,10 +7006,22 @@ fn merge_project_config(config: &mut Config, workspace: &Path) {
     if let Some(v) = table.get("approval_policy").and_then(toml::Value::as_str)
         && !v.is_empty()
     {
-        if codewhale_config::project_approval_policy_is_allowed(
-            config.approval_policy.as_deref(),
-            v,
-        ) {
+        let saved_approval_baseline = saved_permission_posture.and_then(|posture| {
+            match posture.trim().to_ascii_lowercase().as_str() {
+                "ask" | "suggest" | "on-request" | "untrusted" => Some("on-request"),
+                "auto" | "auto-review" | "auto_review" => Some("auto"),
+                // Full Access is looser than every project policy accepted by
+                // the config crate. Use its loosest ranked value so any valid
+                // project policy is recognized as a tightening operation.
+                "full" | "full-access" | "full_access" | "bypass" => Some("auto"),
+                _ => None,
+            }
+        });
+        let approval_baseline = config
+            .approval_policy
+            .as_deref()
+            .or(saved_approval_baseline);
+        if codewhale_config::project_approval_policy_is_allowed(approval_baseline, v) {
             config.approval_policy = Some(v.to_string());
         } else {
             eprintln!(
@@ -7187,7 +7212,14 @@ async fn run_interactive(
     let mut merged_config = config.clone();
     merge_user_workspace_config(&mut merged_config, cli.config.clone(), &workspace);
     if !cli.no_project_config {
-        merge_project_config(&mut merged_config, &workspace);
+        let saved_permission_posture = crate::settings::Settings::load_persisted()
+            .ok()
+            .and_then(|settings| settings.permission_posture);
+        merge_project_config_with_approval_baseline(
+            &mut merged_config,
+            &workspace,
+            saved_permission_posture.as_deref(),
+        );
     }
     let config = &merged_config;
 
@@ -11521,6 +11553,24 @@ sandbox_mode = "read-only"
         merge_project_config(&mut config, tmp.path());
         assert_eq!(config.approval_policy.as_deref(), Some("never"));
         assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn project_overlay_can_tighten_saved_full_access_posture() {
+        let tmp = workspace_with_project_config(
+            r#"
+approval_policy = "on-request"
+"#,
+        );
+        let mut config = Config::default();
+
+        merge_project_config_with_approval_baseline(&mut config, tmp.path(), Some("full-access"));
+
+        assert_eq!(
+            config.approval_policy.as_deref(),
+            Some("on-request"),
+            "a project may tighten the saved Full Access baseline to Ask"
+        );
     }
 
     #[test]
