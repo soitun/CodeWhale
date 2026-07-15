@@ -310,13 +310,21 @@ pub(crate) fn action_footer_lines(hints: &[ActionHint], width: u16) -> Vec<Line<
 /// Reserve `lines` worth of rows at the bottom of `inner`, paint them, and
 /// return the content area that remains above. Shared by the action-hint and
 /// free-text modal footers.
-fn place_footer_lines(inner: Rect, buf: &mut Buffer, lines: Vec<Line<'static>>) -> Rect {
+fn place_footer_lines(
+    inner: Rect,
+    buf: &mut Buffer,
+    lines: Vec<Line<'static>>,
+    quiet_gutter: bool,
+) -> Rect {
     if lines.is_empty() || inner.height == 0 {
         return inner;
     }
     let footer_height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .min(inner.height);
+    // Opted-in overlays keep one quiet row between scrollable body copy and
+    // the action rail. Degenerate heights keep every row for content.
+    let gutter_height = u16::from(quiet_gutter && inner.height >= footer_height.saturating_add(4));
     let footer_area = Rect {
         x: inner.x,
         y: inner.y + inner.height - footer_height,
@@ -328,7 +336,9 @@ fn place_footer_lines(inner: Rect, buf: &mut Buffer, lines: Vec<Line<'static>>) 
         x: inner.x,
         y: inner.y,
         width: inner.width,
-        height: inner.height - footer_height,
+        height: inner
+            .height
+            .saturating_sub(footer_height.saturating_add(gutter_height)),
     }
 }
 
@@ -341,7 +351,18 @@ fn place_footer_lines(inner: Rect, buf: &mut Buffer, lines: Vec<Line<'static>>) 
 /// reachable at narrow widths.
 pub(crate) fn render_modal_footer(inner: Rect, buf: &mut Buffer, hints: &[ActionHint]) -> Rect {
     let lines = action_footer_lines(hints, inner.width);
-    place_footer_lines(inner, buf, lines)
+    place_footer_lines(inner, buf, lines, false)
+}
+
+/// Render a modal action footer with one quiet body-to-footer row when the
+/// caller's responsive layout has explicitly budgeted for it.
+pub(crate) fn render_modal_footer_with_gutter(
+    inner: Rect,
+    buf: &mut Buffer,
+    hints: &[ActionHint],
+) -> Rect {
+    let lines = action_footer_lines(hints, inner.width);
+    place_footer_lines(inner, buf, lines, true)
 }
 
 /// Word-wrap a free-form footer string into styled lines that each fit `width`.
@@ -394,7 +415,10 @@ pub(crate) fn render_modal_text_footer(
     style: Style,
 ) -> Rect {
     let lines = wrapped_footer_lines(text, inner.width, style);
-    place_footer_lines(inner, buf, lines)
+    // Free-text status footers are already separated semantically from their
+    // table body and can carry the last visible receipt themselves. Do not
+    // spend another row here; action-rail layouts can opt into that gutter.
+    place_footer_lines(inner, buf, lines, false)
 }
 
 /// Shared list/detail geometry for modal managers and pickers.
@@ -3718,8 +3742,8 @@ mod tests {
         ActionHint, ConfigListItem, ConfigScope, ConfigView, EmptyState, HelpView,
         ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, ViewStack,
         action_footer_lines, canonical_config_choice, centered_modal_area, config_choice_values,
-        config_label_for_key, render_modal_footer, render_underwater_surface, subagent_view_agents,
-        truncate_view_text,
+        config_label_for_key, render_modal_footer_with_gutter, render_underwater_surface,
+        subagent_view_agents, truncate_view_text,
     };
     use crate::config::Config;
     use crate::localization::{Locale, MessageId, tr};
@@ -3883,12 +3907,17 @@ mod tests {
             ActionHint::new("Enter", "save"),
             ActionHint::new("Esc", "cancel"),
         ];
-        let body = render_modal_footer(inner, &mut buf, &hints);
-        // The footer (a single row at this width) is reserved off the bottom and
-        // the body fills the rows above it.
+        let body = render_modal_footer_with_gutter(inner, &mut buf, &hints);
+        // Normal-height overlays reserve a single quiet gutter above the
+        // one-row footer, so body prose never runs into the action rail.
         assert_eq!(body.y, inner.y);
-        assert_eq!(body.height, inner.height - 1);
-        assert_eq!(body.y + body.height, inner.y + inner.height - 1);
+        assert_eq!(body.height, inner.height - 2);
+        assert_eq!(body.y + body.height, inner.y + inner.height - 2);
+        let gutter_y = inner.y + inner.height - 2;
+        assert!(
+            (inner.x..inner.right()).all(|x| buf[(x, gutter_y)].symbol().trim().is_empty()),
+            "modal footer gutter should stay visually quiet"
+        );
     }
 
     #[test]

@@ -481,8 +481,11 @@ fn spacer_rows_between(
     }
 
     let conversational_gap = match spacing {
-        TranscriptSpacing::Compact => 0,
-        TranscriptSpacing::Comfortable => 1,
+        // Compact still separates distinct people/turn blocks. It removes
+        // secondary chrome and tool gaps, not the boundary between a user and
+        // an assistant; without this floor dense 89-column transcripts read
+        // as one uninterrupted paragraph.
+        TranscriptSpacing::Compact | TranscriptSpacing::Comfortable => 1,
         TranscriptSpacing::Spacious => 2,
     };
     let secondary_gap = match spacing {
@@ -1078,6 +1081,28 @@ mod tests {
         assert!(
             !lines.iter().any(String::is_empty),
             "adjacent tool cells should not be separated by blank spacer rows: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn compact_spacing_keeps_conversation_blocks_separate() {
+        let cells = vec![
+            user_cell("Please verify the release."),
+            assistant_cell("I will check the receipts.", false),
+        ];
+        let revisions = vec![1u64, 1];
+        let mut cache = TranscriptViewCache::new();
+        let options = TranscriptRenderOptions {
+            spacing: TranscriptSpacing::Compact,
+            ..TranscriptRenderOptions::default()
+        };
+
+        cache.ensure(&cells, &revisions, 89, options);
+        let lines = plain_lines(&cache);
+
+        assert!(
+            lines.iter().any(String::is_empty),
+            "compact density still needs one user/assistant boundary: {lines:?}"
         );
     }
 
