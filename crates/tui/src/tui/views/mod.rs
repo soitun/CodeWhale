@@ -2143,22 +2143,8 @@ fn config_base_url_row_key(provider: ApiProvider) -> &'static str {
     }
 }
 
-fn config_provider_row_value(app: &App, config: &Config) -> String {
-    if app.api_provider == ApiProvider::Custom
-        && let Some(provider_id) = config
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|provider_id| !provider_id.is_empty())
-        && config
-            .providers
-            .as_ref()
-            .and_then(|providers| providers.custom_provider_config(provider_id))
-            .is_some()
-    {
-        return provider_id.to_string();
-    }
-    app.api_provider.as_str().to_string()
+fn config_provider_row_value(app: &App, _config: &Config) -> String {
+    app.provider_identity_for_persistence().to_string()
 }
 
 fn config_base_url_row_value(app: &App) -> String {
@@ -2166,9 +2152,7 @@ fn config_base_url_row_value(app: &App) -> String {
         .map(|mut config| {
             // A named custom provider is represented at runtime as `Custom`,
             // but its table lookup still needs the original provider ID.
-            if app.api_provider != ApiProvider::Custom {
-                config.provider = Some(app.api_provider.as_str().to_string());
-            }
+            config.provider = Some(app.provider_identity_for_persistence().to_string());
             config.deepseek_base_url()
         })
         .unwrap_or_else(|_| tr(app.ui_locale, MessageId::ConfigUnavailable).to_string())

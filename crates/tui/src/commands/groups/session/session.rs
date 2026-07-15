@@ -31,7 +31,7 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
-    session.metadata.model_provider = app.api_provider.as_str().to_string();
+    session.metadata.model_provider = app.provider_identity_for_persistence().to_string();
     app.sync_cost_to_metadata(&mut session.metadata);
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
@@ -105,7 +105,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
-    parent.metadata.model_provider = app.api_provider.as_str().to_string();
+    parent.metadata.model_provider = app.provider_identity_for_persistence().to_string();
     if let Some(cached) = app
         .current_session_metadata
         .as_ref()
@@ -140,7 +140,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         app.system_prompt.as_ref(),
         Some(app.mode.label()),
     );
-    forked.metadata.model_provider = app.api_provider.as_str().to_string();
+    forked.metadata.model_provider = app.provider_identity_for_persistence().to_string();
     forked.metadata.copy_cost_from(&parent.metadata);
     forked.metadata.mark_forked_from(&parent.metadata);
     forked.context_references = app.session_context_references.clone();
@@ -272,6 +272,26 @@ pub fn load(app: &mut App, path: Option<&str>) -> CommandResult {
         }
     };
 
+    // `/load` executes in the command layer, which does not borrow the event
+    // loop's Config. Reload the same live config source before mutating App so
+    // an exact named custom provider can be validated and a removed/renamed
+    // table fails closed. The subsequent SyncSession action repeats this check
+    // against the event loop's in-memory Config before rebuilding the engine.
+    let live_config =
+        match crate::config::Config::load(app.config_path.clone(), app.config_profile.as_deref()) {
+            Ok(config) => config,
+            Err(err) => {
+                return CommandResult::error(format!(
+                    "Failed to load live config for session provider restore: {err}"
+                ));
+            }
+        };
+    let provider_identity =
+        match live_config.resolve_provider_identity(&session.metadata.model_provider) {
+            Ok(identity) => identity,
+            Err(err) => return CommandResult::error(format!("Failed to restore session: {err}")),
+        };
+
     if let Err(err) = app.restore_work_state(session.work_state.as_ref()) {
         return CommandResult::error(format!("Failed to restore saved Work state: {err}"));
     }
@@ -296,16 +316,15 @@ pub fn load(app: &mut App, path: Option<&str>) -> CommandResult {
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
     let previous_provider = app.api_provider;
-    if let Some(provider) = crate::config::ApiProvider::parse(&session.metadata.model_provider) {
-        app.api_provider = provider;
-        app.reasoning_effort = app.reasoning_effort.normalize_for_provider(provider);
-        if provider != previous_provider {
-            // A context override belongs to the route that supplied it. A
-            // file load can cross providers without the live Config value in
-            // scope, so never leak the previous provider's limit into the
-            // restored route.
-            app.set_active_context_window_override(None);
-        }
+    let provider = provider_identity.provider;
+    app.set_provider_identity(provider, provider_identity.key);
+    app.reasoning_effort = app.reasoning_effort.normalize_for_provider(provider);
+    if provider != previous_provider {
+        // A context override belongs to the route that supplied it. A
+        // file load can cross providers without the event loop's live Config
+        // in scope, so never leak the previous provider's limit into the
+        // restored route.
+        app.set_active_context_window_override(None);
     }
     app.set_model_selection(session.metadata.model.clone());
     app.active_route_limits = if app.auto_model {
@@ -677,6 +696,7 @@ mod tests {
         let home_guard = EnvVarGuard::set("HOME", &home);
         let previous_home = home_guard.previous();
         let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "lm-studio");
         app.current_session_id = Some("parent-session".to_string());
         let mut cached_parent = create_saved_session_with_id_and_mode(
             "parent-session".to_string(),
@@ -716,6 +736,7 @@ mod tests {
             .expect("parent saved");
         let child = manager.load_session(&new_id).expect("child saved");
         assert_eq!(parent.messages.len(), 1);
+        assert_eq!(parent.metadata.model_provider, "lm-studio");
         assert_eq!(parent.metadata.title, cached_parent.title);
         assert_eq!(parent.metadata.created_at, cached_parent.created_at);
         assert_eq!(
@@ -723,6 +744,7 @@ mod tests {
             Some("parent-session")
         );
         assert_eq!(child.metadata.forked_from_message_count, Some(1));
+        assert_eq!(child.metadata.model_provider, "lm-studio");
         let cached_child = app
             .current_session_metadata
             .as_ref()

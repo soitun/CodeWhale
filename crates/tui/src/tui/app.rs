@@ -1773,6 +1773,10 @@ pub struct App {
     /// Updated by `/provider` switches so the UI/commands can read the
     /// active backend without re-deriving it from the live config.
     pub api_provider: ApiProvider,
+    /// Exact configured provider key for persistence and route restoration.
+    /// Built-ins use their canonical slug; named custom providers retain the
+    /// user-owned key instead of collapsing to `custom`.
+    pub(crate) provider_identity: String,
     /// Primary provider plus configured fallback providers for this session.
     pub provider_chain: Option<ProviderChain>,
     /// Per-provider auth/local readiness snapshot for the fallback chain (#2574).
@@ -2654,18 +2658,20 @@ impl App {
         // Let settings preserve runtime switches only when config/CLI did not
         // explicitly select a provider. A configured provider must not be
         // pushed back to a stale saved setting on restart.
-        if config
+        let config_explicitly_selects_provider = config
             .provider
             .as_deref()
-            .and_then(ApiProvider::parse)
-            .is_none()
+            .is_some_and(|provider| !provider.trim().is_empty());
+        let mut provider_identity = config.provider_identity_for(provider);
+        if !config_explicitly_selects_provider
             && let Some(ref provider_str) = settings.default_provider
-            && let Some(parsed) = ApiProvider::parse(provider_str)
+            && let Ok(resolved) = config.resolve_provider_identity(provider_str)
         {
-            provider = parsed;
+            provider = resolved.provider;
+            provider_identity = resolved.key;
         }
         let mut effective_auth_config = config.clone();
-        effective_auth_config.provider = Some(provider.as_str().to_string());
+        effective_auth_config.provider = Some(provider_identity.clone());
         let model_ids_passthrough = effective_auth_config.model_ids_pass_through();
         let provider_chain = provider
             .kind()
@@ -2742,7 +2748,7 @@ impl App {
         }
         let provider_models = settings.provider_models.clone().unwrap_or_default();
         let model = provider_models
-            .get(provider.as_str())
+            .get(&provider_identity)
             .cloned()
             .or_else(|| {
                 // default_model is a DeepSeek-centric setting; other providers
@@ -2998,6 +3004,7 @@ impl App {
             pending_turn_route: None,
             active_turn: None,
             api_provider: provider,
+            provider_identity,
             provider_chain,
             provider_readiness,
             provider_health: crate::provider_readiness::ProviderReadinessSnapshot::default(),
@@ -6482,6 +6489,24 @@ impl App {
         }
     }
 
+    #[must_use]
+    pub(crate) fn provider_identity_for_persistence(&self) -> &str {
+        if self.api_provider == ApiProvider::Custom {
+            &self.provider_identity
+        } else {
+            self.api_provider.as_str()
+        }
+    }
+
+    pub(crate) fn set_provider_identity(
+        &mut self,
+        provider: ApiProvider,
+        identity: impl Into<String>,
+    ) {
+        self.api_provider = provider;
+        self.provider_identity = identity.into();
+    }
+
     pub fn accepts_custom_model_ids(&self) -> bool {
         self.model_ids_passthrough
             || crate::config::provider_passes_model_through(self.api_provider)
@@ -6682,7 +6707,7 @@ impl App {
             return None;
         };
 
-        self.api_provider = next_provider;
+        self.set_provider_identity(next_provider, next_provider.as_str());
         self.last_fallback_reason = Some(format!(
             "Fell back to {} after recoverable provider error: {reason}{skipped}",
             next_provider.as_str()

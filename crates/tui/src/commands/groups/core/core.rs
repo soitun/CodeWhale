@@ -156,10 +156,11 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 app.session.last_completion_tokens = None;
                 app.session.last_output_throughput = None;
             }
-            app.provider_models
-                .insert(app.api_provider.as_str().to_string(), "auto".to_string());
-            let persist_warning =
-                provider_model_selection_persist_warning(app.api_provider, "auto");
+            app.provider_models.insert(
+                app.provider_identity_for_persistence().to_string(),
+                "auto".to_string(),
+            );
+            let persist_warning = provider_model_selection_persist_warning(app, "auto");
             let mut message = tr(app.ui_locale, MessageId::ModelChanged)
                 .replace("{old}", &old_model)
                 .replace("{new}", "auto");
@@ -222,9 +223,11 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             app.session.last_completion_tokens = None;
             app.session.last_output_throughput = None;
         }
-        app.provider_models
-            .insert(app.api_provider.as_str().to_string(), model_id.clone());
-        let persist_warning = provider_model_selection_persist_warning(app.api_provider, &model_id);
+        app.provider_models.insert(
+            app.provider_identity_for_persistence().to_string(),
+            model_id.clone(),
+        );
+        let persist_warning = provider_model_selection_persist_warning(app, &model_id);
         let mut message = tr(app.ui_locale, MessageId::ModelChanged)
             .replace("{old}", &old_model)
             .replace("{new}", &model_id);
@@ -240,10 +243,17 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
     }
 }
 
-fn provider_model_selection_persist_warning(provider: ApiProvider, model: &str) -> Option<String> {
-    crate::settings::Settings::persist_provider_model_selection(provider, model)
-        .err()
-        .map(|err| format!(" (not persisted: {err})"))
+fn provider_model_selection_persist_warning(app: &App, model: &str) -> Option<String> {
+    let result = if app.api_provider == ApiProvider::Custom {
+        (|| -> anyhow::Result<()> {
+            let mut settings = crate::settings::Settings::load()?;
+            settings.set_model_for_provider(app.provider_identity_for_persistence(), model);
+            settings.save()
+        })()
+    } else {
+        crate::settings::Settings::persist_provider_model_selection(app.api_provider, model)
+    };
+    result.err().map(|err| format!(" (not persisted: {err})"))
 }
 
 /// Fetch and list available models from the configured API endpoint.

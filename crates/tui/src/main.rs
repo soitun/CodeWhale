@@ -5595,6 +5595,7 @@ fn fork_session(session_id: Option<String>, last: bool, workspace: &Path) -> Res
         saved.metadata.total_tokens,
         system_prompt.as_ref(),
     );
+    forked.metadata.model_provider = saved.metadata.model_provider.clone();
     forked.metadata.copy_cost_from(&saved.metadata);
     forked.metadata.mark_forked_from(&saved.metadata);
     manager.save_session(&forked)?;
@@ -7404,7 +7405,7 @@ fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
 
 fn config_for_cli_route(config: &Config, route: &CliAutoRoute) -> Config {
     let mut execution_config = config.clone();
-    execution_config.provider = Some(route.provider.as_str().to_string());
+    execution_config.provider = Some(config.provider_identity_for(route.provider));
     execution_config
         .provider_config_for_mut(route.provider)
         .model = Some(route.model.clone());
@@ -8327,6 +8328,7 @@ fn exec_stream_resume_hint(session_id: &str) -> String {
 fn persist_exec_session(
     messages: &[Message],
     model: &str,
+    model_provider: &str,
     workspace: &Path,
     system_prompt: &Option<SystemPrompt>,
     session_id: Option<&str>,
@@ -8334,7 +8336,7 @@ fn persist_exec_session(
 ) -> Result<String> {
     let manager =
         SessionManager::default_location().context("could not open session manager for save")?;
-    let saved = if let Some(id) = session_id.filter(|id| !id.trim().is_empty()) {
+    let mut saved = if let Some(id) = session_id.filter(|id| !id.trim().is_empty()) {
         match manager.load_session(id) {
             Ok(existing) => session_manager::update_session(
                 existing,
@@ -8365,6 +8367,7 @@ fn persist_exec_session(
             Some("exec"),
         )
     };
+    saved.metadata.model_provider = model_provider.to_string();
     let id = saved.metadata.id.clone();
     manager
         .save_session(&saved)
@@ -8404,7 +8407,7 @@ async fn run_exec_agent(
     let auto_model = route.auto_model;
     let effective_provider = route.provider;
     let effective_model = route.model;
-    let effective_provider_name = effective_provider.as_str().to_string();
+    let effective_provider_name = execution_config.provider_identity_for(effective_provider);
     let route_source = if auto_model {
         "auto_resolver"
     } else {
@@ -8968,6 +8971,7 @@ async fn run_exec_agent(
                     match persist_exec_session(
                         &latest_messages,
                         &latest_model,
+                        &effective_provider_name,
                         &latest_workspace,
                         &latest_system_prompt,
                         latest_session_id.as_deref(),

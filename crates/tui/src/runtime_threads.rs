@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::compaction::CompactionConfig;
-use crate::config::{ApiProvider, Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS};
+use crate::config::{ApiProvider, Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, ProviderIdentity};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
@@ -200,6 +200,11 @@ pub struct ThreadRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub model: String,
+    /// Exact non-secret provider key for this thread's model route. Built-ins
+    /// use canonical slugs; named custom routes retain `[providers.<name>]`.
+    /// Legacy runtime records omit this and continue using the live default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
     pub workspace: PathBuf,
     pub mode: String,
     pub allow_shell: bool,
@@ -719,6 +724,8 @@ pub enum ThreadListFilter {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CreateThreadRequest {
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_provider: Option<String>,
     pub workspace: Option<PathBuf>,
     pub mode: Option<String>,
     pub allow_shell: Option<bool>,
@@ -831,6 +838,7 @@ pub struct UsageAggregation {
 #[derive(Debug, Clone)]
 struct RuntimeThreadRoute {
     provider: ApiProvider,
+    provider_identity: String,
     model: String,
     config: Config,
     limits: Option<codewhale_config::route::RouteLimits>,
@@ -845,6 +853,7 @@ fn resolve_runtime_thread_route(
         .map_err(|reason| anyhow!("Failed to resolve runtime thread route: {reason}"))?;
     Ok(RuntimeThreadRoute {
         provider,
+        provider_identity: route.config.provider_identity_for(provider),
         model: route.model,
         config: route.config,
         limits: known_route_limits(route.candidate.limits),
@@ -983,10 +992,13 @@ impl RuntimeThreadManager {
         config: &Config,
         thread: &ThreadRecord,
     ) -> Result<RuntimeThreadRoute> {
+        let provider_identity = self.provider_identity_for_thread(config, thread)?;
+        let mut thread_config = config.clone();
+        thread_config.provider = Some(provider_identity.key.clone());
         if !thread.model.trim().eq_ignore_ascii_case("auto") {
             return resolve_runtime_thread_route(
-                config,
-                config.api_provider(),
+                &thread_config,
+                provider_identity.provider,
                 Some(&thread.model),
             );
         }
@@ -1006,8 +1018,24 @@ impl RuntimeThreadManager {
             });
         match restored {
             Some((provider, model)) => resolve_runtime_thread_route(config, provider, Some(&model)),
-            None => resolve_runtime_thread_route(config, config.api_provider(), None),
+            None => resolve_runtime_thread_route(&thread_config, provider_identity.provider, None),
         }
+    }
+
+    fn provider_identity_for_thread(
+        &self,
+        config: &Config,
+        thread: &ThreadRecord,
+    ) -> Result<ProviderIdentity> {
+        let key = thread.model_provider.as_deref().unwrap_or_else(|| {
+            config
+                .provider
+                .as_deref()
+                .unwrap_or(ApiProvider::Deepseek.as_str())
+        });
+        config
+            .resolve_provider_identity(key)
+            .map_err(|reason| anyhow!(reason))
     }
 
     /// Reload config from an updated Config instance (called after /v1/config/reload).
@@ -1332,6 +1360,19 @@ impl RuntimeThreadManager {
 
     pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadRecord> {
         let now = Utc::now();
+        let model_provider = {
+            let config = self.read_config();
+            let requested = req.model_provider.as_deref().unwrap_or_else(|| {
+                config
+                    .provider
+                    .as_deref()
+                    .unwrap_or(ApiProvider::Deepseek.as_str())
+            });
+            config
+                .resolve_provider_identity(requested)
+                .map_err(|reason| anyhow!(reason))?
+                .key
+        };
         let model = req
             .model
             .filter(|m| !m.trim().is_empty())
@@ -1354,6 +1395,7 @@ impl RuntimeThreadManager {
             created_at: now,
             updated_at: now,
             model,
+            model_provider: Some(model_provider),
             workspace,
             mode,
             allow_shell,
@@ -2231,35 +2273,42 @@ impl RuntimeThreadManager {
         let requested_model = req.model.as_deref().unwrap_or(&thread.model).to_string();
         let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
         let cfg_snapshot = self.config.read().clone();
-        let (provider, selected_model, reasoning_effort, verbosity) = {
-            let verbosity = cfg_snapshot.verbosity.clone();
-            if auto_model {
-                let selection = crate::model_routing::resolve_auto_route_with_inventory(
-                    &cfg_snapshot,
-                    &prompt,
-                    "",
-                    "auto",
-                    "auto",
-                )
-                .await?;
-                (
-                    selection.provider,
-                    selection.model,
-                    selection
-                        .reasoning_effort
-                        .map(|effort| effort.as_setting().to_string()),
-                    verbosity,
-                )
-            } else {
-                (
-                    cfg_snapshot.api_provider(),
-                    requested_model,
-                    None,
-                    verbosity,
-                )
-            }
+        let verbosity = cfg_snapshot.verbosity.clone();
+        let (route, reasoning_effort) = if auto_model {
+            let selection = crate::model_routing::resolve_auto_route_with_inventory(
+                &cfg_snapshot,
+                &prompt,
+                "",
+                "auto",
+                "auto",
+            )
+            .await?;
+            let route = resolve_runtime_thread_route(
+                &cfg_snapshot,
+                selection.provider,
+                Some(&selection.model),
+            )?;
+            (
+                route,
+                selection
+                    .reasoning_effort
+                    .map(|effort| effort.as_setting().to_string()),
+            )
+        } else {
+            let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
+            let mut thread_config = cfg_snapshot.clone();
+            thread_config.provider = Some(identity.key);
+            (
+                resolve_runtime_thread_route(
+                    &thread_config,
+                    identity.provider,
+                    Some(&requested_model),
+                )?,
+                None,
+            )
         };
-        let route = resolve_runtime_thread_route(&cfg_snapshot, provider, Some(&selected_model))?;
+        let provider = route.provider;
+        let provider_identity = route.provider_identity.clone();
         let model = route.model;
         let route_limits = route.limits;
         let settings = crate::settings::Settings::load().unwrap_or_default();
@@ -2288,7 +2337,7 @@ impl RuntimeThreadManager {
             ended_at: None,
             duration_ms: None,
             usage: None,
-            effective_provider: Some(provider.as_str().to_string()),
+            effective_provider: Some(provider_identity),
             effective_billing_surface: None,
             effective_model: Some(model.clone()),
             error: None,

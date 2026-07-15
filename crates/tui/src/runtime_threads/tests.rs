@@ -50,6 +50,7 @@ fn sample_thread(thread_id: &str) -> ThreadRecord {
         created_at: now,
         updated_at: now,
         model: DEFAULT_TEXT_MODEL.to_string(),
+        model_provider: None,
         workspace: PathBuf::from("."),
         mode: AppMode::Agent.as_setting().to_string(),
         allow_shell: false,
@@ -123,6 +124,68 @@ fn legacy_turn_record_has_no_invented_route_provenance() {
     assert_eq!(restored.effective_provider, None);
     assert_eq!(restored.effective_billing_surface, None);
     assert_eq!(restored.effective_model, None);
+}
+
+#[tokio::test]
+async fn named_custom_thread_identity_round_trips_and_fails_closed_when_removed() -> Result<()> {
+    let mut custom = std::collections::HashMap::new();
+    custom.insert(
+        "lm-studio".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+            model: Some("local-default".to_string()),
+            ..crate::config::ProviderConfig::default()
+        },
+    );
+    let config = Config {
+        provider: Some("lm-studio".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: Some("local-code-model".to_string()),
+            model_provider: Some("lm-studio".to_string()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    let persisted = manager.get_thread(&thread.id).await?;
+    assert_eq!(persisted.model_provider.as_deref(), Some("lm-studio"));
+    let serialized = serde_json::to_string(&persisted)?;
+    assert!(serialized.contains("\"model_provider\":\"lm-studio\""));
+    assert!(!serialized.contains("127.0.0.1:1234"));
+
+    let route = manager.resolved_route_for_thread(&config, &persisted)?;
+    assert_eq!(route.provider, ApiProvider::Custom);
+    assert_eq!(route.provider_identity, "lm-studio");
+    assert_eq!(route.model, "local-code-model");
+    assert_eq!(route.config.deepseek_base_url(), "http://127.0.0.1:1234/v1");
+
+    let err = manager
+        .resolved_route_for_thread(&Config::default(), &persisted)
+        .expect_err("removed provider must fail closed");
+    let message = err.to_string();
+    assert!(message.contains("[providers.lm-studio]"), "{message}");
+    assert!(message.contains("will not fall back"), "{message}");
+
+    let mut legacy_value = serde_json::to_value(&persisted)?;
+    legacy_value
+        .as_object_mut()
+        .expect("thread object")
+        .remove("model_provider");
+    let legacy: ThreadRecord = serde_json::from_value(legacy_value)?;
+    assert_eq!(legacy.model_provider, None);
+    Ok(())
 }
 
 #[test]
@@ -2678,6 +2741,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         created_at,
         updated_at: created_at,
         model: DEFAULT_TEXT_MODEL.to_string(),
+        model_provider: None,
         workspace: PathBuf::from("."),
         mode: "agent".to_string(),
         allow_shell: false,

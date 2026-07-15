@@ -52,8 +52,8 @@ use crate::client::{
 use crate::commands;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
-    ApiProvider, Config, ProviderConfig, ProvidersConfig, StatusItem, UpdateConfig,
-    save_provider_auth_mode_for_at,
+    ApiProvider, Config, ProviderConfig, ProviderIdentity, ProvidersConfig, StatusItem,
+    UpdateConfig, save_provider_auth_mode_for_at,
 };
 use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
@@ -6450,7 +6450,7 @@ fn build_session_snapshot(
             .clone_from(&cached.parent_session_id);
         session.metadata.forked_from_message_count = cached.forked_from_message_count;
     }
-    session.metadata.model_provider = app.api_provider.as_str().to_string();
+    session.metadata.model_provider = app.provider_identity_for_persistence().to_string();
     app.sync_cost_to_metadata(&mut session.metadata);
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
@@ -6947,11 +6947,16 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
     } = pending;
 
     *config = previous_config;
-    app.api_provider = previous_provider;
+    app.set_provider_identity(
+        previous_provider,
+        config.provider_identity_for(previous_provider),
+    );
     app.billing_presentation = crate::route_billing::for_route(config, previous_provider);
     app.set_model_selection(previous_model.clone());
-    app.provider_models
-        .insert(previous_provider.as_str().to_string(), previous_model);
+    app.provider_models.insert(
+        app.provider_identity_for_persistence().to_string(),
+        previous_model,
+    );
     app.model_ids_passthrough = previous_model_ids_passthrough;
     app.active_context_window_override = previous_context_window_override;
     app.active_route_limits = previous_route_limits;
@@ -6967,12 +6972,12 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
         crate::config_persistence::persist_root_string_key(
             app.config_path.as_deref(),
             "provider",
-            previous_provider.as_str(),
+            app.provider_identity_for_persistence(),
         )?;
         let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.default_provider = Some(previous_provider.as_str().to_string());
+        settings.default_provider = Some(app.provider_identity_for_persistence().to_string());
         settings.set_model_for_provider(
-            previous_provider.as_str(),
+            app.provider_identity_for_persistence(),
             &app.model_selection_for_persistence(),
         );
         if matches!(
@@ -8098,7 +8103,7 @@ async fn apply_model_picker_choice(
     if model_changed {
         app.set_model_selection(resolved_model.clone());
         app.provider_models.insert(
-            app.api_provider.as_str().to_string(),
+            app.provider_identity_for_persistence().to_string(),
             resolved_model.clone(),
         );
         app.clear_model_scoped_telemetry();
@@ -8124,7 +8129,8 @@ async fn apply_model_picker_choice(
             ) {
                 settings.set("default_model", &resolved_model)?;
             }
-            settings.set_model_for_provider(app.api_provider.as_str(), &resolved_model);
+            settings
+                .set_model_for_provider(app.provider_identity_for_persistence(), &resolved_model);
         }
         if effort_changed {
             settings.set(
@@ -8244,9 +8250,12 @@ async fn switch_provider(
     model_override: Option<String>,
 ) {
     let previous_provider = app.api_provider;
+    let previous_identity = app.provider_identity_for_persistence().to_string();
+    let target_identity = config.provider_identity_for(target);
     let previous_model = app.model.clone();
     let previous_model_ids_passthrough = app.model_ids_passthrough;
-    let previous_config = config.clone();
+    let mut previous_config = config.clone();
+    previous_config.provider = Some(previous_identity.clone());
     app.pending_provider_switch = Some(PendingProviderSwitch {
         previous_provider,
         previous_model: previous_model.clone(),
@@ -8280,6 +8289,7 @@ async fn switch_provider(
                     )
                     .map(|picker| picker.with_provider_health(&app.provider_health))
                 {
+                    *config = previous_config;
                     app.view_stack.push(picker);
                     app.status_message = Some(format!(
                         "{} needs a key or local runtime — enter one to switch.",
@@ -8289,11 +8299,11 @@ async fn switch_provider(
                     return;
                 }
             }
+            *config = previous_config;
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
-                    target.as_str(),
-                    previous_provider.as_str()
+                    target_identity, previous_identity
                 ),
             });
             app.status_message = Some(format!(
@@ -8309,11 +8319,11 @@ async fn switch_provider(
 
     if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
         app.pending_provider_switch = None;
+        *config = previous_config;
         app.add_message(HistoryCell::System {
             content: format!(
                 "Failed to switch provider to {}: {err}\nProvider unchanged ({}).",
-                target.as_str(),
-                previous_provider.as_str()
+                target_identity, previous_identity
             ),
         });
         return;
@@ -8322,8 +8332,10 @@ async fn switch_provider(
 
     let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);
-    let cache_scope_changed = previous_provider != target || previous_model != new_model;
-    app.api_provider = target;
+    let cache_scope_changed = previous_provider != target
+        || previous_identity != target_identity
+        || previous_model != new_model;
+    app.set_provider_identity(target, target_identity.clone());
     app.billing_presentation = crate::route_billing::for_route(config, target);
     app.max_subagents = config
         .max_subagents_for_provider(target)
@@ -8340,7 +8352,7 @@ async fn switch_provider(
     app.set_active_route_limits(resolved_route.candidate.limits);
     if model_override.is_some() {
         app.provider_models
-            .insert(target.as_str().to_string(), new_model.clone());
+            .insert(target_identity.clone(), new_model.clone());
     }
     app.update_model_compaction_budget();
     if cache_scope_changed {
@@ -8375,7 +8387,7 @@ async fn switch_provider(
         .await;
 
     let persist_warning = (|| -> anyhow::Result<()> {
-        let provider_key = provider_persistence_key(config, target);
+        let provider_key = config.provider_identity_for(target);
         crate::config_persistence::persist_root_string_key(
             app.config_path.as_deref(),
             "provider",
@@ -8383,9 +8395,9 @@ async fn switch_provider(
         )?;
 
         let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.default_provider = Some(provider_key);
+        settings.default_provider = Some(provider_key.clone());
         if model_override.is_some() {
-            settings.set_model_for_provider(target.as_str(), &new_model);
+            settings.set_model_for_provider(&provider_key, &new_model);
             if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
                 settings.set("default_model", &new_model)?;
             }
@@ -8398,8 +8410,7 @@ async fn switch_provider(
 
     let mut switch_summary = format!(
         "Provider switched: {} → {}",
-        previous_provider.as_str(),
-        target.as_str(),
+        previous_identity, target_identity,
     );
     switch_summary.push(char::from(10));
     switch_summary.push_str(&format!("Model: {previous_model} → {new_model}"));
@@ -8413,7 +8424,7 @@ async fn switch_provider(
         content: switch_summary,
     });
 
-    let mut status_message = format!("Provider: {} via {}", target.as_str(), new_endpoint);
+    let mut status_message = format!("Provider: {target_identity} via {new_endpoint}");
     let persisted = persist_warning.is_none();
     if persist_warning.is_some() {
         status_message.push_str(" (not fully persisted)");
@@ -8424,24 +8435,6 @@ async fn switch_provider(
     }
 }
 
-fn provider_persistence_key(config: &Config, provider: ApiProvider) -> String {
-    if provider == ApiProvider::Custom
-        && let Some(provider_id) = config
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|provider_id| !provider_id.is_empty())
-        && config
-            .providers
-            .as_ref()
-            .and_then(|providers| providers.custom_provider_config(provider_id))
-            .is_some()
-    {
-        return provider_id.to_string();
-    }
-    provider.as_str().to_string()
-}
-
 async fn apply_provider_fallback_switch(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -8450,11 +8443,12 @@ async fn apply_provider_fallback_switch(
 ) {
     let target = app.api_provider;
     let previous_model = app.model.clone();
+    let previous_identity = config.provider_identity_for(previous_provider);
 
     let resolved_route = match resolve_runtime_route(config, target, None) {
         Ok(route) => route,
         Err(reason) => {
-            app.api_provider = previous_provider;
+            app.set_provider_identity(previous_provider, previous_identity.clone());
             app.last_fallback_reason = Some(format!(
                 "Fallback provider {} route was rejected: {reason}",
                 target.as_str()
@@ -8472,7 +8466,7 @@ async fn apply_provider_fallback_switch(
     let new_model = resolved_route.model;
 
     if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
-        app.api_provider = previous_provider;
+        app.set_provider_identity(previous_provider, previous_identity);
         app.last_fallback_reason = Some(format!(
             "Fallback provider {} was unavailable: {err}",
             target.as_str()
@@ -8557,11 +8551,17 @@ fn display_base_url_host(base_url: &str) -> String {
 }
 
 fn sync_config_provider_from_app(config: &mut Config, app: &App) {
-    config.provider = Some(app.api_provider.as_str().to_string());
+    config.provider = Some(app.provider_identity_for_persistence().to_string());
 }
 
-fn provider_picker_model_override(app: &App, provider: ApiProvider) -> Option<String> {
-    (app.api_provider == provider).then(|| app.model.clone())
+fn provider_picker_model_override(
+    app: &App,
+    config: &Config,
+    provider: ApiProvider,
+) -> Option<String> {
+    (app.api_provider == provider
+        && app.provider_identity_for_persistence() == config.provider_identity_for(provider))
+    .then(|| app.model.clone())
 }
 
 async fn query_provider_runtime_status(
@@ -8732,10 +8732,21 @@ async fn apply_command_result(
                     apply_workspace_runtime_state(app, config, workspace.clone());
                     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
                 }
-                let provider_changed = config.api_provider() != app.api_provider;
+                let provider_changed = config.api_provider() != app.api_provider
+                    || config.provider_identity_for(config.api_provider())
+                        != app.provider_identity_for_persistence();
                 if provider_changed {
-                    let provider_name = app.api_provider.as_str().to_string();
-                    restore_loaded_session_provider(app, config, &provider_name);
+                    let identity = match config
+                        .resolve_provider_identity(app.provider_identity_for_persistence())
+                    {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            app.status_message =
+                                Some(format!("Failed to restore saved session provider: {err}"));
+                            return Ok(false);
+                        }
+                    };
+                    restore_loaded_session_provider(app, config, identity);
                     config.provider_config_for_mut(app.api_provider).model = Some(model.clone());
                 }
                 // Re-resolve from the live config even when the provider did
@@ -9298,7 +9309,10 @@ async fn apply_command_result(
                 match Config::load(app.config_path.clone(), Some(&profile)) {
                     Ok(new_config) => {
                         *config = new_config.clone();
-                        app.api_provider = config.api_provider();
+                        app.set_provider_identity(
+                            config.api_provider(),
+                            config.provider_identity_for(config.api_provider()),
+                        );
                         app.billing_presentation =
                             crate::route_billing::for_route(config, app.api_provider);
                         let new_model = config.default_model();
@@ -11656,7 +11670,7 @@ async fn handle_view_events(
                 if let Some(provider_id) = provider_id {
                     set_active_custom_provider_in_memory(config, &provider_id);
                 }
-                let model_override = provider_picker_model_override(app, provider);
+                let model_override = provider_picker_model_override(app, config, provider);
                 switch_provider(app, engine_handle, config, provider, model_override).await;
                 refresh_config_view_if_open(app, "provider");
             }
@@ -12770,10 +12784,25 @@ fn apply_loaded_session(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
     }
+    let provider_identity = config.resolve_provider_identity(&session.metadata.model_provider)?;
+    let mut restored_config = config.clone();
+    restored_config.provider = Some(provider_identity.key.clone());
+    let restored_route = resolve_runtime_route(
+        &restored_config,
+        provider_identity.provider,
+        Some(&session.metadata.model),
+    )
+    .map_err(|reason| {
+        format!(
+            "saved session provider '{}' could not be resolved from the live config: {reason}. CodeWhale will not fall back",
+            provider_identity.key
+        )
+    })?;
     // Restore/validate the contended state before mutating conversation or
     // workspace fields. A failed session switch must leave the current session
     // wholly intact.
     app.restore_work_state(session.work_state.as_ref())?;
+    *config = restored_route.config;
     let (messages, recovered_draft) = recover_interrupted_user_tail(&session.messages);
     app.api_messages = messages;
     app.clear_history();
@@ -12817,11 +12846,11 @@ fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
-    restore_loaded_session_provider(app, config, &session.metadata.model_provider);
+    restore_loaded_session_provider(app, config, provider_identity);
     app.set_model_selection(session.metadata.model.clone());
     resolve_loaded_session_route(app, config);
     app.provider_models.insert(
-        app.api_provider.as_str().to_string(),
+        app.provider_identity_for_persistence().to_string(),
         app.model_selection_for_persistence(),
     );
     app.update_model_compaction_budget();
@@ -12887,13 +12916,10 @@ fn apply_loaded_session(
     Ok(recovered)
 }
 
-fn restore_loaded_session_provider(app: &mut App, config: &mut Config, model_provider: &str) {
-    let Some(provider) = ApiProvider::parse(model_provider) else {
-        return;
-    };
-
-    app.api_provider = provider;
-    config.provider = Some(provider.as_str().to_string());
+fn restore_loaded_session_provider(app: &mut App, config: &mut Config, identity: ProviderIdentity) {
+    let provider = identity.provider;
+    config.provider = Some(identity.key.clone());
+    app.set_provider_identity(provider, identity.key);
     app.billing_presentation = crate::route_billing::for_route(config, provider);
     app.max_subagents = config
         .max_subagents_for_provider(provider)

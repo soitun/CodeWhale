@@ -222,7 +222,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                 Some(app.model.clone())
             }
         }
-        "provider" => Some(app.api_provider.as_str().to_string()),
+        "provider" => Some(app.provider_identity_for_persistence().to_string()),
         "approval_mode" | "approval" => Some(app.approval_mode.permission_chip_label().to_string()),
         "allow_shell" | "shell" | "exec_shell" => Some(app.allow_shell.to_string()),
         "base_url" => {
@@ -239,7 +239,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             let config = match Config::load(app.config_path.clone(), app.config_profile.as_deref())
             {
                 Ok(mut config) => {
-                    config.provider = Some(app.api_provider.as_str().to_string());
+                    config.provider = Some(app.provider_identity_for_persistence().to_string());
                     config
                 }
                 Err(err) => {
@@ -724,7 +724,7 @@ fn config_editability_audit(app: &App) -> CommandResult {
         .unwrap_or_else(|_| "(unresolved)".to_string());
 
     let mut provider_config = config.clone();
-    provider_config.provider = Some(app.api_provider.as_str().to_string());
+    provider_config.provider = Some(app.provider_identity_for_persistence().to_string());
     let model = if app.auto_model {
         "auto".to_string()
     } else {
@@ -747,7 +747,7 @@ fn config_editability_audit(app: &App) -> CommandResult {
     let rows = [
         (
             "provider",
-            app.api_provider.as_str().to_string(),
+            app.provider_identity_for_persistence().to_string(),
             "session",
             "/config provider <name>",
             "Switches the active provider now; edit provider in config.toml for startup default.",

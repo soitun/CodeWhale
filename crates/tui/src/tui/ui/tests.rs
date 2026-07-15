@@ -27,7 +27,7 @@ use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::text::Span;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1996,7 +1996,7 @@ fn create_test_app() -> App {
     // saved settings (provider/model maps, auto-model, route limits), so on
     // a machine with customized settings the context-window tests computed
     // against a different model than the requested deepseek-v4-pro.
-    app.api_provider = crate::config::ApiProvider::Deepseek;
+    app.set_provider_identity(crate::config::ApiProvider::Deepseek, "deepseek");
     app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
     app.model = "deepseek-v4-pro".to_string();
     app.auto_model = false;
@@ -2841,6 +2841,27 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
     }
 }
 
+fn named_custom_session_config(name: &str, base_url: &str, model: &str) -> Config {
+    let mut custom = HashMap::new();
+    custom.insert(
+        name.to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some(base_url.to_string()),
+            model: Some(model.to_string()),
+            ..ProviderConfig::default()
+        },
+    );
+    Config {
+        provider: Some(name.to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    }
+}
+
 #[test]
 fn apply_loaded_session_restores_dangling_user_tail_as_retry_draft() {
     let mut app = create_test_app();
@@ -3532,15 +3553,19 @@ fn saved_default_provider_syncs_back_to_runtime_config() {
 #[test]
 fn provider_picker_reselecting_active_provider_preserves_current_model() {
     let mut app = create_test_app();
-    app.api_provider = ApiProvider::Ollama;
+    app.set_provider_identity(ApiProvider::Ollama, "ollama");
     app.model = "deepseek-coder-v2:16b".to_string();
+    let config = Config {
+        provider: Some("ollama".to_string()),
+        ..Config::default()
+    };
 
     assert_eq!(
-        provider_picker_model_override(&app, ApiProvider::Ollama).as_deref(),
+        provider_picker_model_override(&app, &config, ApiProvider::Ollama).as_deref(),
         Some("deepseek-coder-v2:16b")
     );
     assert_eq!(
-        provider_picker_model_override(&app, ApiProvider::Deepseek),
+        provider_picker_model_override(&app, &config, ApiProvider::Deepseek),
         None
     );
 }
@@ -9928,6 +9953,31 @@ fn existing_session_snapshot_updates_model_selection() {
 }
 
 #[test]
+fn automatic_session_snapshot_keeps_named_custom_identity_secret_free() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-code-model");
+    config
+        .providers
+        .as_mut()
+        .and_then(|providers| providers.custom.get_mut("lm-studio"))
+        .expect("custom provider")
+        .api_key = Some("super-secret-local-key".to_string());
+    let mut app = App::new(create_test_options(), &config);
+    app.api_messages.push(text_message("user", "persist me"));
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    let serialized = serde_json::to_string(&snapshot).expect("serialize session");
+
+    assert_eq!(snapshot.metadata.model_provider, "lm-studio");
+    assert!(serialized.contains("lm-studio"));
+    assert!(!serialized.contains("super-secret-local-key"));
+    assert!(!serialized.contains("127.0.0.1:1234"));
+}
+
+#[test]
 fn session_snapshot_and_resume_round_trip_work_state() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manager =
@@ -10161,6 +10211,71 @@ fn contended_work_restore_leaves_current_session_wholly_unchanged() {
     assert!(err.contains("session was not restored"), "{err}");
     assert_eq!(app.api_messages.len(), 1);
     assert_eq!(app.current_session_id.as_deref(), Some("current-session"));
+}
+
+#[test]
+fn missing_named_custom_provider_resume_leaves_current_session_wholly_unchanged() {
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "keep the current conversation"));
+    app.current_session_id = Some("current-session".to_string());
+    app.workspace = PathBuf::from("/tmp/current-workspace");
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+    let mut config = Config {
+        provider: Some("deepseek".to_string()),
+        ..Config::default()
+    };
+    let mut session = saved_session_with_messages(vec![text_message("user", "replacement")]);
+    session.metadata.model_provider = "lm-studio".to_string();
+    session.metadata.model = "local-code-model".to_string();
+    session.metadata.workspace = PathBuf::from("/tmp/other-workspace");
+
+    let err = apply_loaded_session(&mut app, &mut config, &session)
+        .expect_err("removed custom provider must fail closed");
+
+    assert!(err.contains("[providers.lm-studio]"), "{err}");
+    assert!(err.contains("will not fall back"), "{err}");
+    assert_eq!(app.current_session_id.as_deref(), Some("current-session"));
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.workspace, PathBuf::from("/tmp/current-workspace"));
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(app.provider_identity_for_persistence(), "deepseek");
+    assert_eq!(app.model_selection_for_persistence(), "deepseek-v4-pro");
+    assert_eq!(config.provider.as_deref(), Some("deepseek"));
+}
+
+#[test]
+fn named_custom_provider_resume_uses_exact_live_endpoint_model_and_workspace() {
+    let resumed_workspace = tempfile::tempdir().expect("resume workspace");
+    let mut config = named_custom_session_config(
+        "lm-studio",
+        "http://127.0.0.1:1234/v1",
+        "configured-default",
+    );
+    let mut app = create_test_app();
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "resume local work"),
+        text_message("assistant", "ready"),
+    ]);
+    session.metadata.model_provider = "lm-studio".to_string();
+    session.metadata.model = "local-code-model".to_string();
+    session.metadata.workspace = resumed_workspace.path().to_path_buf();
+
+    apply_loaded_session(&mut app, &mut config, &session).expect("restore exact custom route");
+
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "lm-studio");
+    assert_eq!(app.model_selection_for_persistence(), "local-code-model");
+    assert_eq!(app.workspace, resumed_workspace.path());
+    assert_eq!(config.provider.as_deref(), Some("lm-studio"));
+    let route = resolve_runtime_route(&config, app.api_provider, Some(&app.model))
+        .expect("runtime route remains exact");
+    assert_eq!(
+        route.candidate.endpoint.base_url,
+        "http://127.0.0.1:1234/v1"
+    );
+    assert_eq!(route.model, "local-code-model");
 }
 
 #[test]

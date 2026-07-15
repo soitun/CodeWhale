@@ -84,6 +84,17 @@ pub enum ApiProvider {
     Custom,
 }
 
+/// Exact, non-secret provider identity resolved from live configuration.
+///
+/// Built-ins use their canonical slug (for example `openrouter`). Dynamic
+/// custom providers keep the user-owned `[providers.<name>]` key so session
+/// persistence never collapses `lm-studio` into the generic `custom` kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderIdentity {
+    pub(crate) provider: ApiProvider,
+    pub(crate) key: String,
+}
+
 impl ApiProvider {
     #[must_use]
     pub fn names_hint() -> String {
@@ -3531,6 +3542,105 @@ impl Config {
                     .map(|_| ApiProvider::DeepseekCN)
             })
             .unwrap_or(ApiProvider::Deepseek)
+    }
+
+    /// Return the exact non-secret key for an active provider route.
+    #[must_use]
+    pub(crate) fn provider_identity_for(&self, provider: ApiProvider) -> String {
+        if provider == ApiProvider::Custom
+            && let Some(name) = self
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            && ApiProvider::parse(name).is_none()
+        {
+            return name.to_string();
+        }
+        provider.as_str().to_string()
+    }
+
+    /// Resolve a persisted provider key against the current live config.
+    ///
+    /// Named custom providers are exact and fail closed: a removed, renamed,
+    /// or malformed table can never fall through to DeepSeek or whichever
+    /// provider happens to be selected now. The literal legacy value `custom`
+    /// remains loadable only when the live config already selects one valid
+    /// named custom table; older records did not retain enough information to
+    /// do anything safer.
+    pub(crate) fn resolve_provider_identity(
+        &self,
+        persisted: &str,
+    ) -> std::result::Result<ProviderIdentity, String> {
+        let key = persisted.trim();
+        if key.is_empty() {
+            return Err(
+                "saved session has an empty provider identity; choose a valid session or repair its `metadata.model_provider` field"
+                    .to_string(),
+            );
+        }
+
+        if let Some(provider) = ApiProvider::parse(key)
+            && provider != ApiProvider::Custom
+        {
+            return Ok(ProviderIdentity {
+                provider,
+                key: provider.as_str().to_string(),
+            });
+        }
+
+        let exact_key = if key.eq_ignore_ascii_case(ApiProvider::Custom.as_str()) {
+            self.provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && ApiProvider::parse(name).is_none())
+                .ok_or_else(|| {
+                    "legacy session records only the generic `custom` provider kind. Set `provider = \"<name>\"` to the original `[providers.<name>]` table and retry; CodeWhale will not guess or fall back"
+                        .to_string()
+                })?
+        } else {
+            key
+        };
+
+        let entry = self
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom_provider_config(exact_key))
+            .ok_or_else(|| {
+                format!(
+                    "saved session requires custom provider '{exact_key}', but `[providers.{exact_key}]` is missing from the live config. Restore that exact table and retry; CodeWhale will not fall back"
+                )
+            })?;
+        if !entry.is_openai_compatible_custom() {
+            return Err(format!(
+                "saved session requires custom provider '{exact_key}', but `[providers.{exact_key}]` must set `kind = \"openai-compatible\"`. Fix the live config and retry; CodeWhale will not fall back"
+            ));
+        }
+        let base_url = entry
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|base_url| !base_url.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "saved session requires custom provider '{exact_key}', but `[providers.{exact_key}]` has no `base_url`. Fix the live config and retry; CodeWhale will not fall back"
+                )
+            })?;
+        let parsed = reqwest::Url::parse(base_url).map_err(|err| {
+            format!(
+                "saved session requires custom provider '{exact_key}', but `[providers.{exact_key}].base_url` is invalid: {err}. Fix the live config and retry; CodeWhale will not fall back"
+            )
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(format!(
+                "saved session requires custom provider '{exact_key}', but `[providers.{exact_key}].base_url` must be an http(s) URL with a host. Fix the live config and retry; CodeWhale will not fall back"
+            ));
+        }
+
+        Ok(ProviderIdentity {
+            provider: ApiProvider::Custom,
+            key: exact_key.to_string(),
+        })
     }
 
     pub(crate) fn provider_config_for(&self, provider: ApiProvider) -> Option<&ProviderConfig> {

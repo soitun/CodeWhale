@@ -7989,6 +7989,94 @@ fn custom_provider_base_url_and_model_resolve_from_named_table() {
     assert_eq!(config.default_model(), "custom-model-v1");
 }
 
+fn session_custom_provider_config(name: &str, kind: &str, base_url: &str) -> Config {
+    let mut custom = HashMap::new();
+    custom.insert(
+        name.to_string(),
+        ProviderConfig {
+            kind: Some(kind.to_string()),
+            base_url: Some(base_url.to_string()),
+            model: Some("local-model".to_string()),
+            ..Default::default()
+        },
+    );
+    Config {
+        provider: Some(name.to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Config::default()
+    }
+}
+
+#[test]
+fn session_provider_identity_preserves_exact_named_custom_key() {
+    let config = session_custom_provider_config(
+        "lm-studio",
+        "openai-compatible",
+        "http://127.0.0.1:1234/v1",
+    );
+
+    assert_eq!(
+        config.provider_identity_for(ApiProvider::Custom),
+        "lm-studio"
+    );
+    assert_eq!(
+        config
+            .resolve_provider_identity("lm-studio")
+            .expect("exact custom identity"),
+        ProviderIdentity {
+            provider: ApiProvider::Custom,
+            key: "lm-studio".to_string(),
+        }
+    );
+    assert_eq!(
+        config
+            .resolve_provider_identity("openrouter")
+            .expect("built-in identity"),
+        ProviderIdentity {
+            provider: ApiProvider::Openrouter,
+            key: "openrouter".to_string(),
+        }
+    );
+    assert_eq!(
+        config
+            .resolve_provider_identity("custom")
+            .expect("legacy generic custom identity uses active exact table")
+            .key,
+        "lm-studio"
+    );
+}
+
+#[test]
+fn session_provider_identity_fails_closed_for_removed_or_invalid_custom_table() {
+    let removed = Config::default();
+    let missing = removed
+        .resolve_provider_identity("lm-studio")
+        .expect_err("removed provider must fail closed");
+    assert!(missing.contains("[providers.lm-studio]"));
+    assert!(missing.contains("will not fall back"));
+
+    let invalid_kind = session_custom_provider_config(
+        "lm-studio",
+        "anthropic-messages",
+        "http://127.0.0.1:1234/v1",
+    );
+    let kind_error = invalid_kind
+        .resolve_provider_identity("lm-studio")
+        .expect_err("unsupported custom wire kind must fail closed");
+    assert!(kind_error.contains("kind = \"openai-compatible\""));
+
+    let invalid_url =
+        session_custom_provider_config("lm-studio", "openai-compatible", "not a provider URL");
+    let url_error = invalid_url
+        .resolve_provider_identity("lm-studio")
+        .expect_err("invalid custom URL must fail closed");
+    assert!(url_error.contains("base_url"));
+    assert!(url_error.contains("will not fall back"));
+}
+
 #[test]
 fn provider_auth_mode_save_uses_requested_path_and_preserves_comments() {
     let dir = tempfile::TempDir::new().expect("tempdir");

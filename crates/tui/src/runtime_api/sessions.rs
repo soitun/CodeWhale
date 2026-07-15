@@ -138,7 +138,8 @@ pub(super) async fn resume_session_thread(
         .runtime_threads
         .create_thread(CreateThreadRequest {
             model: Some(model),
-            workspace: Some(state.workspace.clone()),
+            model_provider: Some(session.metadata.model_provider.clone()),
+            workspace: Some(session.metadata.workspace.clone()),
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,
@@ -149,7 +150,7 @@ pub(super) async fn resume_session_thread(
             ..Default::default()
         })
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to create thread: {e}")))?;
+        .map_err(|e| ApiError::bad_request(format!("Failed to create thread: {e}")))?;
 
     let msg_count = session.messages.len();
     state
@@ -234,6 +235,18 @@ pub(super) async fn create_session_from_thread(
         None,
         Some(&detail.thread.mode),
     );
+    session.metadata.model_provider = detail
+        .thread
+        .model_provider
+        .clone()
+        .or_else(|| {
+            detail
+                .turns
+                .iter()
+                .rev()
+                .find_map(|turn| turn.effective_provider.clone())
+        })
+        .unwrap_or_else(|| "deepseek".to_string());
     session.system_prompt = detail.thread.system_prompt.clone();
 
     if let Some(title) =

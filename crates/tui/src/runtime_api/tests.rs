@@ -213,6 +213,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         created_at: now,
         updated_at: now,
         model: DEFAULT_TEXT_MODEL.to_string(),
+        model_provider: None,
         workspace: PathBuf::from("."),
         mode: "agent".to_string(),
         allow_shell: false,
@@ -2439,6 +2440,8 @@ async fn session_resume_thread_creates_thread_from_saved_session() -> Result<()>
         .json()
         .await?;
     assert_eq!(detail["thread"]["id"], thread_id);
+    assert_eq!(detail["thread"]["model_provider"], "deepseek");
+    assert_eq!(detail["thread"]["workspace"], "/tmp/test");
     assert_eq!(detail["turns"].as_array().map_or(0, Vec::len), 1);
     assert_eq!(detail["items"].as_array().map_or(0, Vec::len), 2);
 

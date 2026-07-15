@@ -779,7 +779,7 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         }
         if let Some(model) = app
             .provider_models
-            .get(app.api_provider.as_str())
+            .get(app.provider_identity_for_persistence())
             .map(|model| model.trim())
             .filter(|model| !model.is_empty())
         {
@@ -932,7 +932,7 @@ fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> 
 
     if let Some(model) = app
         .provider_models
-        .get(app.api_provider.as_str())
+        .get(app.provider_identity_for_persistence())
         .map(|model| model.trim())
         .filter(|model| !model.is_empty())
     {
