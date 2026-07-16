@@ -3866,6 +3866,18 @@ fn wire_model_for_provider_matches_active_provider_shape() {
         DEFAULT_TOGETHER_FLASH_MODEL
     );
     assert_eq!(
+        wire_model_for_provider(ApiProvider::Together, "thinkingmachines/inkling"),
+        TOGETHER_INKLING_MODEL
+    );
+    assert_eq!(
+        wire_model_for_provider(ApiProvider::Together, "inkling"),
+        TOGETHER_INKLING_MODEL
+    );
+    assert_eq!(
+        wire_model_for_provider(ApiProvider::Together, "together-inkling"),
+        TOGETHER_INKLING_MODEL
+    );
+    assert_eq!(
         wire_model_for_provider(ApiProvider::Openai, DEFAULT_OPENROUTER_MODEL),
         DEFAULT_OPENROUTER_MODEL
     );

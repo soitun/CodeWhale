@@ -688,6 +688,15 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
+            ModelInfo {
+                // Together's published hosted endpoint is lowercase even though
+                // the open-weight Hugging Face repository uses `Inkling`.
+                id: "thinkingmachines/inkling".to_string(),
+                provider: ProviderKind::Together,
+                aliases: vec!["inkling".to_string(), "together-inkling".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
             // Qwen 3.7 Max (OpenRouter)
             ModelInfo {
                 id: "qwen/qwen3.7-max".to_string(),
@@ -1752,6 +1761,25 @@ mod tests {
 
         assert_eq!(resolved.resolved.provider, ProviderKind::Novita);
         assert_eq!(resolved.resolved.id, "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
+    fn together_inkling_keeps_published_wire_identity() {
+        let registry = ModelRegistry::default();
+        for requested in ["thinkingmachines/inkling", "inkling", "together-inkling"] {
+            let resolved = registry.resolve(Some(requested), Some(ProviderKind::Together));
+
+            assert_eq!(resolved.resolved.provider, ProviderKind::Together);
+            assert_eq!(resolved.resolved.id, "thinkingmachines/inkling");
+            assert!(resolved.resolved.supports_tools);
+            assert!(resolved.resolved.supports_reasoning);
+            assert!(!resolved.used_fallback);
+        }
+
+        let unscoped = registry.resolve(Some("inkling"), None);
+        assert_eq!(unscoped.resolved.provider, ProviderKind::Together);
+        assert_eq!(unscoped.resolved.id, "thinkingmachines/inkling");
+        assert!(!unscoped.used_fallback);
     }
 
     #[test]

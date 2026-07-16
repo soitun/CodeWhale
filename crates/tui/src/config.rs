@@ -6798,6 +6798,9 @@ fn model_for_provider(provider: ApiProvider, normalized: String) -> String {
             ApiProvider::Together,
             "deepseek-v4-flash" | "deepseek-v4flash" | "deepseek-chat" | "deepseek-reasoner",
         ) => DEFAULT_TOGETHER_FLASH_MODEL.to_string(),
+        (ApiProvider::Together, "inkling" | "together-inkling" | "thinkingmachines/inkling") => {
+            TOGETHER_INKLING_MODEL.to_string()
+        }
         (
             ApiProvider::Moonshot,
             "kimi"
