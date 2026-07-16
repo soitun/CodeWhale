@@ -661,6 +661,12 @@ workflow({
                 "{expected_role} must declare the host-readable verdict contract"
             );
             assert!(
+                leaf.prompt
+                    .contains("Do not put any words before that verdict")
+                    && leaf.prompt.contains("Here is the verdict"),
+                "{expected_role} must reject verdict preambles that the host cannot parse"
+            );
+            assert!(
                 leaf.prompt.contains("`grep_files` first")
                     && leaf
                         .prompt
