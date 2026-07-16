@@ -343,13 +343,14 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         "gpt-5-codex" | "gpt-5.3-codex" => Some(128_000),
         "claude-opus-4-8" => Some(128_000),
         "claude-sonnet-4-6" | "claude-haiku-4-5" => Some(64_000),
-        "arcee-ai/trinity-large-thinking"
-        | "trinity-large-thinking"
-        | "moonshotai/kimi-k2.7-code"
+        "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" => Some(262_144),
+        // Moonshot publishes a 32K output cap beside Kimi's 256K context
+        // window; do not mirror the context window here (#4368).
+        "moonshotai/kimi-k2.7-code"
         | "moonshotai/kimi-k2.6"
         | "kimi-k2.7-code"
         | "kimi-k2.6"
-        | "kimi-for-coding" => Some(262_144),
+        | "kimi-for-coding" => Some(32_768),
         "minimax/minimax-m3" | "minimax-m3" => Some(524_288),
         "qwen/qwen3.6-35b-a3b" | "qwen/qwen3.6-27b" => Some(262_140),
         "qwen/qwen3.6-flash" | "qwen/qwen3.6-max-preview" | "qwen/qwen3.6-plus" => Some(65_536),
@@ -874,12 +875,13 @@ mod tests {
         // vision model): same compact window as 5.1 but reasoning-capable.
         assert_eq!(context_window_for_model("z-ai/glm-5-turbo"), Some(202_752));
         assert!(model_supports_reasoning("z-ai/glm-5-turbo"));
-        assert_eq!(max_output_tokens_for_model("kimi-k2.7-code"), Some(262_144));
-        assert_eq!(max_output_tokens_for_model("kimi-k2.6"), Some(262_144));
         assert_eq!(
-            max_output_tokens_for_model("kimi-for-coding"),
-            Some(262_144)
+            crate::model_catalog::resolved_max_output("kimi-k2.7-code"),
+            Some(32_768)
         );
+        assert_eq!(max_output_tokens_for_model("kimi-k2.7-code"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-k2.6"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-for-coding"), Some(32_768));
         assert_eq!(max_output_tokens_for_model("minimax-m3"), Some(524_288));
         assert_eq!(max_output_tokens_for_model("glm-5.1"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("glm-5.2"), Some(131_072));

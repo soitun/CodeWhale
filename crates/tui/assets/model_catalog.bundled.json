@@ -34,7 +34,7 @@
     "kimi-k2.7-code": {
       "id": "kimi-k2.7-code",
       "context_window": 262144,
-      "max_output": 262144,
+      "max_output": 32768,
       "supports_reasoning": true,
       "modalities": ["text"],
       "supported_parameters": ["reasoning"],
@@ -43,7 +43,7 @@
     "moonshotai/kimi-k2.7-code": {
       "id": "moonshotai/kimi-k2.7-code",
       "context_window": 262144,
-      "max_output": 262144,
+      "max_output": 32768,
       "supports_reasoning": true,
       "modalities": ["text"],
       "supported_parameters": ["reasoning"],
