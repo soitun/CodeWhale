@@ -4145,7 +4145,10 @@ mod tests {
         assert_eq!(progress_only[0].nickname.as_deref(), Some("Agent 1"));
 
         let mut manager = manager_agent("agent_live", SubAgentStatus::Running);
-        manager.nickname = Some("\u{30b7}\u{30e3}\u{30c1}".to_string());
+        manager.nickname = Some(crate::tools::subagent::whale_name_for_id_in_locale(
+            "agent_live",
+            "ja",
+        ));
         let manager_backed = subagent_view_agents(&app, &[manager]);
         assert_eq!(
             manager_backed[0].nickname.as_deref(),
