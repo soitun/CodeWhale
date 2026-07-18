@@ -199,9 +199,15 @@ the host, free of validation errors, and limited to supported component kinds.
   component cannot create an authority collision. Disabled or untrusted
   bundles are denied again at the headless MCP adapter. Authority is checked
   before connection, immediately before every lazy stdio spawn, after
-  transport construction, before each tool/resource/prompt operation, and
-  while an operation is in flight. Tool, resource, resource-template, and
-  prompt catalogues hide stale entries. Drift fails closed with instructions
+  transport construction, and before each tool/resource/prompt operation.
+  Persisted generation/enablement/trust state is also watched while an
+  operation is in flight, so disable, revoke, or another cross-process state
+  transition cancels the operation and terminates a plugin stdio child. Full
+  source and staged-tree hashes are revalidated at dispatch/catalogue
+  boundaries; v0.9.1 does not continuously re-hash those trees during an
+  already-running MCP call. Source or stage drift therefore fails the next
+  boundary and drops the stale connection/catalogue entry, but is not claimed
+  to interrupt a call already executing. Every failure includes instructions
   to reload, review, trust, and enable the bundle again.
 - Plain launch, resume, fork, exec, and serve each construct an immutable
   workspace-scoped registry before constructing their Skill or MCP catalogue.

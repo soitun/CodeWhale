@@ -55,10 +55,13 @@ environment provenance, endpoint, auth source names, scopes, and tool filters
 without reading or printing secret values.
 
 Trust stages reviewed content but does not enable it. Enablement attaches that
-staged snapshot to the current workspace's MCP pool. Disable, revoke, source or
-stage drift, and cross-process generation changes remove catalog entries,
-cancel in-flight operations, and terminate plugin stdio children. MCP
-subscriptions are not exposed through plugin bundles in v0.9.1. See
+staged snapshot to the current workspace's MCP pool. Disable, revoke, and other
+cross-process generation changes remove catalog entries, cancel in-flight
+operations, and terminate plugin stdio children. Source or staged-tree drift is
+fully revalidated before each dispatch/catalogue boundary and fails the next
+boundary closed; v0.9.1 does not continuously hash mutable trees during an
+already-running call and therefore does not promise drift-triggered mid-call
+cancellation. MCP subscriptions are not exposed through plugin bundles. See
 [Plugin bundles](PLUGIN_BUNDLES.md) for the complete lifecycle contract.
 
 ## Bootstrap MCP Config
