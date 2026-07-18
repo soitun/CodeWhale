@@ -3482,6 +3482,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         context_references: Vec::new(),
         artifacts: Vec::new(),
         work_state: None,
+        last_auto_route: None,
     }
 }
 
@@ -4838,6 +4839,49 @@ async fn dispatch_user_message_failed_send_clears_loading_state() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-test-key");
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Zai, "zai");
+    app.set_model_selection("auto".to_string());
+    let config = Config {
+        provider: Some("zai".to_string()),
+        default_text_model: Some("auto".to_string()),
+        ..Default::default()
+    };
+    let engine = mock_engine_handle();
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("quick status".to_string(), None),
+    )
+    .await
+    .expect("Auto dispatch");
+
+    assert_eq!(
+        app.pending_turn_route
+            .as_ref()
+            .map(|(provider, model, auto)| (*provider, model.as_str(), *auto)),
+        Some((ApiProvider::Zai, crate::config::ZAI_GLM_5_TURBO_MODEL, true))
+    );
+    assert_eq!(
+        app.last_auto_route_receipt, app.pending_auto_route_receipt,
+        "the fallback inspector must never pair a newly resolved route with a stale receipt"
+    );
+    assert_eq!(
+        app.last_auto_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.tier),
+        Some(crate::model_routing::AutoRouteTier::Fast)
+    );
+}
+
+#[tokio::test]
 async fn failed_paused_dispatch_preserves_app_checkpoint_state_and_engine_gate() {
     let mut app = create_test_app();
     app.pausable = true;
@@ -6169,6 +6213,7 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
+        auto_route_receipt: None,
     });
 
     let recovered = reconcile_turn_liveness(&mut app, now, false);
@@ -6209,6 +6254,7 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
+        auto_route_receipt: None,
     });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
@@ -6273,6 +6319,7 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
+        auto_route_receipt: None,
     });
 
     let recovered = recover_engine_event_disconnect(&mut app);
@@ -8521,7 +8568,19 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     let mut app = create_test_app();
     app.suppress_stream_events_until_turn_complete = true;
     app.ocean_completion_started_at = Some(Instant::now());
-    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), false));
+    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), true));
+    app.pending_auto_route_receipt = Some(crate::model_routing::AutoRouteReceipt {
+        tier: crate::model_routing::AutoRouteTier::Fast,
+        pair: crate::model_routing::AutoRoutePair {
+            strong: "deepseek-v4-pro".to_string(),
+            fast: Some("deepseek-v4-flash".to_string()),
+        },
+        scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+        data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+            crate::model_routing::AutoRouteHeuristicReason::ShortRequest,
+        ),
+    });
     let created_at = chrono::Utc::now();
     let event = EngineEvent::TurnStarted {
         turn_id: "turn_cancel_race".to_string(),
@@ -8543,7 +8602,15 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     assert_eq!(route.provider, ApiProvider::Openai);
     assert_eq!(route.model, "gpt-5.5");
     assert!(route.auto_model);
+    assert_eq!(
+        active_turn
+            .auto_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.tier),
+        Some(crate::model_routing::AutoRouteTier::Fast)
+    );
     assert!(app.pending_turn_route.is_none());
+    assert!(app.pending_auto_route_receipt.is_none());
     assert!(app.ocean_completion_started_at.is_none());
 
     let observer = turn_end_observer_metadata(Some(active_turn));
@@ -12098,9 +12165,67 @@ fn apply_loaded_session_restores_auto_model_mode() {
     assert_eq!(app.model, "auto");
     assert_eq!(app.model_selection_for_persistence(), "auto");
     assert_eq!(app.last_effective_model, None);
+    assert_eq!(app.last_effective_provider, None);
+    assert_eq!(app.last_effective_provider_identity, None);
+    assert_eq!(app.last_auto_route_receipt, None);
     assert_eq!(app.last_effective_reasoning_effort, None);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
     assert_eq!(app.effective_model_for_budget(), DEFAULT_TEXT_MODEL);
+}
+
+#[test]
+fn auto_route_receipt_survives_session_snapshot_and_restore() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let receipt = crate::model_routing::AutoRouteReceipt {
+        tier: crate::model_routing::AutoRouteTier::Strong,
+        pair: crate::model_routing::AutoRoutePair {
+            strong: crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+            fast: Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string()),
+        },
+        scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+        data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+            crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
+        ),
+    };
+    let mut app = create_test_app();
+    app.set_model_selection("auto".to_string());
+    app.last_effective_provider = Some(ApiProvider::Zai);
+    app.last_effective_provider_identity = Some("zai".to_string());
+    app.last_effective_model = Some(crate::config::ZAI_GLM_5_2_MODEL.to_string());
+    app.last_auto_route_receipt = Some(receipt.clone());
+    app.api_messages
+        .push(text_message("user", "inspect this route"));
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    let serialized = serde_json::to_string(&snapshot).expect("serialize session");
+    let persisted: SavedSession = serde_json::from_str(&serialized).expect("deserialize session");
+    let saved = persisted
+        .last_auto_route
+        .as_ref()
+        .expect("persisted Auto route");
+    assert_eq!(saved.provider, ApiProvider::Zai);
+    assert_eq!(saved.provider_identity, "zai");
+    assert_eq!(saved.model, crate::config::ZAI_GLM_5_2_MODEL);
+    assert_eq!(saved.receipt, receipt);
+
+    let mut restored_app = create_test_app();
+    apply_loaded_session(&mut restored_app, &mut Config::default(), &persisted)
+        .expect("restore session");
+
+    assert!(restored_app.auto_model);
+    assert_eq!(restored_app.last_effective_provider, Some(ApiProvider::Zai));
+    assert_eq!(
+        restored_app.last_effective_provider_identity.as_deref(),
+        Some("zai")
+    );
+    assert_eq!(
+        restored_app.last_effective_model.as_deref(),
+        Some(crate::config::ZAI_GLM_5_2_MODEL)
+    );
+    assert_eq!(restored_app.last_auto_route_receipt, Some(receipt));
 }
 
 #[test]

@@ -1562,22 +1562,44 @@ fn turn_route_lines(app: &App) -> Vec<String> {
             route.provider.display_name().to_string()
         };
         (provider, route.model.clone())
-    } else if let Some((provider, model, _auto_model)) = app.pending_turn_route.as_ref() {
-        let provider = if *provider == crate::config::ApiProvider::Custom {
-            app.provider_identity_for_persistence().to_string()
-        } else {
-            provider.display_name().to_string()
-        };
-        (provider, model.clone())
     } else {
-        let provider = if app.api_provider == crate::config::ApiProvider::Custom {
-            app.provider_identity_for_persistence().to_string()
-        } else {
-            app.api_provider.display_name().to_string()
-        };
-        (provider, app.model.clone())
+        // Pending and last Auto routes use the same billing-authoritative
+        // display contract as the header; do not fall back to `auto` after the
+        // concrete turn route has resolved.
+        app.effective_route_identity_display()
     };
     lines.push(format!("Route: {provider} · {model}"));
+
+    let auto_receipt = app
+        .active_turn
+        .as_ref()
+        .filter(|turn| turn.route.as_ref().is_some_and(|route| route.auto_model))
+        .and_then(|turn| turn.auto_route_receipt.as_ref())
+        .or_else(|| {
+            app.pending_turn_route
+                .as_ref()
+                .filter(|(_, _, auto_model)| *auto_model)
+                .and(app.pending_auto_route_receipt.as_ref())
+        })
+        .or_else(|| {
+            app.auto_model
+                .then_some(app.last_auto_route_receipt.as_ref())
+                .flatten()
+        });
+    if let Some(receipt) = auto_receipt {
+        lines.push(format!(
+            "Auto decision: {} · {}",
+            receipt.tier.label(),
+            receipt.reason.label()
+        ));
+        let pair = receipt.pair.fast.as_deref().map_or_else(
+            || format!("{} (no runnable fast sibling)", receipt.pair.strong),
+            |fast| format!("{} strong · {fast} fast", receipt.pair.strong),
+        );
+        lines.push(format!("Auto pair: {pair}"));
+        lines.push(format!("Auto scope: {}", receipt.scope.label()));
+        lines.push(format!("Auto data: {}", receipt.data_path.label()));
+    }
 
     let session = &app.session;
     match (session.last_prompt_tokens, session.last_completion_tokens) {
@@ -1749,5 +1771,37 @@ mod tests {
         );
         assert!(joined.contains("Model attempted a repair"), "{joined}");
         assert!(joined.contains("still failing"), "{joined}");
+    }
+
+    #[test]
+    fn turn_route_lines_include_truthful_auto_receipt() {
+        let mut app = test_app();
+        app.auto_model = true;
+        app.last_effective_provider = Some(crate::config::ApiProvider::Zai);
+        app.last_effective_model = Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string());
+        app.last_auto_route_receipt = Some(crate::model_routing::AutoRouteReceipt {
+            tier: crate::model_routing::AutoRouteTier::Fast,
+            pair: crate::model_routing::AutoRoutePair {
+                strong: crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+                fast: Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string()),
+            },
+            scope: crate::model_routing::AutoRouteScope::RunnableProviders,
+            data_path: crate::model_routing::AutoRouteDataPath::Classifier {
+                provider: crate::config::ApiProvider::Deepseek,
+                model: "deepseek-v4-flash".to_string(),
+            },
+            reason: crate::model_routing::AutoRouteReason::ClassifierRecommendation,
+        });
+
+        let joined = turn_route_lines(&app).join("\n");
+
+        assert!(joined.contains("Route: Zhipu AI / Z.ai · GLM-5-Turbo"));
+        assert!(joined.contains("Auto decision: fast · classifier recommendation"));
+        assert!(joined.contains("GLM-5.2 strong · GLM-5-Turbo fast"));
+        assert!(joined.contains("Auto scope: runnable providers"));
+        assert!(joined.contains(
+            "Auto data: latest request + bounded recent context -> DeepSeek / deepseek-v4-flash"
+        ));
+        assert!(!joined.contains("API_KEY"));
     }
 }

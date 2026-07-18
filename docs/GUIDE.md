@@ -301,8 +301,22 @@ Next for durable multi-worker work: [FLEET_WORKFLOW_TUTORIAL.md](FLEET_WORKFLOW_
 walks through Fleet task specs, monitoring, and Workflow authoring.
 
 Use `/model auto` when you want Codewhale to choose the model and thinking
-level per turn. Use a fixed model when you need repeatable comparisons or a
-strict cost profile.
+level per turn. When the DeepSeek routing model is available, Auto may select
+any runnable provider/model pair in the redacted inventory. That classification
+sends the latest request (capped at 4,000 characters) plus a bounded summary of
+up to six recent context rows (900 characters each) to
+`DeepSeek / deepseek-v4-flash`. Credentials, endpoints, and provider error text
+are not included in the inventory. Without that router, Auto uses a local,
+provider-aware heuristic and sends no routing request. If a classifier attempt
+fails validation or errors, Auto falls back to that heuristic while retaining
+the attempted classifier data path in the turn receipt.
+
+The `/model` picker states which data path is available and shows the last
+resolved route. `Ctrl+O` opens the Turn Inspector, whose model-route section
+records the concrete provider/model, strong/fast pair, selected tier, selection
+scope, route reason, and whether the classifier received routing context. Use a
+fixed model when you need repeatable comparisons, a strict provider boundary,
+or no classification request.
 
 Use `/compact` when a session gets long and the model starts carrying too much
 history. Compaction trades raw transcript detail for a concise working summary.

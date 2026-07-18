@@ -2818,6 +2818,21 @@ async fn run_event_loop(
                             })
                             .to_string();
                         app.last_effective_provider = Some(effective_turn_provider);
+                        app.last_effective_provider_identity = provider_identity.clone();
+                        if completed_turn
+                            .as_ref()
+                            .and_then(|turn| turn.route.as_ref())
+                            .is_some_and(|route| route.auto_model)
+                        {
+                            app.last_auto_route_receipt = completed_turn
+                                .as_ref()
+                                .and_then(|turn| turn.auto_route_receipt.clone());
+                        } else if completed_turn
+                            .as_ref()
+                            .is_some_and(|turn| turn.route.is_some())
+                        {
+                            app.last_auto_route_receipt = None;
+                        }
                         if status == crate::core::events::TurnOutcomeStatus::Completed {
                             app.provider_health.record_success(
                                 config,
@@ -2825,7 +2840,7 @@ async fn run_event_loop(
                                 &effective_turn_model,
                             );
                         }
-                        if app.auto_model {
+                        if auto_model {
                             app.last_effective_model = Some(effective_turn_model.clone());
                         }
                         app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
@@ -6632,6 +6647,7 @@ fn build_session_snapshot(
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
     session.work_state = work_state;
+    session.last_auto_route = app.auto_route_for_persistence();
     app.current_session_metadata = Some(session.metadata.clone());
     Ok(session)
 }
@@ -6682,6 +6698,7 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
         app.turn_started_at = None;
         app.turn_last_activity_at = None;
         app.pending_turn_route = None;
+        app.pending_auto_route_receipt = None;
         app.active_turn = None;
         app.suppress_stream_events_until_turn_complete = false;
         app.push_status_toast(
@@ -6706,6 +6723,7 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
         app.turn_started_at = None;
         app.turn_last_activity_at = None;
         app.pending_turn_route = None;
+        app.pending_auto_route_receipt = None;
         app.active_turn = None;
         app.suppress_stream_events_until_turn_complete = false;
         app.push_status_toast(
@@ -6842,6 +6860,7 @@ fn recover_stalled_runtime_turn(app: &mut App, message: &str, level: StatusToast
     app.runtime_turn_id = None;
     app.dispatch_started_at = None;
     app.pending_turn_route = None;
+    app.pending_auto_route_receipt = None;
     app.active_turn = None;
     app.suppress_stream_events_until_turn_complete = false;
     // Per-turn scroll lock — clear so the next turn auto-scrolls.
@@ -6922,6 +6941,7 @@ fn recover_engine_event_disconnect(app: &mut App) -> bool {
     app.runtime_turn_id = None;
     app.dispatch_started_at = None;
     app.pending_turn_route = None;
+    app.pending_auto_route_receipt = None;
     app.active_turn = None;
     app.suppress_stream_events_until_turn_complete = false;
     app.user_scrolled_during_stream = false;
@@ -6951,10 +6971,17 @@ fn capture_turn_started_metadata(app: &mut App, event: &EngineEvent) {
     } = event
     {
         app.ocean_completion_started_at = None;
+        let auto_route_receipt = if route.as_ref().is_some_and(|route| route.auto_model) {
+            app.pending_auto_route_receipt.take()
+        } else {
+            app.pending_auto_route_receipt = None;
+            None
+        };
         app.active_turn = Some(ActiveTurnMetadata {
             turn_id: turn_id.clone(),
             created_at: *created_at,
             route: route.clone(),
+            auto_route_receipt,
         });
         app.pending_turn_route = None;
     }
@@ -7966,6 +7993,12 @@ async fn dispatch_user_message(
         turn_route
     };
     let turn_route_limits = crate::route_budget::known_route_limits(turn_route.candidate.limits);
+    let effective_provider_identity = turn_route.identity.key.clone();
+    let effective_provider_label = if effective_provider == ApiProvider::Custom {
+        effective_provider_identity.clone()
+    } else {
+        effective_provider.display_name().to_string()
+    };
     let turn_compaction = app.compaction_config_for_route(
         turn_route.identity.provider,
         &turn_route.model,
@@ -8068,37 +8101,40 @@ async fn dispatch_user_message(
     app.session.last_prompt_cache_hit_tokens = None;
     app.session.last_prompt_cache_miss_tokens = None;
     app.session.last_reasoning_replay_tokens = None;
-    // Persist only after the engine accepted the turn. A failed mailbox send
-    // must not leave a checkpoint for work that never started.
-    if let Ok(manager) = SessionManager::default_location()
-        && let Ok(session) = build_session_snapshot(app, &manager)
-    {
-        persistence_actor::persist(PersistRequest::Checkpoint(session));
-    }
-
     app.last_effective_reasoning_effort = selected_reasoning_effort;
     if let Some(selection) = auto_selection.as_ref() {
         if app.auto_model {
             app.last_effective_model = Some(effective_model.clone());
             app.last_effective_provider = Some(effective_provider);
-            let mut status = format!(
-                "Auto model selected: {} / {effective_model} via {}",
-                selection.provider.display_name(),
-                selection.source.label()
-            );
-            if let Some(effort) = app.last_effective_reasoning_effort {
-                status.push_str(&format!(
-                    "; thinking auto: {}",
-                    effort.display_label_for_provider(effective_provider)
-                ));
-            }
-            app.status_message = Some(status);
+            app.last_effective_provider_identity = Some(effective_provider_identity);
+            app.last_auto_route_receipt = selection.receipt.clone();
+            let status = app
+                .tr(MessageId::AutoRouteSelectedToast)
+                .replace("{provider}", &effective_provider_label)
+                .replace("{model}", &effective_model)
+                .replace("{source}", selection.source.label());
+            app.push_status_toast(status, StatusToastLevel::Info, Some(6_000));
         }
     } else {
         app.last_effective_model = None;
         app.last_effective_provider = None;
+        app.last_effective_provider_identity = None;
+        app.last_auto_route_receipt = None;
     }
+    app.pending_auto_route_receipt = auto_selection
+        .as_ref()
+        .and_then(|selection| selection.receipt.clone());
     app.pending_turn_route = Some((effective_provider, effective_model, app.auto_model));
+
+    // Persist only after the engine accepted the turn and after its concrete
+    // route receipt is installed. A failed mailbox send must not leave a
+    // checkpoint for work that never started, while a crash after acceptance
+    // must not lose the route decision.
+    if let Ok(manager) = SessionManager::default_location()
+        && let Ok(session) = build_session_snapshot(app, &manager)
+    {
+        persistence_actor::persist(PersistRequest::Checkpoint(session));
+    }
 
     Ok(())
 }
@@ -13349,6 +13385,16 @@ fn apply_loaded_session(
     app.viewport.transcript_selection.clear();
     restore_loaded_session_provider(app, config, provider_identity);
     app.set_model_selection(session.metadata.model.clone());
+    if app.auto_model
+        && let Some(saved) = session.last_auto_route.as_ref()
+        && !saved.provider_identity.trim().is_empty()
+        && !saved.model.trim().is_empty()
+    {
+        app.last_effective_provider = Some(saved.provider);
+        app.last_effective_provider_identity = Some(saved.provider_identity.clone());
+        app.last_effective_model = Some(saved.model.clone());
+        app.last_auto_route_receipt = Some(saved.receipt.clone());
+    }
     resolve_loaded_session_route(app, config);
     app.provider_models.insert(
         app.provider_identity_for_persistence().to_string(),

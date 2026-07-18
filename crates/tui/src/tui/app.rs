@@ -62,6 +62,8 @@ pub struct ActiveTurnMetadata {
     pub turn_id: String,
     pub created_at: DateTime<Utc>,
     pub route: Option<TurnRoute>,
+    /// Auto decision metadata captured with this exact authoritative route.
+    pub auto_route_receipt: Option<crate::model_routing::AutoRouteReceipt>,
 }
 
 /// State machine for onboarding new users.
@@ -1770,9 +1772,17 @@ pub struct App {
     pub last_effective_model: Option<String>,
     /// Provider that actually served the latest auto-routed turn.
     pub last_effective_provider: Option<ApiProvider>,
+    /// Exact non-secret identity for the provider that served the latest Auto
+    /// turn. This matters for named custom providers, which all share the
+    /// `ApiProvider::Custom` enum variant.
+    pub(crate) last_effective_provider_identity: Option<String>,
+    /// Auto decision metadata for the most recently resolved Auto turn.
+    pub(crate) last_auto_route_receipt: Option<crate::model_routing::AutoRouteReceipt>,
     /// Route selected for the next turn, retained for in-flight UI details
     /// until the engine confirms the authoritative `TurnStarted` route.
     pub pending_turn_route: Option<(ApiProvider, String, bool)>,
+    /// Auto decision metadata waiting to be paired with `pending_turn_route`.
+    pub(crate) pending_auto_route_receipt: Option<crate::model_routing::AutoRouteReceipt>,
     /// Authoritative lifecycle metadata attached to the most recent
     /// `TurnStarted`. Kept separate from `pending_turn_route` so a preceding
     /// compaction completion cannot consume the next model turn's route.
@@ -2556,7 +2566,12 @@ impl App {
         self.session.last_reasoning_replay_tokens = None;
         self.session.turn_cache_history.clear();
         self.pending_turn_route = None;
+        self.pending_auto_route_receipt = None;
         self.active_turn = None;
+        self.last_effective_model = None;
+        self.last_effective_provider = None;
+        self.last_effective_provider_identity = None;
+        self.last_auto_route_receipt = None;
         self.last_pinned_prefix_hash = None;
     }
 
@@ -3046,7 +3061,10 @@ impl App {
             auto_model,
             last_effective_model: None,
             last_effective_provider: None,
+            last_effective_provider_identity: None,
+            last_auto_route_receipt: None,
             pending_turn_route: None,
+            pending_auto_route_receipt: None,
             active_turn: None,
             api_provider: provider,
             provider_identity,
@@ -6601,6 +6619,9 @@ impl App {
         self.auto_model = auto_model;
         self.last_effective_model = None;
         self.last_effective_provider = None;
+        self.last_effective_provider_identity = None;
+        self.last_auto_route_receipt = None;
+        self.pending_auto_route_receipt = None;
         self.last_effective_reasoning_effort = None;
         if auto_model {
             self.reasoning_effort = ReasoningEffort::Auto;
@@ -6617,6 +6638,42 @@ impl App {
         } else {
             self.model.clone()
         }
+    }
+
+    /// Atomic latest Auto route metadata for session snapshots. The provider,
+    /// exact identity, model, and receipt are either persisted together or
+    /// omitted together so a resumed session cannot display a mixed route.
+    #[must_use]
+    pub(crate) fn auto_route_for_persistence(
+        &self,
+    ) -> Option<crate::session_manager::SavedAutoRouteReceipt> {
+        if !self.auto_model {
+            return None;
+        }
+        let (provider, model, receipt) = (
+            self.last_effective_provider?,
+            self.last_effective_model.as_ref()?,
+            self.last_auto_route_receipt.as_ref()?,
+        );
+        if model.trim().is_empty() {
+            return None;
+        }
+        let provider_identity = self
+            .last_effective_provider_identity
+            .clone()
+            .unwrap_or_else(|| {
+                if provider == ApiProvider::Custom {
+                    self.provider_identity_for_persistence().to_string()
+                } else {
+                    provider.as_str().to_string()
+                }
+            });
+        Some(crate::session_manager::SavedAutoRouteReceipt {
+            provider,
+            provider_identity,
+            model: model.clone(),
+            receipt: receipt.clone(),
+        })
     }
 
     #[must_use]
@@ -6725,7 +6782,13 @@ impl App {
     pub fn effective_route_identity_display(&self) -> (String, String) {
         let (provider, model) = self.effective_route_display();
         let identity = if provider == ApiProvider::Custom {
-            self.provider_identity_for_persistence()
+            if self.pending_turn_route.is_none() && self.auto_model {
+                self.last_effective_provider_identity
+                    .as_deref()
+                    .unwrap_or_else(|| self.provider_identity_for_persistence())
+            } else {
+                self.provider_identity_for_persistence()
+            }
         } else {
             provider.display_name()
         };
