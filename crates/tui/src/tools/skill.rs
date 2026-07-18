@@ -10,7 +10,7 @@
 //! would blow the prompt budget the moment a user has half a dozen
 //! skills installed.
 //!
-//! Two paths exist for the model to actually read a skill:
+//! Two paths exist for the model to actually read a native skill:
 //!
 //! 1. The existing progressive-disclosure pattern: model spots a
 //!    skill in the catalogue, calls `read_file <path>` from the
@@ -20,9 +20,9 @@
 //!    directory so the model sees the companion resources without
 //!    a separate `list_dir`.
 //!
-//! Both are valid; the tool is the higher-level affordance and
-//! avoids the two-call dance for skills that ship with multiple
-//! resource files.
+//! Both are valid for native skills. Reviewed plugin skills are exposed only
+//! through this tool's content-bound in-memory snapshot; their mutable source
+//! paths and companion files are deliberately not returned.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -141,6 +141,7 @@ impl ToolSpec for LoadSkillTool {
             return Err(ToolError::execution_failed(hint));
         };
 
+        ensure_reviewed_plugin_skill_is_current(skill)?;
         let body = format_skill_body(skill);
         let (skill_path, skill_source) = match &skill.source {
             SkillSource::Native => (Some(skill.path.display().to_string()), "native".to_string()),
@@ -163,6 +164,51 @@ impl ToolSpec for LoadSkillTool {
                 .collect::<Vec<String>>(),
         })))
     }
+}
+
+fn ensure_reviewed_plugin_skill_is_current(skill: &Skill) -> Result<(), ToolError> {
+    let SkillSource::Plugin {
+        plugin_id,
+        plugin_name,
+        plugin_root,
+    } = &skill.source
+    else {
+        return Ok(());
+    };
+
+    let Some(plugin) =
+        crate::plugins::try_with_registry(|registry| registry.get(plugin_id).cloned()).flatten()
+    else {
+        return Err(ToolError::execution_failed(format!(
+            "Plugin skill `{}` is no longer backed by the reviewed `{plugin_name}` registry snapshot. Run `/plugin reload`, review and trust the bundle again, then enable it before retrying",
+            skill.name
+        )));
+    };
+    if !plugin.active() || plugin.canonical_root != *plugin_root {
+        return Err(ToolError::execution_failed(format!(
+            "Plugin skill `{}` is no longer active under its reviewed bundle identity. Run `/plugin reload`, review and trust `{plugin_name}` again, then enable it before retrying",
+            skill.name
+        )));
+    }
+
+    let current = crate::plugins::manifest::PluginManifest::validate_from_path(
+        &plugin.canonical_root.join("plugin.toml"),
+    )
+    .map_err(|_| {
+        ToolError::execution_failed(format!(
+            "Plugin skill `{}` was denied because `{plugin_name}` could not be revalidated. Run `/plugin reload`, inspect `/plugin show {plugin_name}`, then repeat the displayed trust command and enable it before retrying",
+            skill.name
+        ))
+    })?;
+    if current.content_hash != plugin.content_hash
+        || current.capability_hash != plugin.capability_hash
+    {
+        return Err(ToolError::execution_failed(format!(
+            "Plugin skill `{}` was denied because `{plugin_name}` changed after review. Run `/plugin reload`, inspect `/plugin show {plugin_name}`, then repeat the displayed trust command and enable it before retrying",
+            skill.name
+        )));
+    }
+    Ok(())
 }
 
 /// Render the skill body the model will see. Includes the description
@@ -325,6 +371,46 @@ mod tests {
         assert!(rendered.contains("reviewed in-memory plugin snapshot"));
         assert!(!rendered.contains(&skill_path.display().to_string()));
         assert!(collect_companion_files(&skill).is_empty());
+    }
+
+    #[test]
+    fn plugin_skill_load_fails_closed_when_reviewed_bundle_drifts() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let bundle = tmp.path().join(".codewhale/plugins/demo");
+        let skill_dir = bundle.join("skills/hello");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            bundle.join("plugin.toml"),
+            "schema_version = 1\n[plugin]\nname = \"demo\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: hello\ndescription: hello\n---\nreviewed body\n",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("companion.txt"), "reviewed companion").unwrap();
+
+        crate::plugins::init_registry(tmp.path());
+        crate::plugins::with_registry(|registry| {
+            registry.trust("demo").unwrap();
+            registry.enable("demo").unwrap();
+        })
+        .unwrap();
+        let registry = crate::skills::discover_in_workspace_with_mode(
+            tmp.path(),
+            SkillDiscoveryMode::CodeWhaleOnly,
+        );
+        let skill = registry.get("demo:hello").expect("active plugin skill");
+        ensure_reviewed_plugin_skill_is_current(skill).expect("stable reviewed snapshot");
+
+        fs::write(skill_dir.join("companion.txt"), "changed after review").unwrap();
+        let error = ensure_reviewed_plugin_skill_is_current(skill)
+            .expect_err("bundle drift must deny the reviewed skill snapshot");
+        assert!(error.to_string().contains("changed after review"));
     }
 
     #[test]

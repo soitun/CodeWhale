@@ -145,9 +145,12 @@ the host, free of validation errors, and limited to supported component kinds.
 
 - Skills are snapshotted during registry initialization and exposed only as
   `<plugin>:<skill>`. The model-facing catalogue and `load_skill` use that
-  reviewed in-memory snapshot rather than a mutable disk path; plugin companion
-  files are not exposed in v0.9.1. Skills disappear when the bundle is
-  inactive. `/skills inspect` remains the explicit human provenance view.
+  reviewed in-memory snapshot rather than a mutable disk path. `load_skill`
+  revalidates the complete bundle hashes immediately before releasing the
+  snapshot and fails closed on drift; plugin source paths and companion files
+  are not exposed in v0.9.1. Skills disappear when the bundle is inactive.
+  `/skills inspect` identifies the reviewed bundle without exposing its mutable
+  skill path.
 - MCP server names are exposed as `<plugin>-<server>`. Disabled or untrusted
   bundles are denied again at the headless MCP adapter. Local bundle content
   and capability hashes are also revalidated immediately before every lazy

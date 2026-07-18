@@ -88,11 +88,8 @@ fn skill_source_label(source: &SkillSource) -> String {
         SkillSource::Plugin {
             plugin_id,
             plugin_name,
-            plugin_root,
-        } => format!(
-            "plugin {plugin_name} ({plugin_id}) at {}",
-            plugin_root.display()
-        ),
+            ..
+        } => format!("reviewed plugin snapshot {plugin_name} ({plugin_id})"),
     }
 }
 
@@ -136,7 +133,9 @@ fn inspect_skills(app: &mut App) -> CommandResult {
                 let _ = writeln!(output, "  - {} — {}", skill.name, skill.description);
             }
             let _ = writeln!(output, "    source: {}", skill_source_label(&skill.source));
-            let _ = writeln!(output, "    path: {}", skill.path.display());
+            if matches!(skill.source, SkillSource::Native) {
+                let _ = writeln!(output, "    path: {}", skill.path.display());
+            }
         }
     }
 
