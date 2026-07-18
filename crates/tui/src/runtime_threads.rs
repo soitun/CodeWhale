@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[cfg(test)]
 use tokio::sync::mpsc;
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, broadcast, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -58,8 +58,139 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const MAX_ACTIVE_THREADS_DEFAULT: usize = 8;
 const MAX_PENDING_DYNAMIC_TOOL_CALLS: usize = 128;
 const SUMMARY_LIMIT: usize = 280;
+const STREAM_DELTA_BATCH_MAX_LATENCY: Duration = Duration::from_millis(32);
+const STREAM_DELTA_BATCH_MAX_BYTES: usize = 16 * 1024;
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventAppendTestFault {
+    AfterFlush,
+    AfterSync,
+}
+
+#[cfg(test)]
+static TEST_EVENT_APPEND_FAULTS: std::sync::Mutex<Vec<(String, EventAppendTestFault, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) type EventAppendTestFaultRestore = (String, Option<(EventAppendTestFault, usize)>);
+
+#[cfg(test)]
+pub(crate) fn set_test_event_append_fault(
+    thread_id: &str,
+    fault: EventAppendTestFault,
+    remaining: usize,
+) -> EventAppendTestFaultRestore {
+    assert!(remaining > 0, "event append fault count must be positive");
+    let mut pending = TEST_EVENT_APPEND_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = pending
+        .iter()
+        .position(|(target, _, _)| target == thread_id)
+        .map(|index| {
+            let (_, previous_fault, previous_remaining) = pending.remove(index);
+            (previous_fault, previous_remaining)
+        });
+    pending.push((thread_id.to_string(), fault, remaining));
+    (thread_id.to_string(), previous)
+}
+
+#[cfg(test)]
+pub(crate) fn restore_test_event_append_fault(restore: EventAppendTestFaultRestore) {
+    let (thread_id, previous) = restore;
+    let mut pending = TEST_EVENT_APPEND_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = pending
+        .iter()
+        .position(|(target, _, _)| target == &thread_id)
+    {
+        pending.remove(index);
+    }
+    if let Some((fault, remaining)) = previous {
+        pending.push((thread_id, fault, remaining));
+    }
+}
+
+#[cfg(test)]
+fn take_test_event_append_fault(thread_id: &str, expected: EventAppendTestFault) -> bool {
+    let mut pending = TEST_EVENT_APPEND_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(index) = pending
+        .iter()
+        .position(|(target, fault, _)| target == thread_id && *fault == expected)
+    else {
+        return false;
+    };
+    if pending[index].2 > 1 {
+        pending[index].2 -= 1;
+    } else {
+        pending.remove(index);
+    }
+    true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamDeltaKind {
+    Message,
+    Reasoning,
+}
+
+struct StreamDeltaBatch {
+    content: String,
+    pending_event: Option<EngineEvent>,
+    channel_closed: bool,
+}
+
+async fn coalesce_stream_delta(
+    engine: &EngineHandle,
+    kind: StreamDeltaKind,
+    mut content: String,
+) -> StreamDeltaBatch {
+    let deadline = tokio::time::Instant::now() + STREAM_DELTA_BATCH_MAX_LATENCY;
+    let mut pending_event = None;
+    let mut channel_closed = false;
+    let mut rx = engine.rx_event.write().await;
+
+    while content.len() < STREAM_DELTA_BATCH_MAX_BYTES {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let next = match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                channel_closed = true;
+                break;
+            }
+            Err(_) => break,
+        };
+        match next {
+            EngineEvent::MessageDelta { content: next, .. } if kind == StreamDeltaKind::Message => {
+                content.push_str(&next);
+            }
+            EngineEvent::ThinkingDelta { content: next, .. }
+                if kind == StreamDeltaKind::Reasoning =>
+            {
+                content.push_str(&next);
+            }
+            event => {
+                pending_event = Some(event);
+                break;
+            }
+        }
+    }
+
+    StreamDeltaBatch {
+        content,
+        pending_event,
+        channel_closed,
+    }
+}
 
 /// Sentinel delimiters wrapping the compaction summary section persisted in a
 /// thread record's `system_prompt`. The section carries the engine-rendered
@@ -391,6 +522,44 @@ impl Default for RuntimeStoreState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventAppendFailureDisposition {
+    RolledBack,
+    Indeterminate,
+}
+
+#[derive(Debug)]
+struct RuntimeEventAppendError {
+    disposition: EventAppendFailureDisposition,
+    append_error: String,
+    rollback_error: Option<String>,
+}
+
+impl RuntimeEventAppendError {
+    const fn retry_safe(&self) -> bool {
+        matches!(self.disposition, EventAppendFailureDisposition::RolledBack)
+    }
+}
+
+impl std::fmt::Display for RuntimeEventAppendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.rollback_error {
+            Some(rollback_error) => write!(
+                formatter,
+                "Runtime event append is indeterminate after append error ({}) and rollback error ({})",
+                self.append_error, rollback_error
+            ),
+            None => write!(
+                formatter,
+                "Runtime event append failed and was rolled back: {}",
+                self.append_error
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeEventAppendError {}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeThreadStore {
     threads_dir: PathBuf,
@@ -721,12 +890,52 @@ impl RuntimeThreadStore {
             .append(true)
             .open(&path)
             .with_context(|| format!("Failed to open {}", path.display()))?;
-        let line = serde_json::to_string(&record)?;
-        writeln!(file, "{line}").with_context(|| format!("Failed to append {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("Failed to flush {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to fsync {}", path.display()))?;
+        let original_len = file
+            .metadata()
+            .with_context(|| format!("Failed to inspect {}", path.display()))?
+            .len();
+        let mut line = serde_json::to_vec(&record)?;
+        line.push(b'\n');
+        let append_result = (|| -> std::io::Result<()> {
+            file.write_all(&line)?;
+            file.flush()?;
+            #[cfg(test)]
+            if take_test_event_append_fault(thread_id, EventAppendTestFault::AfterFlush) {
+                return Err(std::io::Error::other(
+                    "injected Runtime event failure after flush",
+                ));
+            }
+            file.sync_all()?;
+            #[cfg(test)]
+            if take_test_event_append_fault(thread_id, EventAppendTestFault::AfterSync) {
+                return Err(std::io::Error::other(
+                    "injected Runtime event failure after fsync",
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(append_error) = append_result {
+            // A failed flush/fsync can still leave the complete JSONL record
+            // visible (or even durable). Roll back to the exact pre-append
+            // offset and fsync that truncation before reporting a retryable
+            // error. If rollback itself fails, classify the write as
+            // indeterminate so callers never restore/retry and duplicate a
+            // possibly committed terminal receipt.
+            let rollback_result = file.set_len(original_len).and_then(|()| file.sync_all());
+            let error = match rollback_result {
+                Ok(()) => RuntimeEventAppendError {
+                    disposition: EventAppendFailureDisposition::RolledBack,
+                    append_error: append_error.to_string(),
+                    rollback_error: None,
+                },
+                Err(rollback_error) => RuntimeEventAppendError {
+                    disposition: EventAppendFailureDisposition::Indeterminate,
+                    append_error: append_error.to_string(),
+                    rollback_error: Some(rollback_error.to_string()),
+                },
+            };
+            return Err(anyhow!(error));
+        }
         // Keep the global sequence lock through the append so no later event
         // can reach disk or broadcast before this sequence number.
         drop(state);
@@ -1048,15 +1257,26 @@ struct ActiveThreads {
 
 pub type SharedRuntimeThreadManager = Arc<RuntimeThreadManager>;
 
+#[derive(Clone)]
+struct RecoveredTurnReceipt {
+    turn: TurnRecord,
+    unresolved_dynamic_tools: Vec<DynamicToolCallParams>,
+}
+
 /// Manages active engine threads, lifecycle, and event persistence.
 ///
 /// # Lock ordering invariant
 ///
-/// Runtime state uses six locks:
+/// Runtime state uses eight lock classes:
 /// - `RuntimeThreadManager::engine_load` — serializes cache-miss engine builds.
 ///   It may cross awaits and is always acquired before `active`.
 /// - `RuntimeThreadManager::event_emit` — preserves append-to-broadcast event
 ///   order and is only acquired after all record/engine guards are released.
+/// - `RuntimeThreadManager::projection_locks` — one async lock per thread,
+///   held while a streamed item checkpoint and its event are published or
+///   while a snapshot captures its cursor and reads projections.
+/// - `RuntimeThreadManager::recovery_flush` — serializes deferred receipt
+///   reconciliation before it acquires a projection lock and `event_emit`.
 /// - `RuntimeThreadStore::state` — protects the monotonic event sequence counter.
 /// - `RuntimeThreadStore::thread_mutation` — synchronizes short, synchronous
 ///   thread-record load-modify-save transactions and never crosses `.await`.
@@ -1064,8 +1284,10 @@ pub type SharedRuntimeThreadManager = Arc<RuntimeThreadManager>;
 /// - `RuntimeThreadManager::active` — protects the set of loaded engine handles.
 ///
 /// `state` is never held with `active`, either record-mutation guard, or
-/// `engine_load`. Event publication intentionally acquires `event_emit` before
-/// `state`; both guards are released before `emit_event` returns. All
+/// `engine_load`. Streaming projection publication acquires its per-thread
+/// projection lock before `event_emit`, which acquires `state`; snapshots
+/// acquire only the projection lock and then `state`. All guards are released
+/// before returning. All
 /// `emit_event` calls happen after `active`, `thread_mutation`, and
 /// `turn_mutation` have been released. When record and engine state must change
 /// atomically, acquire `active` before the applicable record-mutation guard and
@@ -1078,6 +1300,7 @@ pub struct RuntimeThreadManager {
     engine_load: Arc<Mutex<()>>,
     active: Arc<Mutex<ActiveThreads>>,
     event_emit: Arc<Mutex<()>>,
+    projection_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     event_tx: broadcast::Sender<RuntimeEventRecord>,
     manager_cfg: RuntimeThreadManagerConfig,
     cancel_token: CancellationToken,
@@ -1088,6 +1311,8 @@ pub struct RuntimeThreadManager {
     pending_user_inputs:
         Arc<parking_lot::Mutex<HashMap<(String, String), PendingUserInputRequest>>>,
     pending_dynamic_tools: Arc<parking_lot::Mutex<HashMap<String, PendingDynamicToolEntry>>>,
+    recovery_receipts: Arc<parking_lot::Mutex<HashMap<String, Vec<RecoveredTurnReceipt>>>>,
+    recovery_flush: Arc<Mutex<()>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
 }
@@ -1146,7 +1371,41 @@ struct PendingApprovalEntry {
 
 struct PendingDynamicToolEntry {
     params: DynamicToolCallParams,
+    /// Present while the call can still be claimed by result delivery,
+    /// timeout, or turn termination. The entry remains in the registry after
+    /// the winner takes this sender so snapshots continue to advertise the
+    /// request until its terminal receipt is durably appended.
+    sender: Option<oneshot::Sender<DynamicToolCallResult>>,
+    settlement_tx: watch::Sender<u64>,
+    indeterminate: bool,
+}
+
+struct ClaimedDynamicToolSettlement {
+    params: DynamicToolCallParams,
     sender: oneshot::Sender<DynamicToolCallResult>,
+    settlement_tx: watch::Sender<u64>,
+}
+
+enum PendingDynamicToolClaim {
+    Claimed(ClaimedDynamicToolSettlement),
+    Settling(watch::Receiver<u64>),
+    Indeterminate,
+    Missing,
+}
+
+enum DynamicToolTerminalOutcome {
+    Resolved(DynamicToolCallResult),
+    Canceled {
+        reason: &'static str,
+        terminal: bool,
+    },
+    Timeout {
+        timeout: Duration,
+    },
+}
+
+struct DynamicToolSettlementAck {
+    result_accepted: bool,
 }
 
 impl RuntimeThreadManager {
@@ -1328,6 +1587,7 @@ impl RuntimeThreadManager {
             engine_load: Arc::new(Mutex::new(())),
             active: Arc::new(Mutex::new(ActiveThreads::default())),
             event_emit: Arc::new(Mutex::new(())),
+            projection_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_tx,
             manager_cfg,
             cancel_token: CancellationToken::new(),
@@ -1336,6 +1596,8 @@ impl RuntimeThreadManager {
             pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_dynamic_tools: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            recovery_receipts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            recovery_flush: Arc::new(Mutex::new(())),
             #[cfg(test)]
             snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
         };
@@ -1462,6 +1724,7 @@ impl RuntimeThreadManager {
         params: DynamicToolCallParams,
     ) -> Result<oneshot::Receiver<DynamicToolCallResult>> {
         let (tx, rx) = oneshot::channel();
+        let (settlement_tx, _settlement_rx) = watch::channel(0);
         let mut pending = self.pending_dynamic_tools.lock();
         if pending.len() >= MAX_PENDING_DYNAMIC_TOOL_CALLS {
             bail!(
@@ -1473,12 +1736,51 @@ impl RuntimeThreadManager {
         }
         pending.insert(
             params.call_id.clone(),
-            PendingDynamicToolEntry { params, sender: tx },
+            PendingDynamicToolEntry {
+                params,
+                sender: Some(tx),
+                settlement_tx,
+                indeterminate: false,
+            },
         );
         Ok(rx)
     }
 
-    fn take_pending_dynamic_tool(
+    /// Atomically select the single terminal owner for a dynamic tool call.
+    ///
+    /// The registry entry intentionally remains present with an empty sender
+    /// while the winner commits its receipt. `get_thread_detail` therefore
+    /// cannot publish a cursor that has neither the pending request nor the
+    /// terminal event, and competing result/timeout/cancel paths cannot claim
+    /// the same call twice.
+    fn claim_pending_dynamic_tool(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        call_id: &str,
+    ) -> PendingDynamicToolClaim {
+        let mut pending = self.pending_dynamic_tools.lock();
+        let Some(entry) = pending.get_mut(call_id) else {
+            return PendingDynamicToolClaim::Missing;
+        };
+        let matches_route = entry.params.thread_id == thread_id && entry.params.turn_id == turn_id;
+        if !matches_route {
+            return PendingDynamicToolClaim::Missing;
+        }
+        if entry.indeterminate {
+            return PendingDynamicToolClaim::Indeterminate;
+        }
+        match entry.sender.take() {
+            Some(sender) => PendingDynamicToolClaim::Claimed(ClaimedDynamicToolSettlement {
+                params: entry.params.clone(),
+                sender,
+                settlement_tx: entry.settlement_tx.clone(),
+            }),
+            None => PendingDynamicToolClaim::Settling(entry.settlement_tx.subscribe()),
+        }
+    }
+
+    fn remove_pending_dynamic_tool(
         &self,
         thread_id: &str,
         turn_id: &str,
@@ -1507,23 +1809,77 @@ impl RuntimeThreadManager {
         calls
     }
 
-    fn clear_pending_dynamic_tools_for_turn(
+    fn claim_or_watch_pending_dynamic_tools_for_turn(
         &self,
         thread_id: &str,
         turn_id: &str,
-    ) -> Vec<DynamicToolCallParams> {
+    ) -> (
+        Vec<ClaimedDynamicToolSettlement>,
+        Vec<watch::Receiver<u64>>,
+        bool,
+    ) {
         let mut pending = self.pending_dynamic_tools.lock();
-        let call_ids = pending
-            .iter()
-            .filter(|(_, entry)| {
-                entry.params.thread_id == thread_id && entry.params.turn_id == turn_id
-            })
-            .map(|(call_id, _)| call_id.clone())
-            .collect::<Vec<_>>();
-        call_ids
-            .into_iter()
-            .filter_map(|call_id| pending.remove(&call_id).map(|entry| entry.params))
-            .collect()
+        let mut claims = Vec::new();
+        let mut settling = Vec::new();
+        let mut indeterminate = false;
+        for entry in pending
+            .values_mut()
+            .filter(|entry| entry.params.thread_id == thread_id && entry.params.turn_id == turn_id)
+        {
+            if entry.indeterminate {
+                indeterminate = true;
+                continue;
+            }
+            match entry.sender.take() {
+                Some(sender) => claims.push(ClaimedDynamicToolSettlement {
+                    params: entry.params.clone(),
+                    sender,
+                    settlement_tx: entry.settlement_tx.clone(),
+                }),
+                None => settling.push(entry.settlement_tx.subscribe()),
+            }
+        }
+        (claims, settling, indeterminate)
+    }
+
+    fn finish_dynamic_tool_settlement(&self, params: &DynamicToolCallParams) {
+        let mut pending = self.pending_dynamic_tools.lock();
+        let can_remove = pending.get(&params.call_id).is_some_and(|entry| {
+            entry.params.thread_id == params.thread_id
+                && entry.params.turn_id == params.turn_id
+                && entry.sender.is_none()
+        });
+        if can_remove {
+            pending.remove(&params.call_id);
+        }
+    }
+
+    fn restore_dynamic_tool_claim(&self, claim: ClaimedDynamicToolSettlement) {
+        let settlement_tx = claim.settlement_tx.clone();
+        let mut pending = self.pending_dynamic_tools.lock();
+        if let Some(entry) = pending.get_mut(&claim.params.call_id)
+            && entry.params.thread_id == claim.params.thread_id
+            && entry.params.turn_id == claim.params.turn_id
+            && entry.sender.is_none()
+        {
+            entry.sender = Some(claim.sender);
+            entry.indeterminate = false;
+        }
+        settlement_tx.send_modify(|epoch| *epoch = epoch.saturating_add(1));
+    }
+
+    fn mark_dynamic_tool_claim_indeterminate(&self, claim: &ClaimedDynamicToolSettlement) {
+        let mut pending = self.pending_dynamic_tools.lock();
+        if let Some(entry) = pending.get_mut(&claim.params.call_id)
+            && entry.params.thread_id == claim.params.thread_id
+            && entry.params.turn_id == claim.params.turn_id
+            && entry.sender.is_none()
+        {
+            entry.indeterminate = true;
+        }
+        claim
+            .settlement_tx
+            .send_modify(|epoch| *epoch = epoch.saturating_add(1));
     }
 
     pub fn deliver_external_approval(
@@ -1545,35 +1901,22 @@ impl RuntimeThreadManager {
         call_id: &str,
         result: DynamicToolCallResult,
     ) -> Result<bool> {
-        let Some(entry) = self.take_pending_dynamic_tool(thread_id, turn_id, call_id) else {
-            return Ok(false);
+        let claim = match self.claim_pending_dynamic_tool(thread_id, turn_id, call_id) {
+            PendingDynamicToolClaim::Claimed(claim) => claim,
+            PendingDynamicToolClaim::Settling(_) | PendingDynamicToolClaim::Missing => {
+                return Ok(false);
+            }
+            PendingDynamicToolClaim::Indeterminate => {
+                bail!(
+                    "Dynamic tool call '{call_id}' has an indeterminate terminal receipt; inspect Runtime storage before retrying"
+                );
+            }
         };
-        let success = result.success;
-        if entry.sender.send(result).is_err() {
-            self.emit_event(
-                thread_id,
-                Some(turn_id),
-                None,
-                "tool_call.canceled",
-                dynamic_tool_terminal_payload(
-                    &entry.params,
-                    "canceled",
-                    None,
-                    Some("receiver_closed"),
-                ),
-            )
-            .await?;
-            return Ok(false);
-        }
-        self.emit_event(
-            thread_id,
-            Some(turn_id),
-            None,
-            "tool_call.resolved",
-            dynamic_tool_terminal_payload(&entry.params, "resolved", Some(success), None),
-        )
-        .await?;
-        Ok(true)
+        let ack =
+            self.spawn_dynamic_tool_settlement(claim, DynamicToolTerminalOutcome::Resolved(result));
+        Ok(Self::await_dynamic_tool_settlement(ack)
+            .await?
+            .result_accepted)
     }
 
     pub async fn submit_user_input(
@@ -1705,6 +2048,15 @@ impl RuntimeThreadManager {
         self.event_tx.subscribe()
     }
 
+    fn projection_lock(&self, thread_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.projection_locks.lock();
+        Arc::clone(
+            locks
+                .entry(thread_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
     async fn emit_event(
         &self,
         thread_id: &str,
@@ -1714,6 +2066,22 @@ impl RuntimeThreadManager {
         payload: Value,
     ) -> Result<RuntimeEventRecord> {
         let _emit_order = self.event_emit.lock().await;
+        self.append_and_broadcast_event(thread_id, turn_id, item_id, event, payload)
+            .await
+    }
+
+    /// Append and broadcast an event while the caller owns `event_emit`.
+    /// Keeping this primitive separate lets dynamic-tool settlement hold its
+    /// projection boundary through durable append, registry removal, and the
+    /// non-awaiting result send.
+    async fn append_and_broadcast_event(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        item_id: Option<&str>,
+        event: impl Into<String>,
+        payload: Value,
+    ) -> Result<RuntimeEventRecord> {
         let record = self
             .store
             .append_event(thread_id, turn_id, item_id, event, payload)
@@ -1725,6 +2093,381 @@ impl RuntimeThreadManager {
             );
         }
         Ok(record)
+    }
+
+    async fn emit_turn_completed_if_missing(
+        &self,
+        turn: &TurnRecord,
+        recovered: bool,
+    ) -> Result<bool> {
+        let _emit_order = self.event_emit.lock().await;
+        if self
+            .store
+            .events_since(&turn.thread_id, None)?
+            .iter()
+            .any(|event| {
+                event.event == "turn.completed"
+                    && event.turn_id.as_deref() == Some(turn.id.as_str())
+            })
+        {
+            return Ok(false);
+        }
+        let mut payload = json!({ "turn": turn });
+        if recovered && let Some(object) = payload.as_object_mut() {
+            object.insert("recovered".to_string(), json!(true));
+        }
+        self.append_and_broadcast_event(
+            &turn.thread_id,
+            Some(&turn.id),
+            None,
+            "turn.completed",
+            payload,
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn emit_recovered_dynamic_cancellation_if_missing(
+        &self,
+        params: &DynamicToolCallParams,
+    ) -> Result<bool> {
+        let _emit_order = self.event_emit.lock().await;
+        if self
+            .store
+            .events_since(&params.thread_id, None)?
+            .iter()
+            .any(|event| {
+                matches!(
+                    event.event.as_str(),
+                    "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
+                ) && event.payload.get("call_id").and_then(Value::as_str)
+                    == Some(params.call_id.as_str())
+            })
+        {
+            return Ok(false);
+        }
+        let mut payload =
+            dynamic_tool_terminal_payload(params, "canceled", None, Some("process_restart"));
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("terminal".to_string(), json!(true));
+            object.insert("recovered".to_string(), json!(true));
+        }
+        self.append_and_broadcast_event(
+            &params.thread_id,
+            Some(&params.turn_id),
+            None,
+            "tool_call.canceled",
+            payload,
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn flush_recovery_receipts_for_thread(&self, thread_id: &str) -> Result<()> {
+        if !self.recovery_receipts.lock().contains_key(thread_id) {
+            return Ok(());
+        }
+        let _recovery_flush = self.recovery_flush.lock().await;
+        loop {
+            let next = self
+                .recovery_receipts
+                .lock()
+                .get(thread_id)
+                .and_then(|receipts| receipts.first())
+                .cloned();
+            let Some(receipt) = next else {
+                return Ok(());
+            };
+
+            // An in-process monitor failure may leave retry-safe calls in the
+            // live registry. Retry their supervised cancellation before the
+            // static restart-recovery receipts below. Startup recovery has no
+            // live registry entries, so this is a no-op in that case.
+            self.settle_dynamic_tools_for_terminal_turn(thread_id, &receipt.turn.id)
+                .await?;
+
+            let projection_lock = self.projection_lock(thread_id);
+            let _projection = projection_lock.lock().await;
+            for params in &receipt.unresolved_dynamic_tools {
+                self.emit_recovered_dynamic_cancellation_if_missing(params)
+                    .await?;
+            }
+            self.emit_turn_completed_if_missing(&receipt.turn, true)
+                .await?;
+            drop(_projection);
+
+            let mut queued = self.recovery_receipts.lock();
+            let remove_thread = if let Some(receipts) = queued.get_mut(thread_id) {
+                receipts.retain(|candidate| candidate.turn.id != receipt.turn.id);
+                receipts.is_empty()
+            } else {
+                false
+            };
+            if remove_thread {
+                queued.remove(thread_id);
+            }
+        }
+    }
+
+    fn queue_recovery_receipt(&self, receipt: RecoveredTurnReceipt) {
+        let thread_id = receipt.turn.thread_id.clone();
+        let turn_id = receipt.turn.id.clone();
+        let mut queued = self.recovery_receipts.lock();
+        let receipts = queued.entry(thread_id).or_default();
+        if let Some(existing) = receipts
+            .iter_mut()
+            .find(|candidate| candidate.turn.id == turn_id)
+        {
+            let mut known_calls = existing
+                .unresolved_dynamic_tools
+                .iter()
+                .map(|params| params.call_id.clone())
+                .collect::<HashSet<_>>();
+            existing.unresolved_dynamic_tools.extend(
+                receipt
+                    .unresolved_dynamic_tools
+                    .into_iter()
+                    .filter(|params| known_calls.insert(params.call_id.clone())),
+            );
+            return;
+        }
+        receipts.push(receipt);
+        receipts.sort_by_key(|candidate| candidate.turn.created_at);
+    }
+
+    fn spawn_dynamic_tool_settlement(
+        &self,
+        claim: ClaimedDynamicToolSettlement,
+        outcome: DynamicToolTerminalOutcome,
+    ) -> oneshot::Receiver<std::result::Result<DynamicToolSettlementAck, String>> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let manager = self.clone();
+        tokio::spawn(async move {
+            use futures_util::FutureExt;
+
+            let mut claim = Some(claim);
+            let mut outcome = Some(outcome);
+            let settlement = std::panic::AssertUnwindSafe(async {
+                let claim_ref = claim
+                    .as_ref()
+                    .ok_or_else(|| "Dynamic tool settlement lost its claim".to_string())?;
+                let outcome_ref = outcome
+                    .as_ref()
+                    .ok_or_else(|| "Dynamic tool settlement lost its outcome".to_string())?;
+                let projection_lock = manager.projection_lock(&claim_ref.params.thread_id);
+                let _projection = projection_lock.lock().await;
+                let emit_order = manager.event_emit.lock().await;
+
+                // `resolved` linearizes durable acceptance by the Runtime. It
+                // deliberately does not claim that the model consumed the
+                // result: the receiver may close at any point before the
+                // post-receipt, non-awaiting send.
+                let (event, payload) = match outcome_ref {
+                    DynamicToolTerminalOutcome::Resolved(result) => {
+                        let mut payload = dynamic_tool_terminal_payload(
+                            &claim_ref.params,
+                            "resolved",
+                            Some(result.success),
+                            None,
+                        );
+                        if let Some(object) = payload.as_object_mut() {
+                            object.insert("result_accepted".to_string(), json!(true));
+                        }
+                        ("tool_call.resolved", payload)
+                    }
+                    DynamicToolTerminalOutcome::Canceled { reason, terminal } => {
+                        let mut payload = dynamic_tool_terminal_payload(
+                            &claim_ref.params,
+                            "canceled",
+                            None,
+                            Some(reason),
+                        );
+                        if *terminal && let Some(object) = payload.as_object_mut() {
+                            object.insert("terminal".to_string(), json!(true));
+                        }
+                        ("tool_call.canceled", payload)
+                    }
+                    DynamicToolTerminalOutcome::Timeout { timeout } => {
+                        let mut payload =
+                            dynamic_tool_terminal_payload(&claim_ref.params, "timeout", None, None);
+                        if let Some(object) = payload.as_object_mut() {
+                            object.insert("timeout_secs".to_string(), json!(timeout.as_secs()));
+                        }
+                        ("tool_call.timeout", payload)
+                    }
+                };
+
+                if let Err(error) = manager
+                    .append_and_broadcast_event(
+                        &claim_ref.params.thread_id,
+                        Some(&claim_ref.params.turn_id),
+                        None,
+                        event,
+                        payload,
+                    )
+                    .await
+                {
+                    drop(emit_order);
+                    if let Some(claim) = claim.take() {
+                        let retry_safe = error
+                            .downcast_ref::<RuntimeEventAppendError>()
+                            .is_none_or(RuntimeEventAppendError::retry_safe);
+                        if retry_safe {
+                            // Definite pre-write failures and transactionally
+                            // rolled-back appends return the call to Awaiting.
+                            manager.restore_dynamic_tool_claim(claim);
+                        } else {
+                            // A failed rollback means the JSONL tail may already
+                            // contain the terminal line. Keep the request
+                            // explicitly indeterminate so neither an API retry
+                            // nor turn timeout can append a duplicate.
+                            manager.mark_dynamic_tool_claim_indeterminate(&claim);
+                            drop(claim);
+                        }
+                    }
+                    return Err(error.to_string());
+                }
+
+                let claim = claim
+                    .take()
+                    .ok_or_else(|| "Dynamic tool settlement lost its claim".to_string())?;
+                let outcome = outcome
+                    .take()
+                    .ok_or_else(|| "Dynamic tool settlement lost its outcome".to_string())?;
+
+                // The snapshot boundary stays held until the request
+                // disappears. The model-facing channel is only woken after the
+                // terminal event is on disk, and send itself cannot suspend or
+                // be caller-canceled.
+                manager.finish_dynamic_tool_settlement(&claim.params);
+                claim
+                    .settlement_tx
+                    .send_modify(|epoch| *epoch = epoch.saturating_add(1));
+                let result_accepted = matches!(&outcome, DynamicToolTerminalOutcome::Resolved(_));
+                match outcome {
+                    DynamicToolTerminalOutcome::Resolved(result) => {
+                        if claim.sender.send(result).is_err() {
+                            tracing::debug!(
+                                call_id = %claim.params.call_id,
+                                "Durably accepted dynamic tool result had no remaining model receiver"
+                            );
+                        }
+                    }
+                    DynamicToolTerminalOutcome::Canceled { .. }
+                    | DynamicToolTerminalOutcome::Timeout { .. } => drop(claim.sender),
+                }
+                Ok(DynamicToolSettlementAck { result_accepted })
+            })
+            .catch_unwind()
+            .await;
+
+            let result = match settlement {
+                Ok(result) => result,
+                Err(payload) => {
+                    // A panic before durable completion must not leave a
+                    // Settling tombstone. Reacquire the same projection
+                    // boundary before returning the sender to Awaiting.
+                    if let Some(claim) = claim.take() {
+                        let projection_lock = manager.projection_lock(&claim.params.thread_id);
+                        let _projection = projection_lock.lock().await;
+                        manager.restore_dynamic_tool_claim(claim);
+                    }
+                    Err(format!(
+                        "Dynamic tool settlement task panicked: {}",
+                        panic_payload_message(&*payload)
+                    ))
+                }
+            };
+            let _ = ack_tx.send(result);
+        });
+        ack_rx
+    }
+
+    async fn await_dynamic_tool_settlement(
+        ack: oneshot::Receiver<std::result::Result<DynamicToolSettlementAck, String>>,
+    ) -> Result<DynamicToolSettlementAck> {
+        match ack.await {
+            Ok(Ok(ack)) => Ok(ack),
+            Ok(Err(error)) => bail!("{error}"),
+            Err(_) => bail!("Dynamic tool settlement task ended before acknowledgement"),
+        }
+    }
+
+    async fn settle_dynamic_tool_timeout(
+        &self,
+        claim: ClaimedDynamicToolSettlement,
+        timeout: Duration,
+    ) -> Result<()> {
+        let ack = self
+            .spawn_dynamic_tool_settlement(claim, DynamicToolTerminalOutcome::Timeout { timeout });
+        Self::await_dynamic_tool_settlement(ack).await?;
+        Ok(())
+    }
+
+    async fn settle_dynamic_tools_for_terminal_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<()> {
+        loop {
+            let (claims, mut settling, indeterminate) =
+                self.claim_or_watch_pending_dynamic_tools_for_turn(thread_id, turn_id);
+            if indeterminate {
+                bail!(
+                    "Turn {turn_id} has an indeterminate dynamic-tool receipt; refusing to publish turn completion"
+                );
+            }
+            if claims.is_empty() && settling.is_empty() {
+                return Ok(());
+            }
+
+            let mut first_error = None;
+            for claim in claims {
+                let ack = self.spawn_dynamic_tool_settlement(
+                    claim,
+                    DynamicToolTerminalOutcome::Canceled {
+                        reason: "turn_terminal",
+                        terminal: true,
+                    },
+                );
+                if let Err(error) = Self::await_dynamic_tool_settlement(ack).await
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+
+            // If result delivery or timeout already owned a call, wait for its
+            // supervised completion/rollback before publishing turn.completed.
+            // On rollback the next iteration claims terminal cancellation; on
+            // success the completed entry is gone.
+            for progress in &mut settling {
+                let _ = progress.changed().await;
+            }
+
+            // Every claim selected above has now either committed, restored
+            // itself to Awaiting, or entered the explicit indeterminate state.
+            // Returning only after supervising the whole batch prevents an
+            // early failure from dropping unstarted senders into permanent
+            // Settling tombstones.
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+    }
+
+    /// Persist a streaming item without blocking the Tokio worker that drives
+    /// engine events. Each delta must reach the item projection before its
+    /// durable event is sequenced, otherwise a snapshot at that cursor can
+    /// expose stale text. Keeping the full record in memory avoids rereading
+    /// and reparsing the same item for every provider chunk.
+    async fn save_streaming_item(&self, item: &TurnItemRecord) -> Result<()> {
+        let store = self.store.clone();
+        let item = item.clone();
+        tokio::task::spawn_blocking(move || store.save_item(&item))
+            .await
+            .context("Streaming item persistence task failed")??;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1948,6 +2691,7 @@ impl RuntimeThreadManager {
     }
 
     pub async fn get_thread(&self, id: &str) -> Result<ThreadRecord> {
+        self.flush_recovery_receipts_for_thread(id).await?;
         self.store
             .load_thread(id)
             .with_context(|| format!("Thread not found: {id}"))
@@ -2138,11 +2882,13 @@ impl RuntimeThreadManager {
     }
 
     pub async fn get_thread_detail(&self, id: &str) -> Result<ThreadDetail> {
-        // Treat the cursor as a lower watermark for the projection reads that
-        // follow. A concurrent save+emit can then be represented in both the
-        // snapshot and replay (authoritative records are upserted and event
-        // sequences are deduplicated), or only in replay, but it cannot be
-        // absent from both while the cursor skips its event.
+        self.flush_recovery_receipts_for_thread(id).await?;
+        // Hold the per-thread projection boundary from cursor capture through
+        // item reads. A streamed delta is therefore either entirely before
+        // this snapshot (materialized item + included cursor) or entirely
+        // after it (old item + replayable delta), never both.
+        let projection_lock = self.projection_lock(id);
+        let _projection = projection_lock.lock().await;
         let latest_seq = self.store.current_seq().await;
 
         #[cfg(test)]
@@ -2161,7 +2907,14 @@ impl RuntimeThreadManager {
                 .map_err(|_| anyhow!("snapshot test hook dropped resume"))?;
         }
 
-        let thread = self.get_thread(id).await?;
+        // Recovery was flushed before taking the non-reentrant projection
+        // lock. Do not call `get_thread` here: a receipt queued between that
+        // flush and this read would re-enter recovery and wait forever on the
+        // projection lock held by this snapshot.
+        let thread = self
+            .store
+            .load_thread(id)
+            .with_context(|| format!("Thread not found: {id}"))?;
         let turns = self.store.list_turns_for_thread(id)?;
         let turn_ids: Vec<String> = turns.iter().map(|turn| turn.id.clone()).collect();
         let mut items_by_turn = self.store.list_items_for_turns_map(&turn_ids)?;
@@ -2857,20 +3610,28 @@ impl RuntimeThreadManager {
         let terminal_turn = {
             let _turn_mutation = self.store.turn_mutation.lock();
             match self.store.load_turn(turn_id) {
-                Ok(mut turn) if turn.status == RuntimeTurnStatus::InProgress => {
-                    turn.status = RuntimeTurnStatus::Failed;
-                    turn.ended_at = Some(now);
-                    turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
-                    turn.error = Some(reason.to_string());
-                    match self.store.save_turn(&turn) {
-                        Ok(()) => Some(turn),
-                        Err(err) => {
+                Ok(mut turn) => {
+                    let mut persisted = true;
+                    if turn.status == RuntimeTurnStatus::InProgress {
+                        turn.status = RuntimeTurnStatus::Failed;
+                        turn.ended_at = Some(now);
+                        turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
+                        turn.error = Some(reason.to_string());
+                        if let Err(err) = self.store.save_turn(&turn) {
                             tracing::error!("Failed to persist terminal monitor failure: {err}");
-                            None
+                            persisted = false;
                         }
                     }
+                    (persisted
+                        && matches!(
+                            turn.status,
+                            RuntimeTurnStatus::Completed
+                                | RuntimeTurnStatus::Failed
+                                | RuntimeTurnStatus::Interrupted
+                                | RuntimeTurnStatus::Canceled
+                        ))
+                    .then_some(turn)
                 }
-                Ok(_) => None,
                 Err(err) => {
                     tracing::error!("Failed to load turn after monitor failure: {err}");
                     None
@@ -2928,40 +3689,33 @@ impl RuntimeThreadManager {
             let _ = self.clear_pending_user_inputs_for_turn(thread_id, turn_id);
         }
 
-        for params in self.clear_pending_dynamic_tools_for_turn(thread_id, turn_id) {
-            let mut payload =
-                dynamic_tool_terminal_payload(&params, "canceled", None, Some("turn_terminal"));
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("terminal".to_string(), json!(true));
+        let dynamic_tools_settled = if let Err(err) = self
+            .settle_dynamic_tools_for_terminal_turn(thread_id, turn_id)
+            .await
+        {
+            tracing::error!(
+                "Failed to emit dynamic-tool cancellation after monitor failure: {err}"
+            );
+            if let Some(turn) = terminal_turn.as_ref() {
+                self.queue_recovery_receipt(RecoveredTurnReceipt {
+                    turn: turn.clone(),
+                    unresolved_dynamic_tools: Vec::new(),
+                });
             }
-            if let Err(err) = self
-                .emit_event(
-                    thread_id,
-                    Some(turn_id),
-                    None,
-                    "tool_call.canceled",
-                    payload,
-                )
-                .await
-            {
-                tracing::error!(
-                    "Failed to emit dynamic-tool cancellation after monitor failure: {err}"
-                );
-            }
-        }
+            false
+        } else {
+            true
+        };
 
-        if let Some(turn) = terminal_turn
-            && let Err(err) = self
-                .emit_event(
-                    thread_id,
-                    Some(turn_id),
-                    None,
-                    "turn.completed",
-                    json!({ "turn": turn }),
-                )
-                .await
+        if dynamic_tools_settled
+            && let Some(turn) = terminal_turn.as_ref()
+            && let Err(err) = self.emit_turn_completed_if_missing(turn, false).await
         {
             tracing::error!("Failed to emit terminal monitor failure: {err}");
+            self.queue_recovery_receipt(RecoveredTurnReceipt {
+                turn: turn.clone(),
+                unresolved_dynamic_tools: Vec::new(),
+            });
         }
 
         // Keep the failed claim in place until its terminal receipts are
@@ -4053,8 +4807,8 @@ impl RuntimeThreadManager {
         turn_id: String,
         engine: EngineHandle,
     ) -> Result<()> {
-        let mut current_message_item: Option<(String, String)> = None;
-        let mut current_reasoning_item: Option<(String, String)> = None;
+        let mut current_message_item: Option<TurnItemRecord> = None;
+        let mut current_reasoning_item: Option<TurnItemRecord> = None;
         let mut tool_items: HashMap<String, String> = HashMap::new();
         let mut compaction_items: HashMap<String, String> = HashMap::new();
         let mut turn_usage: Option<Usage> = None;
@@ -4063,9 +4817,15 @@ impl RuntimeThreadManager {
         let mut turn_error: Option<String> = None;
         let mut saw_engine_activity = false;
         let mut saw_turn_started = false;
+        let mut pending_event: Option<EngineEvent> = None;
+        let mut event_channel_closed = false;
 
         loop {
-            let event = {
+            let event = if let Some(event) = pending_event.take() {
+                Some(event)
+            } else if event_channel_closed {
+                None
+            } else {
                 let mut rx = engine.rx_event.write().await;
                 rx.recv().await
             };
@@ -4162,26 +4922,32 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item_id),
                         "item.started",
-                        json!({ "item": item }),
+                        json!({ "item": item.clone() }),
                     )
                     .await?;
-                    current_message_item = Some((item_id, String::new()));
+                    current_message_item = Some(item);
                 }
                 EngineEvent::MessageDelta { content, .. } => {
-                    if let Some((item_id, text)) = current_message_item.as_mut() {
+                    let batch =
+                        coalesce_stream_delta(&engine, StreamDeltaKind::Message, content).await;
+                    pending_event = batch.pending_event;
+                    event_channel_closed |= batch.channel_closed;
+                    let content = batch.content;
+                    if let Some(item) = current_message_item.as_mut() {
+                        let text = item.detail.get_or_insert_default();
                         text.push_str(&content);
                         // Materialize the prefix before sequencing its delta.
                         // A snapshot whose cursor includes this event must not
                         // still observe the empty item saved at MessageStarted,
                         // and restart recovery must retain the partial output.
-                        let mut item = self.store.load_item(item_id)?;
                         item.summary = summarize_text(text, SUMMARY_LIMIT);
-                        item.detail = Some(text.clone());
-                        self.store.save_item(&item)?;
+                        let projection_lock = self.projection_lock(&thread_id);
+                        let _projection = projection_lock.lock().await;
+                        self.save_streaming_item(item).await?;
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
-                            Some(item_id),
+                            Some(&item.id),
                             "item.delta",
                             json!({ "delta": content, "kind": "agent_message" }),
                         )
@@ -4189,17 +4955,18 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::MessageComplete { .. } => {
-                    if let Some((item_id, text)) = current_message_item.take() {
-                        let mut item = self.store.load_item(&item_id)?;
+                    if let Some(mut item) = current_message_item.take() {
                         item.status = TurnItemLifecycleStatus::Completed;
-                        item.summary = summarize_text(&text, SUMMARY_LIMIT);
-                        item.detail = Some(text);
+                        item.summary = summarize_text(
+                            item.detail.as_deref().unwrap_or_default(),
+                            SUMMARY_LIMIT,
+                        );
                         item.ended_at = Some(Utc::now());
-                        self.store.save_item(&item)?;
+                        self.save_streaming_item(&item).await?;
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
-                            Some(&item_id),
+                            Some(&item.id),
                             "item.completed",
                             json!({ "item": item }),
                         )
@@ -4228,22 +4995,28 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item_id),
                         "item.started",
-                        json!({ "item": item }),
+                        json!({ "item": item.clone() }),
                     )
                     .await?;
-                    current_reasoning_item = Some((item_id, String::new()));
+                    current_reasoning_item = Some(item);
                 }
                 EngineEvent::ThinkingDelta { content, .. } => {
-                    if let Some((item_id, text)) = current_reasoning_item.as_mut() {
+                    let batch =
+                        coalesce_stream_delta(&engine, StreamDeltaKind::Reasoning, content).await;
+                    pending_event = batch.pending_event;
+                    event_channel_closed |= batch.channel_closed;
+                    let content = batch.content;
+                    if let Some(item) = current_reasoning_item.as_mut() {
+                        let text = item.detail.get_or_insert_default();
                         text.push_str(&content);
-                        let mut item = self.store.load_item(item_id)?;
                         item.summary = summarize_text(text, SUMMARY_LIMIT);
-                        item.detail = Some(text.clone());
-                        self.store.save_item(&item)?;
+                        let projection_lock = self.projection_lock(&thread_id);
+                        let _projection = projection_lock.lock().await;
+                        self.save_streaming_item(item).await?;
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
-                            Some(item_id),
+                            Some(&item.id),
                             "item.delta",
                             json!({ "delta": content, "kind": "agent_reasoning" }),
                         )
@@ -4251,17 +5024,18 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::ThinkingComplete { .. } => {
-                    if let Some((item_id, text)) = current_reasoning_item.take() {
-                        let mut item = self.store.load_item(&item_id)?;
+                    if let Some(mut item) = current_reasoning_item.take() {
                         item.status = TurnItemLifecycleStatus::Completed;
-                        item.summary = summarize_text(&text, SUMMARY_LIMIT);
-                        item.detail = Some(text);
+                        item.summary = summarize_text(
+                            item.detail.as_deref().unwrap_or_default(),
+                            SUMMARY_LIMIT,
+                        );
                         item.ended_at = Some(Utc::now());
-                        self.store.save_item(&item)?;
+                        self.save_streaming_item(&item).await?;
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
-                            Some(&item_id),
+                            Some(&item.id),
                             "item.completed",
                             json!({ "item": item }),
                         )
@@ -4914,21 +5688,20 @@ impl RuntimeThreadManager {
             turn_status = RuntimeTurnStatus::Interrupted;
         }
 
-        if let Some((item_id, text)) = current_message_item.take() {
-            let mut item = self.store.load_item(&item_id)?;
+        if let Some(mut item) = current_message_item.take() {
             if turn_status == RuntimeTurnStatus::Interrupted {
                 item.status = TurnItemLifecycleStatus::Interrupted;
             } else {
                 item.status = TurnItemLifecycleStatus::Completed;
             }
-            item.summary = summarize_text(&text, SUMMARY_LIMIT);
-            item.detail = Some(text);
+            item.summary =
+                summarize_text(item.detail.as_deref().unwrap_or_default(), SUMMARY_LIMIT);
             item.ended_at = Some(Utc::now());
-            self.store.save_item(&item)?;
+            self.save_streaming_item(&item).await?;
             self.emit_event(
                 &thread_id,
                 Some(&turn_id),
-                Some(&item_id),
+                Some(&item.id),
                 if item.status == TurnItemLifecycleStatus::Interrupted {
                     "item.interrupted"
                 } else {
@@ -4939,21 +5712,20 @@ impl RuntimeThreadManager {
             .await?;
         }
 
-        if let Some((item_id, text)) = current_reasoning_item.take() {
-            let mut item = self.store.load_item(&item_id)?;
+        if let Some(mut item) = current_reasoning_item.take() {
             if turn_status == RuntimeTurnStatus::Interrupted {
                 item.status = TurnItemLifecycleStatus::Interrupted;
             } else {
                 item.status = TurnItemLifecycleStatus::Completed;
             }
-            item.summary = summarize_text(&text, SUMMARY_LIMIT);
-            item.detail = Some(text);
+            item.summary =
+                summarize_text(item.detail.as_deref().unwrap_or_default(), SUMMARY_LIMIT);
             item.ended_at = Some(Utc::now());
-            self.store.save_item(&item)?;
+            self.save_streaming_item(&item).await?;
             self.emit_event(
                 &thread_id,
                 Some(&turn_id),
-                Some(&item_id),
+                Some(&item.id),
                 if item.status == TurnItemLifecycleStatus::Interrupted {
                     "item.interrupted"
                 } else {
@@ -5036,30 +5808,10 @@ impl RuntimeThreadManager {
             .await?;
         }
 
-        for params in self.clear_pending_dynamic_tools_for_turn(&thread_id, &turn_id) {
-            let mut payload =
-                dynamic_tool_terminal_payload(&params, "canceled", None, Some("turn_terminal"));
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("terminal".to_string(), json!(true));
-            }
-            self.emit_event(
-                &thread_id,
-                Some(&turn_id),
-                None,
-                "tool_call.canceled",
-                payload,
-            )
+        self.settle_dynamic_tools_for_terminal_turn(&thread_id, &turn_id)
             .await?;
-        }
 
-        self.emit_event(
-            &thread_id,
-            Some(&turn_id),
-            None,
-            "turn.completed",
-            json!({ "turn": turn.clone() }),
-        )
-        .await?;
+        self.emit_turn_completed_if_missing(&turn, false).await?;
 
         {
             let mut active = self.active.lock().await;
@@ -5139,31 +5891,24 @@ impl RuntimeThreadManager {
 
     fn recover_interrupted_state(&self) -> Result<()> {
         let now = Utc::now();
-        // One scan of the turns store, filtered to the interrupted-candidate
-        // statuses, grouped by thread. The previous shape re-read and
-        // re-parsed every turn file once per thread — O(threads x turns) on
-        // the boot path (#3757).
+        let mut threads = self
+            .store
+            .list_threads()?
+            .into_iter()
+            .map(|thread| (thread.id.clone(), thread))
+            .collect::<HashMap<_, _>>();
         let mut turns_by_thread: HashMap<String, Vec<TurnRecord>> = HashMap::new();
-        for turn in self.store.list_all_turns()? {
+        let mut changed_threads = HashSet::new();
+
+        // First terminalize interrupted candidates. Keep every terminal turn
+        // in the same one-pass grouping so already-terminal records whose
+        // completion append failed are reconciled too.
+        for mut turn in self.store.list_all_turns()? {
+            let mut thread_changed = false;
             if matches!(
                 turn.status,
                 RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress
             ) {
-                turns_by_thread
-                    .entry(turn.thread_id.clone())
-                    .or_default()
-                    .push(turn);
-            }
-        }
-        if turns_by_thread.is_empty() {
-            return Ok(());
-        }
-        for mut thread in self.store.list_threads()? {
-            let Some(turns) = turns_by_thread.remove(&thread.id) else {
-                continue;
-            };
-            let mut thread_changed = false;
-            for mut turn in turns {
                 turn.status = RuntimeTurnStatus::Interrupted;
                 turn.error = Some(RUNTIME_RESTART_REASON.to_string());
                 turn.ended_at = Some(now);
@@ -5185,14 +5930,97 @@ impl RuntimeThreadManager {
                     }
                 }
 
-                thread.updated_at = now;
                 thread_changed = true;
             }
-
-            if thread_changed {
-                self.store.save_thread(&thread)?;
+            if thread_changed && let Some(thread) = threads.get_mut(&turn.thread_id) {
+                thread.updated_at = now;
+                changed_threads.insert(thread.id.clone());
+            }
+            if matches!(
+                turn.status,
+                RuntimeTurnStatus::Completed
+                    | RuntimeTurnStatus::Failed
+                    | RuntimeTurnStatus::Interrupted
+                    | RuntimeTurnStatus::Canceled
+            ) {
+                turns_by_thread
+                    .entry(turn.thread_id.clone())
+                    .or_default()
+                    .push(turn);
             }
         }
+
+        for thread_id in changed_threads {
+            if let Some(thread) = threads.get(&thread_id) {
+                self.store.save_thread(thread)?;
+            }
+        }
+
+        let mut recovery_receipts: HashMap<String, Vec<RecoveredTurnReceipt>> = HashMap::new();
+        for (thread_id, mut turns) in turns_by_thread {
+            let events = self.store.events_since(&thread_id, None)?;
+            let completed_turns = events
+                .iter()
+                .filter(|event| event.event == "turn.completed")
+                .filter_map(|event| event.turn_id.clone())
+                .collect::<HashSet<_>>();
+            let terminal_calls = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.event.as_str(),
+                        "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
+                    )
+                })
+                .filter_map(|event| {
+                    event
+                        .payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .collect::<HashSet<_>>();
+            let mut requests_by_turn: HashMap<String, Vec<DynamicToolCallParams>> = HashMap::new();
+            for event in events
+                .iter()
+                .filter(|event| event.event == "tool_call.requested")
+            {
+                let Ok(params) =
+                    serde_json::from_value::<DynamicToolCallParams>(event.payload.clone())
+                else {
+                    tracing::warn!(
+                        thread_id,
+                        seq = event.seq,
+                        "Ignoring malformed dynamic-tool request during Runtime recovery"
+                    );
+                    continue;
+                };
+                if params.thread_id == thread_id && !terminal_calls.contains(&params.call_id) {
+                    requests_by_turn
+                        .entry(params.turn_id.clone())
+                        .or_default()
+                        .push(params);
+                }
+            }
+
+            turns.sort_by_key(|turn| turn.created_at);
+            for turn in turns {
+                if completed_turns.contains(&turn.id) {
+                    continue;
+                }
+                recovery_receipts
+                    .entry(thread_id.clone())
+                    .or_default()
+                    .push(RecoveredTurnReceipt {
+                        unresolved_dynamic_tools: requests_by_turn
+                            .remove(&turn.id)
+                            .unwrap_or_default(),
+                        turn,
+                    });
+            }
+        }
+
+        *self.recovery_receipts.lock() = recovery_receipts;
 
         Ok(())
     }
@@ -5231,6 +6059,21 @@ fn dynamic_tool_result_text(content: &[DynamicToolCallContent]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn dynamic_tool_result_to_tool_result(
+    result: DynamicToolCallResult,
+) -> crate::tools::spec::ToolResult {
+    let text = dynamic_tool_result_text(&result.content);
+    if result.success {
+        crate::tools::spec::ToolResult::success(text)
+    } else {
+        crate::tools::spec::ToolResult::error(if text.is_empty() {
+            "dynamic tool failed".to_string()
+        } else {
+            text
+        })
+    }
 }
 
 fn dynamic_tool_terminal_payload(
@@ -5284,7 +6127,7 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
             tool: name.clone(),
             arguments: input,
         };
-        let rx = self
+        let mut rx = self
             .register_pending_dynamic_tool(params.clone())
             .map_err(|err| crate::tools::spec::ToolError::execution_failed(err.to_string()))?;
         if let Err(err) = self
@@ -5297,72 +6140,111 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
             )
             .await
         {
-            self.take_pending_dynamic_tool(&thread_id, &turn_id, &call_id);
+            self.remove_pending_dynamic_tool(&thread_id, &turn_id, &call_id);
             return Err(crate::tools::spec::ToolError::execution_failed(format!(
                 "failed to emit runtime dynamic tool request for '{name}': {err}"
             )));
         }
 
         let result_timeout = dynamic_tool_result_timeout();
-        match tokio::time::timeout(result_timeout, rx).await {
-            Ok(Ok(result)) => {
-                let text = dynamic_tool_result_text(&result.content);
-                if result.success {
-                    Ok(crate::tools::spec::ToolResult::success(text))
-                } else {
-                    Ok(crate::tools::spec::ToolResult::error(if text.is_empty() {
-                        "dynamic tool failed".to_string()
-                    } else {
-                        text
-                    }))
-                }
-            }
-            Ok(Err(_recv_err)) => {
-                if let Some(entry) = self.take_pending_dynamic_tool(&thread_id, &turn_id, &call_id)
-                {
-                    self.emit_event(
-                        &thread_id,
-                        Some(&turn_id),
-                        None,
-                        "tool_call.canceled",
-                        dynamic_tool_terminal_payload(
-                            &entry.params,
-                            "canceled",
-                            None,
-                            Some("channel_closed"),
-                        ),
-                    )
-                    .await
-                    .map_err(|err| {
-                        crate::tools::spec::ToolError::execution_failed(err.to_string())
-                    })?;
-                }
-                Err(crate::tools::spec::ToolError::execution_failed(format!(
-                    "runtime dynamic tool '{name}' result channel closed"
-                )))
-            }
+        match tokio::time::timeout(result_timeout, &mut rx).await {
+            Ok(Ok(result)) => Ok(dynamic_tool_result_to_tool_result(result)),
+            Ok(Err(_recv_err)) => Err(crate::tools::spec::ToolError::execution_failed(format!(
+                "runtime dynamic tool '{name}' result channel closed"
+            ))),
             Err(_timeout) => {
-                if let Some(entry) = self.take_pending_dynamic_tool(&thread_id, &turn_id, &call_id)
+                let mut settlement_progress = match self
+                    .claim_pending_dynamic_tool(&thread_id, &turn_id, &call_id)
                 {
-                    self.emit_event(&thread_id, Some(&turn_id), None, "tool_call.timeout", {
-                        let mut payload =
-                            dynamic_tool_terminal_payload(&entry.params, "timeout", None, None);
-                        if let Some(object) = payload.as_object_mut() {
-                            object.insert(
-                                "timeout_secs".to_string(),
-                                json!(result_timeout.as_secs()),
-                            );
+                    PendingDynamicToolClaim::Claimed(claim) => {
+                        self.settle_dynamic_tool_timeout(claim, result_timeout)
+                            .await
+                            .map_err(|err| {
+                                crate::tools::spec::ToolError::execution_failed(err.to_string())
+                            })?;
+                        return Err(crate::tools::spec::ToolError::Timeout {
+                            seconds: result_timeout.as_secs(),
+                        });
+                    }
+                    PendingDynamicToolClaim::Settling(progress) => progress,
+                    PendingDynamicToolClaim::Indeterminate => {
+                        return Err(crate::tools::spec::ToolError::execution_failed(format!(
+                            "runtime dynamic tool '{name}' has an indeterminate terminal receipt"
+                        )));
+                    }
+                    PendingDynamicToolClaim::Missing => {
+                        return match rx.await {
+                            Ok(result) => Ok(dynamic_tool_result_to_tool_result(result)),
+                            Err(_recv_err) => Err(crate::tools::spec::ToolError::execution_failed(
+                                format!("runtime dynamic tool '{name}' result channel closed"),
+                            )),
+                        };
+                    }
+                };
+
+                // A result or turn cancellation claimed the call just before
+                // the timer fired. Preserve that winner. Its supervised task
+                // notifies this watcher on either durable completion or
+                // rollback, so a panic/persistence error cannot strand this
+                // executor in an unbounded `rx.await`.
+                loop {
+                    tokio::select! {
+                        received = &mut rx => {
+                            return match received {
+                                Ok(result) => Ok(dynamic_tool_result_to_tool_result(result)),
+                                Err(_recv_err) => Err(
+                                    crate::tools::spec::ToolError::execution_failed(format!(
+                                        "runtime dynamic tool '{name}' result channel closed"
+                                    )),
+                                ),
+                            };
                         }
-                        payload
-                    })
-                    .await
-                    .map_err(|err| {
-                        crate::tools::spec::ToolError::execution_failed(err.to_string())
-                    })?;
+                        _ = settlement_progress.changed() => {
+                            match self.claim_pending_dynamic_tool(
+                                &thread_id,
+                                &turn_id,
+                                &call_id,
+                            ) {
+                                PendingDynamicToolClaim::Claimed(claim) => {
+                                    self.settle_dynamic_tool_timeout(claim, result_timeout)
+                                        .await
+                                        .map_err(|err| {
+                                            crate::tools::spec::ToolError::execution_failed(
+                                                err.to_string(),
+                                            )
+                                        })?;
+                                    return Err(crate::tools::spec::ToolError::Timeout {
+                                        seconds: result_timeout.as_secs(),
+                                    });
+                                }
+                                PendingDynamicToolClaim::Settling(progress) => {
+                                    settlement_progress = progress;
+                                }
+                                PendingDynamicToolClaim::Indeterminate => {
+                                    return Err(
+                                        crate::tools::spec::ToolError::execution_failed(format!(
+                                            "runtime dynamic tool '{name}' has an indeterminate terminal receipt"
+                                        )),
+                                    );
+                                }
+                                PendingDynamicToolClaim::Missing => {
+                                    return match rx.await {
+                                        Ok(result) => {
+                                            Ok(dynamic_tool_result_to_tool_result(result))
+                                        }
+                                        Err(_recv_err) => Err(
+                                            crate::tools::spec::ToolError::execution_failed(
+                                                format!(
+                                                    "runtime dynamic tool '{name}' result channel closed"
+                                                ),
+                                            ),
+                                        ),
+                                    };
+                                }
+                            }
+                        }
+                    }
                 }
-                Err(crate::tools::spec::ToolError::Timeout {
-                    seconds: result_timeout.as_secs(),
-                })
             }
         }
     }

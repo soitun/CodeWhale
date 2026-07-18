@@ -429,6 +429,22 @@ only a neutral receipt and a machine-readable `response_redacted` marker.
 The thread and turn in the result route must match the pending call. A call is
 settled at most once; wrong-route and duplicate results return 404. Terminal
 lifecycle events carry identifiers and status only, never tool result content.
+The Runtime commits the terminal lifecycle event before making a submitted
+result available to the model. Result delivery, timeout, and terminal-turn
+cancellation race through one settlement owner, so exactly one of these events
+is durable for a call:
+
+- `tool_call.requested` — the typed client-executed call became pending;
+- `tool_call.resolved` — a result was durably accepted by the Runtime
+  (`result_accepted: true`; `success` is result metadata, but result content is
+  excluded);
+- `tool_call.timeout` — no result won before the bounded wait expired;
+- `tool_call.canceled` — the turn terminated before a submitted result won.
+
+HTTP `202 Accepted` and `tool_call.resolved` share that durable-acceptance
+meaning. Neither claims that the model consumed the result: a concurrent turn
+shutdown may close the model receiver after acceptance. Once the Runtime has
+accepted the result, that call is terminal and a duplicate result returns 404.
 
 **Events** (SSE replay + live stream)
 - `GET /v1/threads/{id}/events?since_seq=<u64>`
@@ -546,6 +562,10 @@ not persisted in `TurnRecord`.
 - If the process restarts while a turn or item is `queued` or `in_progress`,
   the recovered record is marked `interrupted` with an `"Interrupted by
   process restart"` error.
+- If a terminal turn record reached disk but its terminal event sequence did
+  not, the first async read reconciles any unresolved dynamic calls as
+  `tool_call.canceled` and then emits one `turn.completed`. Existing terminal
+  call and turn receipts are detected and never duplicated.
 - Task execution performs its own recovery on top of the same persisted
   thread/turn store.
 
@@ -565,6 +585,7 @@ The SSE event payload shape for `/v1/threads/{id}/events`:
 {
   "schema_version": 1,
   "seq": 42,
+  "previous_seq": 38,
   "event": "item.delta",
   "kind": "item.delta",
   "thread_id": "thr_1234abcd",
@@ -585,6 +606,14 @@ Compatibility notes:
   the runtime store schema used for persisted thread/turn/event records.
 - `event` remains the SSE event name in existing clients; it is preserved as-is.
 - `kind` mirrors `event` in the stable envelope for typed clients.
+- `seq` is allocated globally across all Runtime threads. Consequently, gaps
+  between a thread's events are normal when other threads interleave. On this
+  per-thread SSE stream, `previous_seq` is the sequence of the last event
+  delivered for this thread (or the requested replay cursor for the first
+  event); clients detect loss by comparing it with their accepted per-thread
+  cursor, not by requiring `seq == previous_seq + 1`. Sequence allocation is
+  also not rewound after an append is transactionally rolled back, so a retry
+  can intentionally skip an unused value without implying a missing event.
 - `thread.started`, `turn.started`, and `turn.completed` are emitted as SSE event
   names exactly as before.
 - `timestamp` remains the canonical event time for schema version 1. `created_at`
@@ -596,7 +625,17 @@ Common event names: `thread.started`, `thread.forked`, `turn.started`,
 `turn.completed`, `item.started`, `item.delta`, `item.completed`,
 `item.failed`, `item.interrupted`, `approval.required`, `approval.decided`,
 `approval.timeout`, `user_input.required`, `user_input.answered`,
-`user_input.canceled`, `sandbox.denied`.
+`user_input.canceled`, `tool_call.requested`, `tool_call.resolved`,
+`tool_call.timeout`, `tool_call.canceled`, `sandbox.denied`.
+
+Agent-message and reasoning deltas are materialized into the item projection
+before their corresponding `item.delta` event is sequenced. To avoid an fsync
+for every provider fragment, adjacent deltas are coalesced to configured bounds
+of at most 32 ms or approximately 16 KiB before publication (an indivisible
+upstream chunk can itself exceed the byte target). A process crash inside that
+unpublished window can lose the recent suffix; no durable event claims that
+suffix existed. Once an `item.delta` is durable, snapshots at or beyond its
+cursor include the same materialized prefix.
 
 `approval.required` events may include a `matched_rule` string when an
 execution-policy rule caused the prompt. This field is explanatory metadata for

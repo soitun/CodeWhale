@@ -58,6 +58,30 @@ fn test_dynamic_tool_timeout_ms(ms: u64) -> DynamicToolTimeoutGuard {
     }
 }
 
+struct EventAppendFaultGuard {
+    restore: Option<EventAppendTestFaultRestore>,
+}
+
+impl EventAppendFaultGuard {
+    fn arm(thread_id: &str, fault: EventAppendTestFault) -> Self {
+        Self::arm_repeated(thread_id, fault, 1)
+    }
+
+    fn arm_repeated(thread_id: &str, fault: EventAppendTestFault, count: usize) -> Self {
+        Self {
+            restore: Some(set_test_event_append_fault(thread_id, fault, count)),
+        }
+    }
+}
+
+impl Drop for EventAppendFaultGuard {
+    fn drop(&mut self) {
+        if let Some(restore) = self.restore.take() {
+            restore_test_event_append_fault(restore);
+        }
+    }
+}
+
 fn sample_thread(thread_id: &str) -> ThreadRecord {
     let now = Utc::now();
     ThreadRecord {
@@ -3647,6 +3671,73 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
 }
 
 #[tokio::test]
+async fn thread_detail_does_not_reenter_recovery_while_projection_is_locked() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let turn_id = "turn_recovery_queued_during_snapshot";
+    let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+    turn.ended_at = Some(Utc::now());
+    turn.duration_ms = Some(1);
+    manager.store.save_turn(&turn)?;
+    {
+        let _thread_mutation = manager.store.thread_mutation.lock();
+        let mut persisted_thread = manager.store.load_thread(&thread.id)?;
+        persisted_thread.latest_turn_id = Some(turn_id.to_string());
+        manager.store.save_thread(&persisted_thread)?;
+    }
+
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    manager.set_snapshot_test_hook(hook_tx);
+    let snapshot_manager = manager.clone();
+    let snapshot_thread_id = thread.id.clone();
+    let snapshot_task = tokio::spawn(async move {
+        snapshot_manager
+            .get_thread_detail(&snapshot_thread_id)
+            .await
+    });
+    let point = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("snapshot did not acquire its projection boundary")?
+        .context("snapshot test hook closed")?;
+
+    // Queue after get_thread_detail's initial recovery flush, while its
+    // projection lock is held. A nested get_thread call would see this receipt
+    // and deadlock trying to reacquire that same lock.
+    manager.queue_recovery_receipt(RecoveredTurnReceipt {
+        turn: turn.clone(),
+        unresolved_dynamic_tools: Vec::new(),
+    });
+    point
+        .resume
+        .send(())
+        .map_err(|_| anyhow!("snapshot dropped its resume barrier"))?;
+    let detail = tokio::time::timeout(Duration::from_secs(2), snapshot_task)
+        .await
+        .context("snapshot re-entered recovery while holding its projection lock")?
+        .context("snapshot task panicked")??;
+    assert_eq!(detail.thread.id, thread.id);
+    assert_eq!(detail.latest_seq, point.latest_seq);
+    assert!(manager.recovery_receipts.lock().contains_key(&thread.id));
+
+    // The next top-level observation flushes the receipt after the prior
+    // snapshot has released its projection boundary.
+    manager.get_thread(&thread.id).await?;
+    let completed = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| {
+            event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].payload["recovered"], true);
+    assert!(!manager.recovery_receipts.lock().contains_key(&thread.id));
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
@@ -3752,6 +3843,144 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
             .iter()
             .all(|event| event.event != "item.delta"),
         "the snapshot itself must carry every delta at or before latest_seq"
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Interrupted,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "pause a snapshot across streamed deltas".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "delta_boundary".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageStarted { index: 0 })
+        .await?;
+
+    let started = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(event) = manager
+                .events_since(&thread.id, None)?
+                .into_iter()
+                .find(|event| {
+                    event.turn_id.as_deref() == Some(&turn.id)
+                        && event.event == "item.started"
+                        && event.payload.pointer("/item/kind").and_then(Value::as_str)
+                            == Some("agent_message")
+                })
+            {
+                break Ok::<_, anyhow::Error>(event);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("message item did not start")??;
+    let item_id = started.item_id.context("started event omitted item id")?;
+
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    manager.set_snapshot_test_hook(hook_tx);
+    let snapshot_manager = manager.clone();
+    let snapshot_thread_id = thread.id.clone();
+    let snapshot_task = tokio::spawn(async move {
+        snapshot_manager
+            .get_thread_detail(&snapshot_thread_id)
+            .await
+    });
+    let point = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+        .await
+        .context("snapshot did not capture its replay cursor")?
+        .context("snapshot test hook closed")?;
+    assert!(point.latest_seq >= started.seq);
+
+    for content in ["A", "B"] {
+        harness
+            .tx_event
+            .send(EngineEvent::MessageDelta {
+                index: 0,
+                content: content.to_string(),
+            })
+            .await?;
+    }
+    sleep(STREAM_DELTA_BATCH_MAX_LATENCY + Duration::from_millis(50)).await;
+    assert!(
+        manager
+            .events_since(&thread.id, Some(point.latest_seq))?
+            .iter()
+            .all(|event| event.event != "item.delta"),
+        "a delta must not publish while the snapshot holds its projection boundary"
+    );
+
+    point
+        .resume
+        .send(())
+        .map_err(|_| anyhow!("snapshot dropped its resume barrier"))?;
+    let detail = snapshot_task.await.context("snapshot task panicked")??;
+    let snapshotted = detail
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .context("snapshot omitted the streaming item")?;
+    assert_eq!(snapshotted.detail.as_deref(), Some(""));
+
+    let delta = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(event) = manager
+                .events_since(&thread.id, Some(detail.latest_seq))?
+                .into_iter()
+                .find(|event| {
+                    event.item_id.as_deref() == Some(&item_id) && event.event == "item.delta"
+                })
+            {
+                break Ok::<_, anyhow::Error>(event);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("batched delta did not publish after snapshot release")??;
+    assert_eq!(
+        delta.payload.get("delta").and_then(Value::as_str),
+        Some("AB")
+    );
+    assert_eq!(
+        manager.store.load_item(&item_id)?.detail.as_deref(),
+        Some("AB")
     );
 
     harness
@@ -4021,6 +4250,774 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
             base_url: None,
         })
         .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Result<()> {
+    use crate::tools::spec::DynamicToolExecutor;
+
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "settle a result after its HTTP future disappears".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "dynamic_detached_settlement".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+
+    const RESULT_SECRET: &str = "detached-dynamic-result-secret";
+    let executor = manager.clone();
+    let executor_thread_id = thread.id.clone();
+    let execution = tokio::spawn(async move {
+        DynamicToolExecutor::execute_dynamic_tool(
+            &executor,
+            Some(executor_thread_id),
+            Some("bench".to_string()),
+            "detached_lookup".to_string(),
+            json!({ "record_id": "record-detached" }),
+        )
+        .await
+    });
+
+    let call = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(call) = manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .pending_dynamic_tool_calls
+                .first()
+                .cloned()
+            {
+                break Ok::<_, anyhow::Error>(call);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("dynamic tool call did not become pending")??;
+
+    // Stall terminal publication, submit the result, and wait until that path
+    // owns the call. Canceling the API future from this point must not cancel
+    // its detached receipt task or wake the model before the receipt is durable.
+    let emit_guard = manager.event_emit.lock().await;
+    let delivery_manager = manager.clone();
+    let delivery_thread_id = thread.id.clone();
+    let delivery_turn_id = turn.id.clone();
+    let delivery_call_id = call.call_id.clone();
+    let delivery = tokio::spawn(async move {
+        delivery_manager
+            .deliver_dynamic_tool_result(
+                &delivery_thread_id,
+                &delivery_turn_id,
+                &delivery_call_id,
+                DynamicToolCallResult {
+                    success: true,
+                    content: vec![DynamicToolCallContent::InputText {
+                        text: RESULT_SECRET.to_string(),
+                    }],
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let settling = manager
+                .pending_dynamic_tools
+                .lock()
+                .get(&call.call_id)
+                .is_some_and(|entry| entry.sender.is_none());
+            if settling {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("result delivery never claimed the pending call")?;
+    assert!(
+        !execution.is_finished(),
+        "the model consumed the result before its terminal receipt could commit"
+    );
+    assert!(
+        !manager
+            .deliver_dynamic_tool_result(
+                &thread.id,
+                &turn.id,
+                &call.call_id,
+                DynamicToolCallResult {
+                    success: false,
+                    content: Vec::new(),
+                },
+            )
+            .await?,
+        "a duplicate result stole a call whose terminal receipt was settling"
+    );
+    delivery.abort();
+    assert!(
+        delivery
+            .await
+            .expect_err("delivery API future must be canceled")
+            .is_cancelled()
+    );
+    assert!(
+        !execution.is_finished(),
+        "canceling the delivery future woke the model without a receipt"
+    );
+
+    drop(emit_guard);
+    let model_result = tokio::time::timeout(Duration::from_secs(2), execution)
+        .await
+        .context("model did not receive the result after terminal publication")?
+        .context("dynamic tool task panicked")??;
+    assert_eq!(model_result.content, RESULT_SECRET);
+
+    let detail = manager.get_thread_detail(&thread.id).await?;
+    assert!(detail.pending_dynamic_tool_calls.is_empty());
+    let terminal = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.event.as_str(),
+                "tool_call.resolved" | "tool_call.timeout" | "tool_call.canceled"
+            ) && event.payload.get("call_id").and_then(Value::as_str) == Some(call.call_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].event, "tool_call.resolved");
+    assert_eq!(terminal[0].payload["success"], true);
+    assert!(
+        !serde_json::to_string(&terminal)?.contains(RESULT_SECRET),
+        "the terminal receipt exposed result content"
+    );
+    assert!(
+        !manager
+            .deliver_dynamic_tool_result(
+                &thread.id,
+                &turn.id,
+                &call.call_id,
+                DynamicToolCallResult {
+                    success: true,
+                    content: Vec::new(),
+                },
+            )
+            .await?,
+        "a duplicate retry settled an already terminal call"
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_tool_result_acceptance_survives_receiver_close_before_append() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let receiver = manager.register_pending_dynamic_tool_for_test(
+        &thread.id,
+        "turn_closed_receiver",
+        "call_closed_receiver",
+    )?;
+    let emit_guard = manager.event_emit.lock().await;
+    let delivery_manager = manager.clone();
+    let delivery_thread_id = thread.id.clone();
+    let delivery = tokio::spawn(async move {
+        delivery_manager
+            .deliver_dynamic_tool_result(
+                &delivery_thread_id,
+                "turn_closed_receiver",
+                "call_closed_receiver",
+                DynamicToolCallResult {
+                    success: true,
+                    content: vec![DynamicToolCallContent::InputText {
+                        text: "closed-receiver-secret".to_string(),
+                    }],
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if manager
+                .pending_dynamic_tools
+                .lock()
+                .get("call_closed_receiver")
+                .is_some_and(|entry| entry.sender.is_none())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("result did not claim the call before append")?;
+    drop(receiver);
+    drop(emit_guard);
+
+    assert!(
+        delivery.await.context("delivery task panicked")??,
+        "durably accepted result was reported as missing after receiver close"
+    );
+    assert!(
+        manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .pending_dynamic_tool_calls
+            .is_empty()
+    );
+    let terminal = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| {
+            event.payload.get("call_id").and_then(Value::as_str) == Some("call_closed_receiver")
+                && matches!(
+                    event.event.as_str(),
+                    "tool_call.resolved" | "tool_call.timeout" | "tool_call.canceled"
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].event, "tool_call.resolved");
+    assert_eq!(terminal[0].payload["result_accepted"], true);
+    assert!(
+        !serde_json::to_string(&terminal)?.contains("closed-receiver-secret"),
+        "closed-receiver acceptance exposed result content"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dynamic_tool_receipt_append_failure_rolls_back_for_retry() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut receiver = manager.register_pending_dynamic_tool_for_test(
+        &thread.id,
+        "turn_retry_after_append_failure",
+        "call_retry_after_append_failure",
+    )?;
+    let claim = match manager.claim_pending_dynamic_tool(
+        &thread.id,
+        "turn_retry_after_append_failure",
+        "call_retry_after_append_failure",
+    ) {
+        PendingDynamicToolClaim::Claimed(claim) => claim,
+        PendingDynamicToolClaim::Settling(_)
+        | PendingDynamicToolClaim::Indeterminate
+        | PendingDynamicToolClaim::Missing => {
+            bail!("failed to claim the append-failure fixture")
+        }
+    };
+
+    // Replace this throwaway thread's event log with a symlink. Runtime store
+    // hardening rejects the append deterministically, exercising settlement
+    // rollback without relying on platform permission behavior.
+    let events_path = manager.store.events_path(&thread.id)?;
+    let backup_path = events_path.with_extension("jsonl.append-failure-backup");
+    std::fs::rename(&events_path, &backup_path)?;
+    std::os::unix::fs::symlink(&backup_path, &events_path)?;
+    let ack = manager.spawn_dynamic_tool_settlement(
+        claim,
+        DynamicToolTerminalOutcome::Resolved(DynamicToolCallResult {
+            success: true,
+            content: vec![DynamicToolCallContent::InputText {
+                text: "discarded-before-retry".to_string(),
+            }],
+        }),
+    );
+    let failed = RuntimeThreadManager::await_dynamic_tool_settlement(ack).await;
+    std::fs::remove_file(&events_path)?;
+    std::fs::rename(&backup_path, &events_path)?;
+    assert!(
+        failed.is_err(),
+        "symlinked event append unexpectedly succeeded"
+    );
+
+    {
+        let pending = manager.pending_dynamic_tools.lock();
+        let entry = pending
+            .get("call_retry_after_append_failure")
+            .context("failed receipt append stranded or removed the pending call")?;
+        assert!(
+            entry
+                .sender
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed()),
+            "failed receipt append left a Settling entry without its sender"
+        );
+    }
+    assert_eq!(
+        manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .pending_dynamic_tool_calls
+            .len(),
+        1,
+        "rollback removed the snapshot-authoritative pending request"
+    );
+
+    assert!(
+        manager
+            .deliver_dynamic_tool_result(
+                &thread.id,
+                "turn_retry_after_append_failure",
+                "call_retry_after_append_failure",
+                DynamicToolCallResult {
+                    success: true,
+                    content: vec![DynamicToolCallContent::InputText {
+                        text: "retry-result".to_string(),
+                    }],
+                },
+            )
+            .await?,
+        "retry did not settle the restored call"
+    );
+    let delivered = tokio::time::timeout(Duration::from_secs(2), &mut receiver)
+        .await
+        .context("restored receiver was not woken by retry")??;
+    assert_eq!(
+        delivered.content,
+        vec![DynamicToolCallContent::InputText {
+            text: "retry-result".to_string(),
+        }]
+    );
+    let resolved = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| {
+            event.event == "tool_call.resolved"
+                && event.payload.get("call_id").and_then(Value::as_str)
+                    == Some("call_retry_after_append_failure")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(resolved.len(), 1);
+    assert!(
+        !serde_json::to_string(&resolved)?.contains("retry-result"),
+        "retried terminal receipt exposed result content"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_tool_post_write_failures_rollback_without_duplicate_receipts() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+
+    for (index, fault) in [
+        EventAppendTestFault::AfterFlush,
+        EventAppendTestFault::AfterSync,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let turn_id = format!("turn_post_write_{index}");
+        let call_id = format!("call_post_write_{index}");
+        let result_text = format!("post-write-result-{index}");
+        let mut receiver =
+            manager.register_pending_dynamic_tool_for_test(&thread.id, &turn_id, &call_id)?;
+        let fault_guard = EventAppendFaultGuard::arm(&thread.id, fault);
+        let error = manager
+            .deliver_dynamic_tool_result(
+                &thread.id,
+                &turn_id,
+                &call_id,
+                DynamicToolCallResult {
+                    success: true,
+                    content: vec![DynamicToolCallContent::InputText {
+                        text: result_text.clone(),
+                    }],
+                },
+            )
+            .await
+            .expect_err("injected post-write failure unexpectedly settled");
+        drop(fault_guard);
+        assert!(
+            error.to_string().contains("rolled back"),
+            "post-write failure was not classified retry-safe: {error}"
+        );
+
+        let failed_snapshot = manager.get_thread_detail(&thread.id).await?;
+        assert!(
+            failed_snapshot
+                .pending_dynamic_tool_calls
+                .iter()
+                .any(|call| call.call_id == call_id),
+            "rolled-back call disappeared from the canonical snapshot"
+        );
+        assert!(
+            manager
+                .events_since(&thread.id, Some(failed_snapshot.latest_seq))?
+                .is_empty(),
+            "failed append left a replay-visible terminal suffix"
+        );
+        assert!(
+            manager.events_since(&thread.id, None)?.iter().all(|event| {
+                event.payload.get("call_id").and_then(Value::as_str) != Some(call_id.as_str())
+            }),
+            "failed append left a visible terminal record before retry"
+        );
+
+        assert!(
+            manager
+                .deliver_dynamic_tool_result(
+                    &thread.id,
+                    &turn_id,
+                    &call_id,
+                    DynamicToolCallResult {
+                        success: true,
+                        content: vec![DynamicToolCallContent::InputText {
+                            text: result_text.clone(),
+                        }],
+                    },
+                )
+                .await?,
+            "retry did not durably accept the rolled-back result"
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(2), &mut receiver)
+            .await
+            .context("retried result did not reach its model receiver")??;
+        assert_eq!(
+            delivered.content,
+            vec![DynamicToolCallContent::InputText {
+                text: result_text.clone(),
+            }]
+        );
+
+        let replay = manager.events_since(&thread.id, Some(failed_snapshot.latest_seq))?;
+        let terminal = replay
+            .iter()
+            .filter(|event| {
+                event.event == "tool_call.resolved"
+                    && event.payload.get("call_id").and_then(Value::as_str)
+                        == Some(call_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal.len(), 1);
+        assert!(terminal[0].seq > failed_snapshot.latest_seq);
+        assert_eq!(terminal[0].payload["result_accepted"], true);
+        assert!(
+            !serde_json::to_string(&terminal)?.contains(&result_text),
+            "retried terminal receipt exposed result content"
+        );
+        let settled_snapshot = manager.get_thread_detail(&thread.id).await?;
+        assert!(
+            settled_snapshot
+                .pending_dynamic_tool_calls
+                .iter()
+                .all(|call| call.call_id != call_id)
+        );
+        assert!(settled_snapshot.latest_seq >= terminal[0].seq);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_recovers_terminal_turn_after_dynamic_receipt_append_failure() -> Result<()> {
+    let data_dir = test_runtime_dir();
+    let manager = test_manager(data_dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let turn_id = "turn_terminal_recovery";
+    let call_id = "call_terminal_recovery";
+    let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+    turn.ended_at = Some(Utc::now());
+    turn.duration_ms = Some(1);
+    manager.store.save_turn(&turn)?;
+    {
+        let _thread_mutation = manager.store.thread_mutation.lock();
+        let mut persisted_thread = manager.store.load_thread(&thread.id)?;
+        persisted_thread.latest_turn_id = Some(turn_id.to_string());
+        manager.store.save_thread(&persisted_thread)?;
+    }
+    let params = DynamicToolCallParams {
+        thread_id: thread.id.clone(),
+        turn_id: turn_id.to_string(),
+        call_id: call_id.to_string(),
+        namespace: Some("recovery".to_string()),
+        tool: "recover_lookup".to_string(),
+        arguments: json!({ "record": "recovery-only" }),
+    };
+    manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(turn_id),
+            "tool_call.requested",
+            json!(&params),
+        )
+        .await?;
+    let receiver = manager.register_pending_dynamic_tool(params)?;
+
+    let fault_guard = EventAppendFaultGuard::arm(&thread.id, EventAppendTestFault::AfterSync);
+    let error = manager
+        .deliver_dynamic_tool_result(
+            &thread.id,
+            turn_id,
+            call_id,
+            DynamicToolCallResult {
+                success: true,
+                content: vec![DynamicToolCallContent::InputText {
+                    text: "never-committed-result".to_string(),
+                }],
+            },
+        )
+        .await
+        .expect_err("injected terminal receipt append unexpectedly succeeded");
+    drop(fault_guard);
+    assert!(error.to_string().contains("rolled back"));
+    assert!(manager.events_since(&thread.id, None)?.iter().all(|event| {
+        event.event != "turn.completed"
+            && !matches!(
+                event.event.as_str(),
+                "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
+            )
+    }));
+    drop(receiver);
+    drop(manager);
+
+    let recovered = test_manager(data_dir.clone())?;
+    // Opening is synchronous; the first async observation flushes queued
+    // recovery receipts in terminal-call-before-turn order.
+    let recovered_turn = recovered.get_thread(&thread.id).await?;
+    assert_eq!(recovered_turn.latest_turn_id.as_deref(), Some(turn_id));
+    let events = recovered.events_since(&thread.id, None)?;
+    let canceled = events
+        .iter()
+        .filter(|event| {
+            event.event == "tool_call.canceled"
+                && event.payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+        })
+        .collect::<Vec<_>>();
+    let completed = events
+        .iter()
+        .filter(|event| {
+            event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(canceled[0].payload["reason"], "process_restart");
+    assert_eq!(canceled[0].payload["recovered"], true);
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].payload["recovered"], true);
+    assert!(canceled[0].seq < completed[0].seq);
+    assert_eq!(
+        completed[0]
+            .payload
+            .pointer("/turn/status")
+            .and_then(Value::as_str),
+        Some("completed")
+    );
+
+    // Re-observation and a second manager restart both remain idempotent.
+    recovered.get_thread(&thread.id).await?;
+    assert_eq!(
+        recovered
+            .events_since(&thread.id, None)?
+            .iter()
+            .filter(|event| {
+                event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+            })
+            .count(),
+        1
+    );
+    drop(recovered);
+    let reopened = test_manager(data_dir)?;
+    reopened.get_thread(&thread.id).await?;
+    let reopened_events = reopened.events_since(&thread.id, None)?;
+    assert_eq!(
+        reopened_events
+            .iter()
+            .filter(|event| {
+                event.event == "tool_call.canceled"
+                    && event.payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        reopened_events
+            .iter()
+            .filter(|event| {
+                event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+            })
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn consecutive_dynamic_receipt_failures_queue_in_process_recovery() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let turn_id = "turn_consecutive_receipt_failures";
+    let call_id = "call_consecutive_receipt_failures";
+    let turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::InProgress);
+    manager.store.save_turn(&turn)?;
+    {
+        let _thread_mutation = manager.store.thread_mutation.lock();
+        let mut persisted_thread = manager.store.load_thread(&thread.id)?;
+        persisted_thread.latest_turn_id = Some(turn_id.to_string());
+        manager.store.save_thread(&persisted_thread)?;
+    }
+    let params = DynamicToolCallParams {
+        thread_id: thread.id.clone(),
+        turn_id: turn_id.to_string(),
+        call_id: call_id.to_string(),
+        namespace: Some("recovery".to_string()),
+        tool: "retry_lookup".to_string(),
+        arguments: json!({ "record": "in-process" }),
+    };
+    let requested = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(turn_id),
+            "tool_call.requested",
+            json!(&params),
+        )
+        .await?;
+    let mut receiver = manager.register_pending_dynamic_tool(params)?;
+
+    // The submitted result and the monitor's terminal cancellation both fail
+    // after fsync, with each JSONL line transactionally removed. The monitor
+    // must retain an in-process recovery path instead of evicting the engine
+    // with an Awaiting call and no future owner.
+    let fault_guard =
+        EventAppendFaultGuard::arm_repeated(&thread.id, EventAppendTestFault::AfterSync, 2);
+    let result_error = manager
+        .deliver_dynamic_tool_result(
+            &thread.id,
+            turn_id,
+            call_id,
+            DynamicToolCallResult {
+                success: true,
+                content: vec![DynamicToolCallContent::InputText {
+                    text: "rolled-back-result".to_string(),
+                }],
+            },
+        )
+        .await
+        .expect_err("first injected receipt failure unexpectedly succeeded");
+    assert!(result_error.to_string().contains("rolled back"));
+    manager
+        .settle_claimed_turn_failure(&thread.id, turn_id, "forced monitor failure")
+        .await;
+    drop(fault_guard);
+
+    assert!(
+        manager
+            .recovery_receipts
+            .lock()
+            .get(&thread.id)
+            .is_some_and(|receipts| receipts.iter().any(|receipt| receipt.turn.id == turn_id)),
+        "second retry-safe failure did not queue in-process recovery"
+    );
+    assert_eq!(manager.pending_dynamic_tools_count(), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut receiver)
+            .await
+            .is_err(),
+        "failed cancellation unexpectedly closed the model receiver"
+    );
+    assert!(manager.events_since(&thread.id, None)?.iter().all(|event| {
+        event.event != "turn.completed"
+            && !matches!(
+                event.event.as_str(),
+                "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
+            )
+    }));
+
+    // The next async observation owns the queued retry. It durably cancels
+    // the call before publishing exactly one recovered turn completion.
+    manager.get_thread(&thread.id).await?;
+    let closed = tokio::time::timeout(Duration::from_secs(2), &mut receiver)
+        .await
+        .context("recovery did not wake the model receiver")?;
+    assert!(closed.is_err(), "terminal recovery delivered a tool result");
+    let events = manager.events_since(&thread.id, None)?;
+    let canceled = events
+        .iter()
+        .filter(|event| {
+            event.event == "tool_call.canceled"
+                && event.payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+        })
+        .collect::<Vec<_>>();
+    let completed = events
+        .iter()
+        .filter(|event| {
+            event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(canceled[0].payload["reason"], "turn_terminal");
+    assert_eq!(canceled[0].payload["terminal"], true);
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].payload["recovered"], true);
+    assert!(canceled[0].seq < completed[0].seq);
+    assert!(
+        canceled[0].seq > requested.seq.saturating_add(1),
+        "rolled-back append sequence values were unexpectedly reused"
+    );
+    assert_eq!(manager.pending_dynamic_tools_count(), 0);
+    assert!(!manager.recovery_receipts.lock().contains_key(&thread.id));
+
+    manager.get_thread(&thread.id).await?;
+    let replay = manager.events_since(&thread.id, None)?;
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|event| {
+                event.event == "tool_call.canceled"
+                    && event.payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|event| {
+                event.event == "turn.completed" && event.turn_id.as_deref() == Some(turn_id)
+            })
+            .count(),
+        1
+    );
     Ok(())
 }
 
