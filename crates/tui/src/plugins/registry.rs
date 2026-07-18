@@ -490,12 +490,42 @@ fn load_state_unlocked(path: &Path) -> Result<PluginStateFile, String> {
 }
 
 fn save_state(path: &Path, state: &PluginStateFile) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        harden_plugin_state_directory(parent)?;
-    }
-    codewhale_config::persistence::atomic_write_json(path, state)
-        .map_err(|e| format!("failed to atomically persist {}: {e}", path.display()))?;
-    harden_plugin_state_file(path)
+    save_state_with_hardener(path, state, harden_plugin_state_file)
+}
+
+fn save_state_with_hardener(
+    path: &Path,
+    state: &PluginStateFile,
+    harden_temporary: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "Plugin state path must have a private parent directory".to_string())?;
+    harden_plugin_state_directory(parent)?;
+
+    let mut body = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("failed to serialize {}: {error}", path.display()))?;
+    body.push('\n');
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("failed to create private plugin state temp file: {error}"))?;
+    temporary
+        .write_all(body.as_bytes())
+        .map_err(|error| format!("failed to write private plugin state temp file: {error}"))?;
+    temporary
+        .flush()
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| format!("failed to flush private plugin state temp file: {error}"))?;
+
+    // Restrict the exact temporary object before its atomic rename publishes
+    // it under the stable state path. Post-publish hardening leaves a Windows
+    // race in which another local principal can open the inherited DACL.
+    harden_temporary(temporary.path())?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .map_err(|error| format!("failed to atomically persist {}: {error}", path.display()))?;
+    Ok(())
 }
 
 fn state_lock_path(path: &Path) -> PathBuf {
@@ -637,7 +667,18 @@ fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
     set_windows_owner_only_acl(path)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        format!(
+            "failed to restrict plugin state file permissions for {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn harden_plugin_state_file(_path: &Path) -> Result<(), String> {
     Ok(())
 }
@@ -1268,7 +1309,8 @@ fn set_windows_owner_only_acl_with_mask(path: &Path, access_mask: u32) -> Result
     use windows::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
         GetLengthSid, GetTokenInformation, InitializeAcl, OBJECT_INHERIT_ACE,
-        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+        TokenUser,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -1283,7 +1325,7 @@ fn set_windows_owner_only_acl_with_mask(path: &Path, access_mask: u32) -> Result
         );
     }
     let target = OpenOptions::new()
-        .access_mode(0x0002_0000 | 0x0004_0000) // READ_CONTROL | WRITE_DAC
+        .access_mode(0x0002_0000 | 0x0004_0000 | 0x0008_0000) // READ_CONTROL | WRITE_DAC | WRITE_OWNER
         .share_mode(0x0000_0001) // FILE_SHARE_READ
         .custom_flags(0x0220_0000) // BACKUP_SEMANTICS | OPEN_REPARSE_POINT
         .open(path)
@@ -1357,14 +1399,17 @@ fn set_windows_owner_only_acl_with_mask(path: &Path, access_mask: u32) -> Result
         .map_err(|error| format!("failed to grant the current Windows user access: {error}"))?;
 
         // SAFETY: `target` retains the exact validated non-reparse object and
-        // the ACL/SID buffers remain alive through the call. A protected DACL
-        // prevents inherited broad access.
+        // the ACL/SID buffers remain alive through the call. Set the owner as
+        // well as a protected DACL: otherwise a different inherited owner can
+        // use its implicit WRITE_DAC authority to undo the owner-only ACL.
         let status = unsafe {
             SetSecurityInfo(
                 HANDLE(target.as_raw_handle()),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                Some(sid),
                 None,
                 Some(acl),
                 None,
@@ -1477,6 +1522,46 @@ pub fn verify_plugin_state_authority(authority: &PluginAuthority) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
+mod state_publication_tests {
+    use super::{PluginStateFile, save_state_with_hardener};
+
+    #[test]
+    fn failed_temp_hardening_never_publishes_new_plugin_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        std::fs::write(&state_path, b"old-authoritative-state").unwrap();
+
+        let error =
+            save_state_with_hardener(&state_path, &PluginStateFile::default(), |temporary_path| {
+                assert!(temporary_path.is_file());
+                assert!(
+                    std::fs::read_to_string(temporary_path)
+                        .unwrap()
+                        .contains("\"schema_version\": 1")
+                );
+                assert_eq!(
+                    std::fs::read(&state_path).unwrap(),
+                    b"old-authoritative-state",
+                    "the stable path must still hold the old state while hardening runs"
+                );
+                Err("injected pre-publication ACL failure".to_string())
+            })
+            .unwrap_err();
+
+        assert!(error.contains("injected pre-publication ACL failure"));
+        assert_eq!(
+            std::fs::read(&state_path).unwrap(),
+            b"old-authoritative-state"
+        );
+        let entries = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, [std::ffi::OsString::from("state.json")]);
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_acl_tests {
     use super::{
@@ -1487,9 +1572,10 @@ mod windows_acl_tests {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE,
-        DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetFileSecurityW,
-        GetSecurityDescriptorControl, GetSecurityDescriptorDacl, OBJECT_INHERIT_ACE,
-        PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetFileSecurityW,
+        GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SE_DACL_PROTECTED,
     };
     use windows::core::{BOOL, PCWSTR};
 
@@ -1565,7 +1651,7 @@ mod windows_acl_tests {
         let _ = unsafe {
             GetFileSecurityW(
                 PCWSTR(wide.as_ptr()),
-                DACL_SECURITY_INFORMATION.0,
+                (DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION).0,
                 None,
                 0,
                 &mut required,
@@ -1584,7 +1670,7 @@ mod windows_acl_tests {
             unsafe {
                 GetFileSecurityW(
                     PCWSTR(wide.as_ptr()),
-                    DACL_SECURITY_INFORMATION.0,
+                    (DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION).0,
                     Some(descriptor),
                     required,
                     &mut required,
@@ -1621,6 +1707,24 @@ mod windows_acl_tests {
         let ace = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
         assert_eq!(ace.Header.AceType, 0, "owner entry must be an allow ACE");
         assert_eq!(ace.Mask, 0x001f_01ff, "owner entry must grant full access");
+        let ace_sid = PSID(std::ptr::addr_of!(ace.SidStart).cast_mut().cast());
+        let mut owner = PSID::default();
+        let mut owner_defaulted = BOOL::default();
+        // SAFETY: `descriptor` contains the live security descriptor and both
+        // output pointers reference initialized storage.
+        unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) }
+            .unwrap();
+        assert!(
+            !owner.0.is_null(),
+            "runtime object must have an explicit owner"
+        );
+        assert!(
+            !owner_defaulted.as_bool(),
+            "runtime object owner must be explicitly assigned"
+        );
+        // SAFETY: both SIDs are owned by the live descriptor/ACL buffers.
+        unsafe { EqualSid(owner, ace_sid) }
+            .expect("runtime object owner must equal its sole current-user ACE");
         let inheritance = (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE).0 as u8;
         assert_eq!(ace.Header.AceFlags & inheritance, inheritance);
 
