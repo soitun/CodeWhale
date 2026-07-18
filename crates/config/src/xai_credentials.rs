@@ -907,6 +907,10 @@ impl XaiOAuthCredentialStore {
 
             let mut options = fs::OpenOptions::new();
             options
+                // `access_mode` supplies the exact Win32 access mask below,
+                // while Rust still requires the portable write intent to be
+                // set before it permits `create_new`.
+                .write(true)
                 .access_mode(
                     FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER | DELETE,
                 )
