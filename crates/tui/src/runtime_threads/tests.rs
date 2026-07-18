@@ -1979,6 +1979,24 @@ fn store_open_rejects_symlinked_state_file() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn event_append_rollback_rejects_a_swapped_symlink_target() -> Result<()> {
+    let dir = test_runtime_dir();
+    std::fs::create_dir_all(&dir)?;
+    let outside = dir.join("outside.jsonl");
+    let events_path = dir.join("events.jsonl");
+    std::fs::write(&outside, b"must-remain-intact\n")?;
+    std::os::unix::fs::symlink(&outside, &events_path)?;
+
+    let error = rollback_failed_event_append(&events_path, 0)
+        .expect_err("rollback followed a swapped symlink target");
+    assert!(format!("{error:#}").contains("must not be a symlink"));
+    assert_eq!(std::fs::read(&outside)?, b"must-remain-intact\n");
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 #[test]
 fn store_open_rejects_root_traversal() {
     let dir = test_runtime_dir();

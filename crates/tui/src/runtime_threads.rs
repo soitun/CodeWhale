@@ -955,19 +955,7 @@ impl RuntimeThreadStore {
             // with ordinary write authority only on the failure path so the
             // success path remains an atomic append on every platform.
             drop(file);
-            let rollback_result = (|| -> Result<()> {
-                reject_symlinked_store_file(&path)?;
-                let rollback_file = OpenOptions::new()
-                    .write(true)
-                    .open(&path)
-                    .with_context(|| format!("Failed to reopen {} for rollback", path.display()))?;
-                rollback_file
-                    .set_len(original_len)
-                    .with_context(|| format!("Failed to roll back {}", path.display()))?;
-                rollback_file
-                    .sync_all()
-                    .with_context(|| format!("Failed to sync rollback for {}", path.display()))
-            })();
+            let rollback_result = rollback_failed_event_append(&path, original_len);
             let error = match rollback_result {
                 Ok(()) => RuntimeEventAppendError {
                     disposition: EventAppendFailureDisposition::RolledBack,
@@ -6971,6 +6959,20 @@ fn reject_symlinked_store_file(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn rollback_failed_event_append(path: &Path, original_len: u64) -> Result<()> {
+    reject_symlinked_store_file(path)?;
+    let rollback_file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("Failed to reopen {} for rollback", path.display()))?;
+    rollback_file
+        .set_len(original_len)
+        .with_context(|| format!("Failed to roll back {}", path.display()))?;
+    rollback_file
+        .sync_all()
+        .with_context(|| format!("Failed to sync rollback for {}", path.display()))
 }
 
 fn reject_symlinked_store_dir(path: &Path) -> Result<()> {
