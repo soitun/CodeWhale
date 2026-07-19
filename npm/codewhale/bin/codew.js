@@ -2,7 +2,7 @@
 
 const { run } = require("../scripts/run");
 
-run("codew").catch((error) => {
-  console.error("Failed to start codew:", error.message);
+run("codewhale").catch((error) => {
+  console.error("Failed to start codewhale:", error.message);
   process.exit(1);
 });

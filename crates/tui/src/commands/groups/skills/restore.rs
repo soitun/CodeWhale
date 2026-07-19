@@ -3,8 +3,8 @@
 //! `/restore` (no arg) lists the 20 most recent snapshots so the user can
 //! see what's available. `/restore list [N]` lists more snapshots, capped
 //! at 100. `/restore <N>` restores the *N*th-most-recent snapshot, where
-//! `N=1` is the newest. Without trusted/full access we refuse to mutate files unless
-//! the user has explicitly trusted the workspace (`/trust on` or Full Access) —
+//! `N=1` is the newest. In non-YOLO mode we refuse to mutate files unless
+//! the user has explicitly trusted the workspace (`/trust on` or YOLO) —
 //! the user can always view the list, just not one-shot revert without a
 //! safety net.
 
@@ -83,14 +83,14 @@ fn restore(app: &mut App, arg: Option<&str>) -> CommandResult {
         ));
     }
 
-    // Sessions without trusted/full access get a confirmation gate. We don't have a true
+    // Non-YOLO sessions get a confirmation gate. We don't have a true
     // modal-confirmation path inside slash commands today, so the gate
-    // is "require trust mode" — `/trust on` or Full Access. Users in plain
+    // is "require trust mode" — `/trust on` or YOLO. Users in plain
     // Agent mode get a clear message explaining how to proceed.
     if !(app.yolo || app.trust_mode) {
         return CommandResult::message(format!(
             "Refusing to restore snapshot #{n} ('{}') outside trusted mode.\n\
-             Run `/trust on` or select Full Access with Shift+Tab, then re-run `/restore {n}`.",
+             Run `/trust on` or `/mode yolo` first, then re-run `/restore {n}`.",
             snapshots[n - 1].label,
         ));
     }
@@ -197,6 +197,7 @@ mod tests {
     use crate::config::Config;
     use crate::test_support::lock_test_env;
     use crate::tui::app::TuiOptions;
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     fn make_app(tmp: &TempDir, yolo: bool) -> App {
@@ -230,7 +231,7 @@ mod tests {
     struct ScopedHome {
         prev: Option<std::ffi::OsString>,
         _home: TempDir,
-        _guard: crate::test_support::TestEnvLock,
+        _guard: MutexGuard<'static, ()>,
     }
     impl Drop for ScopedHome {
         fn drop(&mut self) {

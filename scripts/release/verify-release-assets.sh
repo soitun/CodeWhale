@@ -16,8 +16,7 @@ Checks:
   - remote tag vVERSION resolves to the same commit SHA
   - GitHub Release vVERSION exists
   - a successful Release workflow run used that SHA
-  - npm/codewhale release:check sees the fresh binary/archive/installer matrix
-    and both required checksum manifests
+  - npm/codewhale release:check sees fresh npm-facing assets and checksum rows
 
 Set GH_BIN=/path/to/gh to choose a GitHub CLI binary. Set
 CODEWHALE_GITHUB_REPO=owner/repo or CODEWHALE_RELEASE_REMOTE=remote to override

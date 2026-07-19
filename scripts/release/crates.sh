@@ -14,7 +14,6 @@ release_crates=(
   codewhale-hooks
   codewhale-tools
   codewhale-config
-  codewhale-lane
   codewhale-agent
   codewhale-tui
   codewhale-core

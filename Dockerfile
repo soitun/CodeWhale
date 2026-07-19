@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
-# Codewhale multi-arch Docker image (#501)
+# CodeWhale multi-arch Docker image (#501)
 #
 # Build:  docker buildx build --platform linux/amd64,linux/arm64 -t codewhale:latest .
 # Run:    docker run --rm -it -e DEEPSEEK_API_KEY -v codewhale-home:/home/codewhale/.codewhale codewhale
 #
-# The image ships the canonical binaries (`codewhale`, `codew`, and
-# `codewhale-tui`) in a minimal runtime layer.
+# The image ships the canonical binaries (`codewhale`, `codewhale-tui`) plus
+# the legacy `deepseek` / `deepseek-tui` shims in a minimal runtime layer.
 #
 # API keys MUST be passed at runtime (never baked into the image):
 #   docker run --rm -it -e DEEPSEEK_API_KEY codewhale
@@ -63,7 +63,6 @@ RUN --mount=type=cache,id=codewhale-target-${TARGETARCH},target=/build/target,sh
       -p codewhale-cli -p codewhale-tui \
     && mkdir -p /out \
     && cp target/$(cat /rust-target)/release/codewhale /out/ \
-    && cp target/$(cat /rust-target)/release/codew /out/ \
     && cp target/$(cat /rust-target)/release/codewhale-tui /out/
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────
@@ -74,18 +73,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user with explicit UID/GID for filesystem ownership clarity. Keep
-# the legacy state directory for read-fallback migration; v0.9.0 no longer
-# ships legacy deepseek command shims.
+# Non-root user with explicit UID/GID for filesystem ownership clarity.
 RUN groupadd --gid 1000 codewhale \
     && useradd --create-home --shell /bin/bash --uid 1000 --gid 1000 codewhale \
     && install -d -m 0700 -o codewhale -g codewhale /home/codewhale/.codewhale \
-    && install -d -m 0700 -o codewhale -g codewhale /home/codewhale/.deepseek
+    && install -d -m 0700 -o codewhale -g codewhale /home/codewhale/.deepseek \
+    # Legacy entrypoints from the deepseek-tui era; the real binaries are
+    # copied in below (symlinks may dangle until then).
+    && ln -s /usr/local/bin/codewhale /usr/local/bin/deepseek \
+    && ln -s /usr/local/bin/codewhale-tui /usr/local/bin/deepseek-tui
 USER codewhale
 WORKDIR /home/codewhale
 
 COPY --from=builder --chown=codewhale:codewhale /out/codewhale /usr/local/bin/codewhale
-COPY --from=builder --chown=codewhale:codewhale /out/codew /usr/local/bin/codew
 COPY --from=builder --chown=codewhale:codewhale /out/codewhale-tui /usr/local/bin/codewhale-tui
 
 # The dispatcher expects to find its companion binary next to it.

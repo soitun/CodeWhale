@@ -40,10 +40,7 @@ pub fn provision_worktree(spec: &WorktreeProvision) -> Result<ProvisionedWorktre
             .with_context(|| format!("create worktree parent {}", parent.display()))?;
     }
     let base = spec.base_ref.as_deref().unwrap_or("HEAD");
-    // Capture git output instead of inheriting the caller's terminal. Runtime
-    // callers include the raw-mode TUI launch screen, where even one inherited
-    // progress/error line corrupts the alternate-screen buffer.
-    let output = Command::new("git")
+    let status = Command::new("git")
         .current_dir(&spec.repo_root)
         .args([
             "worktree",
@@ -53,16 +50,13 @@ pub fn provision_worktree(spec: &WorktreeProvision) -> Result<ProvisionedWorktre
             &spec.path.to_string_lossy(),
             base,
         ])
-        .output()
+        .status()
         .context("git worktree add")?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !status.success() {
         bail!(
-            "git worktree add failed for branch {} at {}{}{}",
+            "git worktree add failed for branch {} at {}",
             spec.branch,
-            spec.path.display(),
-            if detail.is_empty() { "" } else { ": " },
-            detail
+            spec.path.display()
         );
     }
     Ok(ProvisionedWorktree {

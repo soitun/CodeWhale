@@ -65,7 +65,6 @@ fn allow_all_policy() -> NetworkPolicy {
         allow: Vec::new(),
         deny: Vec::new(),
         proxy: Vec::new(),
-        proxy_fake_ip_cidrs: Vec::new(),
         audit: false,
     }
 }
@@ -76,7 +75,6 @@ fn deny_all_policy() -> NetworkPolicy {
         allow: Vec::new(),
         deny: Vec::new(),
         proxy: Vec::new(),
-        proxy_fake_ip_cidrs: Vec::new(),
         audit: false,
     }
 }
@@ -87,7 +85,6 @@ fn prompt_all_policy() -> NetworkPolicy {
         allow: Vec::new(),
         deny: Vec::new(),
         proxy: Vec::new(),
-        proxy_fake_ip_cidrs: Vec::new(),
         audit: false,
     }
 }

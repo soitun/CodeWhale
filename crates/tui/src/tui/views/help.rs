@@ -1,13 +1,10 @@
-//! Searchable help overlay for `Alt+?`, `F1`, and `Ctrl+/`.
+//! Searchable help overlay for `?`, `F1`, and `Ctrl+/`.
 //!
 //! Renders two stacked sections — *Slash commands* and *Keybindings* — with
 //! a live substring filter applied as the user types in the search box. The
-//! entry point decides which section comes first: `/help` and context-menu
-//! Help lead with commands, while keyboard shortcuts lead with the key
-//! reference that the footer promises. The command list is sourced from
-//! [`crate::commands::command_infos()`] and the keybinding list from
-//! [`crate::tui::keybindings::KEYBINDINGS`] so neither can drift from the
-//! wired-up handlers.
+//! command list is sourced from [`crate::commands::command_infos()`] and the
+//! keybinding list from [`crate::tui::keybindings::KEYBINDINGS`] so neither
+//! can drift from the wired-up handlers.
 //!
 //! Keys: any printable character extends the filter, `Backspace` (or `Ctrl+H`)
 //! shrinks it,
@@ -16,15 +13,14 @@
 //! at the call-site (`tui::ui`) also toggles the overlay closed.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget},
+    widgets::{Block, Borders, Padding, Paragraph, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -33,8 +29,8 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::keybindings::KEYBINDINGS;
 use crate::tui::views::{
-    ActionHint, ModalKind, ModalView, ViewAction, render_modal_footer, render_panel_scroll_rail,
-    render_underwater_surface,
+    ActionHint, ModalKind, ModalView, ViewAction, centered_modal_area, render_modal_footer,
+    render_modal_surface,
 };
 
 /// Two top-level sections rendered in the overlay.
@@ -51,24 +47,14 @@ impl HelpSection {
             Self::Keybinding => tr(locale, MessageId::HelpKeybindings),
         }
     }
-}
 
-/// Which reference surface owns the first visible section when Help opens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HelpOrdering {
-    /// `/help` and context-menu Help are command discovery surfaces.
-    CommandsFirst,
-    /// F1 and its Ctrl+/ and Alt+? fallbacks open the keyboard reference.
-    KeybindingsFirst,
-}
-
-impl HelpOrdering {
-    fn section_rank(self, section: HelpSection) -> u8 {
-        match (self, section) {
-            (Self::CommandsFirst, HelpSection::Command)
-            | (Self::KeybindingsFirst, HelpSection::Keybinding) => 0,
-            (Self::CommandsFirst, HelpSection::Keybinding)
-            | (Self::KeybindingsFirst, HelpSection::Command) => 1,
+    /// Sort key — commands before keybindings keeps the most-used surface up
+    /// top so an unfiltered overlay opens with the user's likely target in
+    /// view without scrolling.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Command => 0,
+            Self::Keybinding => 1,
         }
     }
 }
@@ -95,13 +81,11 @@ enum HelpRenderRow {
 
 pub struct HelpView {
     locale: Locale,
-    ordering: HelpOrdering,
     entries: Vec<HelpEntry>,
     /// Indices into `entries`, in display order, after filtering.
     filtered: Vec<usize>,
     query: String,
     selected: usize,
-    row_hitboxes: RefCell<Vec<(Rect, usize)>>,
 }
 
 impl Default for HelpView {
@@ -116,24 +100,13 @@ impl HelpView {
     }
 
     pub fn new_for_locale(locale: Locale) -> Self {
-        Self::new_with_ordering(locale, HelpOrdering::CommandsFirst)
-    }
-
-    /// Open Help as the keyboard reference promised by shell shortcut hints.
-    pub fn new_for_shortcuts(locale: Locale) -> Self {
-        Self::new_with_ordering(locale, HelpOrdering::KeybindingsFirst)
-    }
-
-    fn new_with_ordering(locale: Locale, ordering: HelpOrdering) -> Self {
         let entries = build_entries(locale);
         let mut view = Self {
             locale,
-            ordering,
             entries,
             filtered: Vec::new(),
             query: String::new(),
             selected: 0,
-            row_hitboxes: RefCell::new(Vec::new()),
         };
         view.refilter();
         view
@@ -164,11 +137,7 @@ impl HelpView {
 
         filtered.sort_by_key(|idx| {
             let entry = &self.entries[*idx];
-            (
-                self.ordering.section_rank(entry.section),
-                entry.sub_rank,
-                entry.label.clone(),
-            )
+            (entry.section.rank(), entry.sub_rank, entry.label.clone())
         });
         self.filtered = filtered;
         if self.selected >= self.filtered.len() {
@@ -273,9 +242,7 @@ fn build_entries(locale: Locale) -> Vec<HelpEntry> {
     }
 
     for binding in KEYBINDINGS {
-        // macOS renders Alt chords with the Option glyph (`⌥V`), never
-        // `Alt`/`Cmd` (TUI-DOG-002 acceptance).
-        let label = crate::tui::shell_key_routing::display_chord(binding.chord).into_owned();
+        let label = binding.chord.to_string();
         let description = format!(
             "[{}] {}",
             binding.section.label(locale),
@@ -296,6 +263,14 @@ fn build_entries(locale: Locale) -> Vec<HelpEntry> {
     }
 
     entries
+}
+
+fn modal_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette::BORDER_COLOR))
+        .style(Style::default().bg(palette::WHALE_BG))
+        .padding(Padding::uniform(1))
 }
 
 fn truncate_to_width(text: &str, max_width: usize) -> String {
@@ -333,14 +308,6 @@ impl ModalView for HelpView {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.move_selection(-1),
             MouseEventKind::ScrollDown => self.move_selection(1),
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(slot) = self.row_hitboxes.borrow().iter().find_map(|(rect, slot)| {
-                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                        .then_some(*slot)
-                }) {
-                    self.selected = slot;
-                }
-            }
             _ => {}
         }
         ViewAction::None
@@ -413,16 +380,23 @@ impl ModalView for HelpView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.row_hitboxes.borrow_mut().clear();
-        let inner = render_underwater_surface(
-            area,
-            buf,
+        let popup_area = centered_modal_area(area, 90, 28, 44, 8);
+
+        render_modal_surface(area, popup_area, buf);
+
+        let block = modal_block().title(Line::from(vec![Span::styled(
             format!(
-                "{} — {}",
+                " {} — {} ",
                 self.tr(MessageId::HelpTitle),
                 self.tr(MessageId::HelpSubtitle)
             ),
-        );
+            Style::default()
+                .fg(palette::WHALE_ACCENT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )]));
+
+        let inner = block.inner(popup_area);
+        block.render(popup_area, buf);
 
         // The action footer wraps inside the modal body (#3732) rather than the
         // single-line border title that silently clipped hints at narrow
@@ -466,20 +440,6 @@ impl ModalView for HelpView {
         )));
         lines.push(Line::from(""));
 
-        let rows = self.render_rows();
-        let visible_rows = content.height.saturating_sub(lines.len() as u16) as usize;
-        let row_start = Self::visible_row_start(&rows, self.selected, visible_rows.max(1));
-        // Reserve the rail before calculating column widths. Otherwise the
-        // description column writes beneath the rail on compact terminals.
-        let content = render_panel_scroll_rail(
-            content,
-            buf,
-            rows.len(),
-            row_start,
-            visible_rows.max(1),
-            true,
-        );
-
         if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled(
                 self.tr(MessageId::HelpNoMatches),
@@ -503,6 +463,9 @@ impl ModalView for HelpView {
                 .saturating_sub(header_lines)
                 .max(1);
 
+            let rows = self.render_rows();
+            let row_start = Self::visible_row_start(&rows, self.selected, visible_budget);
+
             for row in rows.iter().skip(row_start).take(visible_budget) {
                 match *row {
                     HelpRenderRow::Section(section) => {
@@ -514,15 +477,11 @@ impl ModalView for HelpView {
                         lines.push(Line::from(Span::styled(
                             format!("  {} ({})", section.label(self.locale), count),
                             Style::default()
-                                .fg(palette::WHALE_ACTION)
+                                .fg(palette::WHALE_ACCENT_PRIMARY)
                                 .add_modifier(Modifier::BOLD),
                         )));
                     }
                     HelpRenderRow::Entry { slot, entry_idx } => {
-                        let row_y = content.y.saturating_add(lines.len() as u16);
-                        self.row_hitboxes
-                            .borrow_mut()
-                            .push((Rect::new(content.x, row_y, content.width, 1), slot));
                         let entry = &self.entries[entry_idx];
                         let is_selected = slot == self.selected;
                         let style = if is_selected {
@@ -562,14 +521,6 @@ mod tests {
         }
     }
 
-    fn first_filtered_section(view: &HelpView) -> HelpSection {
-        view.entries[*view
-            .filtered
-            .first()
-            .expect("help should contain at least one entry")]
-        .section
-    }
-
     #[test]
     fn empty_filter_lists_all_entries() {
         let view = HelpView::new();
@@ -577,17 +528,6 @@ mod tests {
         let expected = commands::command_infos().len() + KEYBINDINGS.len();
         assert_eq!(view.filtered.len(), expected);
         assert_eq!(view.entries.len(), expected);
-    }
-
-    #[test]
-    fn entry_points_choose_the_section_they_promise() {
-        let commands = HelpView::new_for_locale(Locale::En);
-        assert_eq!(commands.ordering, HelpOrdering::CommandsFirst);
-        assert_eq!(first_filtered_section(&commands), HelpSection::Command);
-
-        let shortcuts = HelpView::new_for_shortcuts(Locale::En);
-        assert_eq!(shortcuts.ordering, HelpOrdering::KeybindingsFirst);
-        assert_eq!(first_filtered_section(&shortcuts), HelpSection::Keybinding);
     }
 
     #[test]
@@ -722,24 +662,6 @@ mod tests {
         assert_eq!(view.selected, 0);
         view.handle_key(key(KeyCode::End));
         assert_eq!(view.selected, view.filtered.len() - 1);
-    }
-
-    #[test]
-    fn mouse_click_selects_visible_help_row() {
-        let mut view = HelpView::new();
-        let area = Rect::new(0, 0, 100, 30);
-        let mut buf = Buffer::empty(area);
-        view.render(area, &mut buf);
-        let (rect, slot) = view.row_hitboxes.borrow()[1];
-
-        view.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: rect.x,
-            row: rect.y,
-            modifiers: KeyModifiers::NONE,
-        });
-
-        assert_eq!(view.selected, slot);
     }
 
     #[test]
@@ -921,68 +843,6 @@ mod tests {
     /// The four terminal sizes the v0.8.66 modal blocker (#3732) requires
     /// every overlay to remain readable and fully operable at.
     const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];
-
-    const SHORTCUT_HELP_SIZES: [(u16, u16); 5] =
-        [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)];
-
-    #[test]
-    fn shortcut_help_leads_with_keys_at_responsive_sizes() {
-        use crate::tui::views::ViewStack;
-
-        let keybindings_heading = tr(Locale::En, MessageId::HelpKeybindings);
-        let commands_heading = tr(Locale::En, MessageId::HelpSlashCommands);
-
-        for (w, h) in SHORTCUT_HELP_SIZES {
-            let area = Rect::new(0, 0, w, h);
-            let mut buf = Buffer::empty(area);
-            for y in 0..h {
-                for x in 0..w {
-                    buf[(x, y)].set_symbol("§");
-                }
-            }
-
-            let mut stack = ViewStack::new();
-            stack.push(HelpView::new_for_shortcuts(Locale::En));
-            stack.render(area, &mut buf);
-
-            let rows: Vec<String> = (0..h)
-                .map(|y| {
-                    (0..w)
-                        .map(|x| buf[(x, y)].symbol().to_string())
-                        .collect::<String>()
-                })
-                .collect();
-            let text = rows.join("\n");
-            let keys_at = text.find(keybindings_heading.as_ref()).unwrap_or_else(|| {
-                panic!("{w}x{h}: shortcut Help hid the keybindings heading:\n{text}")
-            });
-            if let Some(commands_at) = text.find(commands_heading.as_ref()) {
-                assert!(
-                    keys_at < commands_at,
-                    "{w}x{h}: shortcut Help rendered commands before keybindings:\n{text}"
-                );
-            }
-            assert!(
-                !text.contains('§'),
-                "{w}x{h}: background bleed-through into shortcut Help"
-            );
-            assert!(
-                (0..h).any(|y| {
-                    (0..w).any(|x| {
-                        let cell = &buf[(x, y)];
-                        cell.bg == palette::SELECTION_BG && cell.fg == palette::SELECTION_TEXT
-                    })
-                }),
-                "{w}x{h}: first keybinding row lost its selection highlight"
-            );
-            for (y, row) in rows.iter().enumerate() {
-                assert!(
-                    UnicodeWidthStr::width(row.trim_end()) <= w as usize,
-                    "{w}x{h}: row {y} overflows width: {row:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn help_is_usable_and_opaque_at_blocker_sizes() {

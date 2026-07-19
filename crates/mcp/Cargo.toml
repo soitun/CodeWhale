@@ -2,10 +2,9 @@
 name = "codewhale-mcp"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "MCP server lifecycle and tool proxy compatibility for Codewhale"
+description = "MCP server lifecycle and tool proxy compatibility for CodeWhale"
 
 [dependencies]
 anyhow.workspace = true

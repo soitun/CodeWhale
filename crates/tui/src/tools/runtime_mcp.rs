@@ -59,7 +59,6 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
                 scopes: Vec::new(),
                 oauth: None,
                 oauth_resource: None,
-                reviewed_plugin: None,
             },
         });
     }
@@ -96,7 +95,6 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
             scopes: Vec::new(),
             oauth: None,
             oauth_resource: None,
-            reviewed_plugin: None,
         },
     })
 }

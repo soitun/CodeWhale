@@ -542,13 +542,7 @@ impl AcpServer {
         let client = DeepSeekClient::new(&execution_config)?;
         let reasoning_effort = route
             .reasoning_effort
-            .and_then(|effort| {
-                effort.api_value_for_route(
-                    execution_config.api_provider(),
-                    &execution_config.deepseek_base_url(),
-                    &route.model,
-                )
-            })
+            .and_then(|effort| effort.api_value_for_provider(execution_config.api_provider()))
             .map(str::to_string);
 
         let request = MessageRequest {
@@ -643,8 +637,8 @@ fn acp_auth_methods(config: &Config) -> Value {
     json!([
         {
             "id": "codewhale-terminal-auth",
-            "name": "Set Codewhale API key",
-            "description": format!("Run Codewhale's terminal credential setup for the {provider} provider."),
+            "name": "Set CodeWhale API key",
+            "description": format!("Run CodeWhale's terminal credential setup for the {provider} provider."),
             "type": "terminal",
             "args": ["auth", "set", "--provider", provider],
             "env": {}

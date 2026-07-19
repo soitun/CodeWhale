@@ -181,10 +181,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
-
-    static NEXT_CARGO_PROJECT: AtomicU64 = AtomicU64::new(0);
 
     fn cargo_available() -> bool {
         Command::new("cargo")
@@ -196,17 +193,18 @@ mod tests {
 
     fn init_cargo_project(root: &Path) -> std::path::PathBuf {
         let project_dir = root.join("project");
-        let package_name = format!(
-            "eval_project_{}_{}",
-            std::process::id(),
-            NEXT_CARGO_PROJECT.fetch_add(1, Ordering::Relaxed)
-        );
         fs::create_dir_all(&project_dir).expect("create project dir");
         let status = crate::dependencies::Cargo::command()
             .expect("cargo not found")
-            .args(["init", "--lib", "--vcs", "none", "-q"])
-            .arg("--name")
-            .arg(package_name)
+            .args([
+                "init",
+                "--lib",
+                "--vcs",
+                "none",
+                "-q",
+                "--name",
+                "eval_project",
+            ])
             .current_dir(&project_dir)
             .status()
             .expect("cargo should spawn");
@@ -232,9 +230,6 @@ mod tests {
             return;
         }
         let tmp = tempdir().expect("tempdir");
-        // Release jobs commonly export one CARGO_TARGET_DIR for the whole
-        // workspace. Give concurrent nested Cargo fixtures distinct package
-        // identities so their test artifacts cannot replace each other.
         let project_dir = init_cargo_project(tmp.path());
 
         let ctx = ToolContext::new(&project_dir);
@@ -244,11 +239,7 @@ mod tests {
 
         let parsed: RunTestsOutput =
             serde_json::from_str(&result.content).expect("tool result should be json");
-        assert!(
-            parsed.success,
-            "nested cargo test unexpectedly failed:\n{}",
-            parsed.stderr
-        );
+        assert!(parsed.success);
         assert_eq!(parsed.exit_code, 0);
         assert!(parsed.command.contains("cargo test"));
     }
@@ -282,11 +273,7 @@ mod tests {
 
         let parsed: RunTestsOutput =
             serde_json::from_str(&result.content).expect("tool result should be json");
-        assert!(
-            !parsed.success,
-            "nested cargo test unexpectedly passed:\nstdout:\n{}\nstderr:\n{}",
-            parsed.stdout, parsed.stderr
-        );
+        assert!(!parsed.success);
         assert_ne!(parsed.exit_code, 0);
         let metadata = result.metadata.expect("metadata");
         assert_eq!(

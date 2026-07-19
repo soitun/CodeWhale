@@ -90,10 +90,9 @@ impl StreamableHttpTransport {
 
         if !status.is_success() {
             let body_excerpt = bounded_body_excerpt(response, ERROR_BODY_PREVIEW_BYTES).await;
-            let stale_session = self.session_id.is_some()
-                && is_streamable_http_stale_session_status(status, &body_excerpt);
-            let body_excerpt = self.auth.server_error_preview(&body_excerpt);
-            if stale_session {
+            if self.session_id.is_some()
+                && is_streamable_http_stale_session_status(status, &body_excerpt)
+            {
                 return Err(StreamableSendError::StaleSession(format!(
                     "status={status} body={body_excerpt}"
                 )));

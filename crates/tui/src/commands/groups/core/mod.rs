@@ -31,7 +31,6 @@ mod rlm;
 mod setup;
 mod stash;
 mod subagents;
-mod transcript;
 mod translate;
 pub mod util;
 pub mod voice;
@@ -123,10 +122,6 @@ impl CommandGroup for CoreCommands {
             Box::new(FunctionCommand::new(
                 links::LinksCmd::info(),
                 links::LinksCmd::execute,
-            )),
-            Box::new(FunctionCommand::new(
-                transcript::TranscriptCmd::info(),
-                transcript::TranscriptCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 feedback::FeedbackCmd::info(),

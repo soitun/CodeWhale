@@ -18,42 +18,29 @@ section="$(awk -v version="${version}" '
   in_section { print }
 ' "${changelog}")"
 
-contributors="$(printf '%s\n' "${section}" | awk '
-  /^### Contributors[[:space:]]*$/ { in_contributors = 1; next }
-  in_contributors && /^### / { exit }
-  in_contributors { print }
-')"
-
-notes="$(printf '%s\n' "${section}" | awk '
-  /^### Contributors[[:space:]]*$/ { in_contributors = 1; next }
-  in_contributors && /^### / { in_contributors = 0 }
-  !in_contributors { print }
-')"
-
 cat <<EOF
-> **Codewhale** is the public product from Shannon Labs. The \`codewhale\`
-> command, npm package, and release-asset names remain lowercase technical
-> identifiers. The legacy npm package \`deepseek-tui\` is deprecated and
-> receives no further releases. Users coming from v0.8.x legacy \`deepseek\` /
-> \`deepseek-tui\` names should migrate with \`docs/REBRAND.md\`.
+> **CodeWhale** is the canonical project, command, npm package, and
+> release-asset name. The legacy npm package \`deepseek-tui\` is
+> deprecated and receives no further releases. Users coming from
+> v0.8.x legacy \`deepseek\` / \`deepseek-tui\` names should migrate
+> with \`docs/REBRAND.md\`.
 
 ## Install
 
-### Recommended — npm (one command, all three entrypoints)
+### Recommended — npm (one command, both binaries)
 
 \`\`\`bash
 npm install -g codewhale
 \`\`\`
 
-The wrapper downloads the matched \`codewhale\`, \`codew\`, and \`codewhale-tui\`
-binaries from this Release and places them in the same directory.
+The wrapper downloads the matched runtime binaries from this Release and places them in the same directory.
 
 ### Docker / GHCR
 
 \`\`\`bash
 docker run --rm -it \\
   -e DEEPSEEK_API_KEY="\$DEEPSEEK_API_KEY" \\
-  -v codewhale-home:/home/codewhale/.codewhale \\
+  -v ~/.deepseek:/home/codewhale/.deepseek \\
   ghcr.io/hmbown/codewhale:${tag}
 \`\`\`
 
@@ -75,14 +62,11 @@ Each archive below contains the \`codewhale\` dispatcher, \`codew\` shim, and \`
 |---|---|---|
 | Linux x64 | \`codewhale-linux-x64.tar.gz\` | \`install.sh\` |
 | Linux ARM64 | \`codewhale-linux-arm64.tar.gz\` | \`install.sh\` |
-| Android ARM64 (Termux) | \`codewhale-android-arm64.tar.gz\` | \`install.sh\` |
 | macOS x64 | \`codewhale-macos-x64.tar.gz\` | \`install.sh\` |
 | macOS ARM | \`codewhale-macos-arm64.tar.gz\` | \`install.sh\` |
 | Windows x64 (installer) | \`CodeWhaleSetup.exe\` | NSIS setup |
 | Windows x64 | \`codewhale-windows-x64.zip\` | \`install.bat\` |
 | Windows x64 (portable) | \`codewhale-windows-x64-portable.zip\` | — |
-| Windows ARM64 | \`codewhale-windows-arm64.zip\` | \`install.bat\` |
-| Windows ARM64 (portable) | \`codewhale-windows-arm64-portable.zip\` | — |
 
 **Unix (Linux / macOS):**
 \`\`\`bash
@@ -93,8 +77,7 @@ cd codewhale-<platform>
 
 **Windows:**
 - For the installer path, run \`CodeWhaleSetup.exe\`; it installs \`codewhale.exe\`, \`codew.exe\`, and \`codewhale-tui.exe\` under \`%LOCALAPPDATA%\\Programs\\CodeWhale\\bin\` and adds that directory to the current-user PATH.
-- Extract the archive for your machine: \`codewhale-windows-x64.zip\` or
-  \`codewhale-windows-arm64.zip\`
+- Extract \`codewhale-windows-x64.zip\`
 - Run \`install.bat\` (copies to \`%USERPROFILE%\\bin\`)
 - Add \`%USERPROFILE%\\bin\` to your PATH
 
@@ -108,37 +91,29 @@ Download the checksum manifests from this Release and verify:
 
 \`\`\`bash
 # Linux — archive bundles
-sha256sum -c codewhale-bundles-sha256.txt --ignore-missing
+sha256sum -c codewhale-bundles-sha256.txt
 
 # Linux — individual binaries
-sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing
+sha256sum -c codewhale-artifacts-sha256.txt
 
 # macOS
-shasum -a 256 -c codewhale-bundles-sha256.txt --ignore-missing
-shasum -a 256 -c codewhale-artifacts-sha256.txt --ignore-missing
+shasum -a 256 -c codewhale-bundles-sha256.txt
+shasum -a 256 -c codewhale-artifacts-sha256.txt
 \`\`\`
 
 ## What's in ${tag}
 EOF
 
-if [[ -n "${notes}" ]]; then
-  printf '%s\n' "${notes}"
+if [[ -n "${section}" ]]; then
+  printf '%s\n' "${section}"
 else
   printf '%s\n' "See the changelog link below for this release's notes."
 fi
 
 cat <<EOF
 
-## Contributors
-EOF
-
-if [[ -n "${contributors}" ]]; then
-  printf '%s\n' "${contributors}"
-else
-  printf '%s\n' "Thank you to everyone whose reports, PRs, reviews, and reproductions shaped this release."
-fi
-
-cat <<EOF
+Contributor credits for this release live in the changelog entry above —
+thank you to everyone whose reports, PRs, reviews, and reproductions shaped it.
 
 See [CHANGELOG.md](https://github.com/Hmbown/CodeWhale/blob/main/CHANGELOG.md) for full notes and [docs/CHANGELOG_ARCHIVE.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/CHANGELOG_ARCHIVE.md) for older releases.
 EOF

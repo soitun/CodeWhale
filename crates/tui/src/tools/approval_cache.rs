@@ -37,7 +37,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::command_safety::classify_command;
-use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
 /// The fingerprint of a tool call — stable enough to match repeated
 /// calls but specific enough to avoid privilege confusion.
@@ -124,22 +123,18 @@ fn hash_patch_paths(input: &serde_json::Value) -> String {
 
     let mut paths: Vec<&str> = Vec::new();
 
-    match normalize_apply_patch_input(input) {
-        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
-            for change in entries {
-                if let Some(path) = change.get("path").and_then(|v| v.as_str()) {
-                    paths.push(path);
-                }
+    if let Some(changes) = input.get("changes").and_then(|v| v.as_array()) {
+        for change in changes {
+            if let Some(path) = change.get("path").and_then(|v| v.as_str()) {
+                paths.push(path);
             }
         }
-        Ok(NormalizedApplyPatchInput::Patch(patch_text)) => {
-            for line in patch_text.lines() {
-                if let Some(rest) = line.strip_prefix("+++ b/") {
-                    paths.push(rest.trim());
-                }
+    } else if let Some(patch_text) = input.get("patch").and_then(|v| v.as_str()) {
+        for line in patch_text.lines() {
+            if let Some(rest) = line.strip_prefix("+++ b/") {
+                paths.push(rest.trim());
             }
         }
-        Err(_) => {}
     }
 
     paths.sort();
@@ -296,30 +291,16 @@ mod tests {
     fn grouping_key_collapses_patch_body_for_same_path() {
         let key_a = build_approval_grouping_key(
             "apply_patch",
-            &json!({"replace": [{"path": "a.rs", "content": "x"}]}),
+            &json!({"changes": [{"path": "a.rs", "content": "x"}]}),
         );
         let key_b = build_approval_grouping_key(
             "apply_patch",
-            &json!({"replace": [{"path": "a.rs", "content": "y"}]}),
+            &json!({"changes": [{"path": "a.rs", "content": "y"}]}),
         );
         assert_eq!(
             key_a, key_b,
             "approving a patch family must cover later edits to the same path"
         );
-    }
-
-    #[test]
-    fn grouping_key_treats_replace_and_legacy_changes_as_the_same_path_set() {
-        let canonical = build_approval_grouping_key(
-            "apply_patch",
-            &json!({"replace": [{"path": "a.rs", "content": "new"}]}),
-        );
-        let legacy = build_approval_grouping_key(
-            "apply_patch",
-            &json!({"changes": [{"path": "a.rs", "content": "new"}]}),
-        );
-
-        assert_eq!(canonical, legacy);
     }
 
     #[test]
@@ -339,11 +320,11 @@ mod tests {
     fn patch_keys_differ_by_path() {
         let key_a = build_approval_key(
             "apply_patch",
-            &json!({"replace": [{"path": "a.rs", "content": "x"}]}),
+            &json!({"changes": [{"path": "a.rs", "content": "x"}]}),
         );
         let key_b = build_approval_key(
             "apply_patch",
-            &json!({"replace": [{"path": "b.rs", "content": "x"}]}),
+            &json!({"changes": [{"path": "b.rs", "content": "x"}]}),
         );
         assert_ne!(key_a, key_b);
     }
@@ -352,11 +333,11 @@ mod tests {
     fn patch_keys_differ_by_body_for_same_path() {
         let key_a = build_approval_key(
             "apply_patch",
-            &json!({"replace": [{"path": "a.rs", "content": "x"}]}),
+            &json!({"changes": [{"path": "a.rs", "content": "x"}]}),
         );
         let key_b = build_approval_key(
             "apply_patch",
-            &json!({"replace": [{"path": "a.rs", "content": "y"}]}),
+            &json!({"changes": [{"path": "a.rs", "content": "y"}]}),
         );
         assert_ne!(key_a, key_b);
     }

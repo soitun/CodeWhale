@@ -142,16 +142,12 @@ function maxAttempts(context = "runtime", env = process.env) {
 }
 
 function binaryPaths() {
-  const { codewhale, codew, tui } = detectBinaryNames();
+  const { codewhale, tui } = detectBinaryNames();
   const releaseDir = releaseBinaryDirectory();
   return {
     codewhale: {
       asset: codewhale,
       target: path.join(releaseDir, process.platform === "win32" ? "codewhale.exe" : "codewhale"),
-    },
-    codew: {
-      asset: codew,
-      target: path.join(releaseDir, process.platform === "win32" ? "codew.exe" : "codew"),
     },
     tui: {
       asset: tui,
@@ -207,7 +203,7 @@ function installFailureHint(error) {
       "codewhale install hint:",
       `  DEEPSEEK_TUI_RELEASE_BASE_URL is set to ${releaseBase}`,
       "  Verify that this directory contains codewhale-artifacts-sha256.txt",
-      "  plus the codewhale/codew/codewhale-tui binary assets for your platform.",
+      "  plus the codewhale/codewhale-tui binary assets for your platform.",
     ].join("\n");
   }
 
@@ -1137,7 +1133,6 @@ async function run(options = {}) {
 
   await Promise.all([
     ensureBinary(paths.codewhale.target, paths.codewhale.asset, version, repo, getChecksums, { context }),
-    ensureBinary(paths.codew.target, paths.codew.asset, version, repo, getChecksums, { context }),
     ensureBinary(paths.tui.target, paths.tui.asset, version, repo, getChecksums, { context }),
   ]);
 }
@@ -1147,9 +1142,6 @@ async function getBinaryPath(name) {
   const paths = binaryPaths();
   if (name === "codewhale") {
     return paths.codewhale.target;
-  }
-  if (name === "codew") {
-    return paths.codew.target;
   }
   if (name === "codewhale-tui") {
     return paths.tui.target;
@@ -1167,10 +1159,8 @@ module.exports = {
     adoptExistingBinaryIfValid,
     shouldIgnoreInstallFailure,
     shouldSkipOptionalPostinstall,
-    httpRequest,
     defaultTimeoutMs,
     defaultStallMs,
-    binaryPaths,
     ensureBinary,
     maxAttempts,
     withRetry,

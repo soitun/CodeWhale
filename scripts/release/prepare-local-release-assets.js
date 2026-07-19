@@ -5,9 +5,7 @@ const fs = require("fs/promises");
 const path = require("path");
 
 const {
-  allReleaseAssetNames,
-  BUNDLE_ASSET_NAMES,
-  BUNDLE_CHECKSUM_MANIFEST,
+  allAssetNames,
   CHECKSUM_MANIFEST,
   detectBinaryNames,
 } = require("../../npm/codewhale/scripts/artifacts");
@@ -49,12 +47,8 @@ async function main() {
   ];
 
   if (prepareAllAssets) {
-    for (const assetName of allReleaseAssetNames()) {
-      if (
-        assetName === WINDOWS_LAUNCHER ||
-        assetName === CHECKSUM_MANIFEST ||
-        assetName === BUNDLE_CHECKSUM_MANIFEST
-      ) {
+    for (const assetName of allAssetNames()) {
+      if (assetName === WINDOWS_LAUNCHER) {
         continue;
       }
       if (assets.some((asset) => asset.target === assetName)) {
@@ -86,7 +80,7 @@ async function main() {
       "where wt >nul 2>nul",
       "set NO_ANIMATIONS=1",
       'if "%ERRORLEVEL%"=="0" (',
-      '    wt --title Codewhale cmd /k "%~dp0codewhale-windows-x64.exe"',
+      '    wt --title CodeWhale cmd /k "%~dp0codewhale-windows-x64.exe"',
       ") else (",
       '    "%~dp0codewhale-windows-x64.exe"',
       ")",
@@ -99,33 +93,11 @@ async function main() {
     console.log(`Generated ${batPath}`);
   }
 
-  if (prepareAllAssets) {
-    const bundleManifestLines = [];
-    for (const assetName of BUNDLE_ASSET_NAMES) {
-      const assetPath = path.join(outputDir, assetName);
-      bundleManifestLines.push(`${await sha256(assetPath)}  ${assetName}`);
-    }
-    bundleManifestLines.sort();
-    const bundleManifestPath = path.join(outputDir, BUNDLE_CHECKSUM_MANIFEST);
-    await fs.writeFile(
-      bundleManifestPath,
-      `${bundleManifestLines.join("\n")}\n`,
-      "utf8",
-    );
-    manifestLines.push(
-      `${await sha256(bundleManifestPath)}  ${BUNDLE_CHECKSUM_MANIFEST}`,
-    );
-    console.log(`Wrote bundle checksum manifest ${bundleManifestPath}`);
-  }
-
   manifestLines.sort();
   const manifestPath = path.join(outputDir, CHECKSUM_MANIFEST);
   await fs.writeFile(manifestPath, `${manifestLines.join("\n")}\n`, "utf8");
 
-  const preparedCount = prepareAllAssets
-    ? allReleaseAssetNames().length
-    : assets.length + 1;
-  console.log(`Prepared ${preparedCount} assets in ${outputDir}`);
+  console.log(`Prepared ${assets.length} assets in ${outputDir}`);
   console.log(`Wrote checksum manifest ${manifestPath}`);
 }
 

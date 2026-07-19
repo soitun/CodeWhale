@@ -168,7 +168,7 @@ where
 }
 
 fn file_search_cancelled() -> ToolError {
-    ToolError::cancelled("file_search cancelled before completion")
+    ToolError::execution_failed("file_search cancelled before completion")
 }
 
 fn file_search_timeout(timeout: Duration) -> ToolError {

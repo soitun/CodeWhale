@@ -11,7 +11,7 @@
 # verifier, manager. Role aliases match Phase 2 / Phase 3 vocabulary.
 
 name = "v0868-stopship"
-description = "Read-only v0.8.68 orchestration acceptance fleet"
+description = "Stopship dogfood fleet for #4090 / #4093 / #4094"
 
 [roles]
 # role name = AgentProfile id (built-in or workspace profile)
@@ -23,20 +23,20 @@ release_lead = "manager"
 
 [role_intents.scout]
 mode = "read_only"
-summary = "Source-level runtime and receipt reconnaissance"
+summary = "Read-only recon on issue + codebase"
 
 [role_intents.implementer]
-mode = "read_only"
-summary = "No-edit acceptance evidence plan"
+mode = "write"
+summary = "Minimal fix branch from main"
 
 [role_intents.reviewer]
 mode = "read_only"
-summary = "False-green and receipt-contract review"
+summary = "Diff review, regression focus"
 
 [role_intents.verifier]
 mode = "read_only"
-summary = "Static test and receipt serialization verification"
+summary = "cargo test, clippy, fmt gate"
 
 [role_intents.release_lead]
-mode = "read_only"
-summary = "Final evidence-only acceptance receipt"
+mode = "write"
+summary = "Stopship checklist + PR draft"

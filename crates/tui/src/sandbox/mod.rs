@@ -857,11 +857,9 @@ mod tests {
 
     #[test]
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn test_parity_linux_landlock_detection_matches_availability() {
-        assert_eq!(
-            get_platform_sandbox(),
-            landlock::is_available().then_some(SandboxType::LinuxLandlock)
-        );
+    fn test_parity_linux_landlock_available() {
+        let st = get_platform_sandbox();
+        assert!(matches!(st, Some(SandboxType::LinuxLandlock)));
     }
 
     #[test]

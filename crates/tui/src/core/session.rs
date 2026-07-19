@@ -98,8 +98,8 @@ pub struct Session {
 pub struct SessionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// Cache creation (write) tokens. `None` when never observed by the API —
-    /// do NOT display as 0, which would be indistinguishable from "no writes".
+    /// Cache creation (miss) tokens. `None` when never observed by the API —
+    /// do NOT display as 0, which would be indistinguishable from "no misses".
     pub cache_creation_input_tokens: Option<u64>,
     /// Cache read (hit) tokens. `None` when never observed by the API —
     /// do NOT display as 0, which would be indistinguishable from "no hits".
@@ -111,7 +111,7 @@ impl SessionUsage {
     pub fn add(&mut self, usage: &Usage) {
         self.input_tokens += u64::from(usage.input_tokens);
         self.output_tokens += u64::from(usage.output_tokens);
-        if let Some(tokens) = usage.prompt_cache_write_tokens {
+        if let Some(tokens) = usage.prompt_cache_miss_tokens {
             self.cache_creation_input_tokens =
                 Some(self.cache_creation_input_tokens.unwrap_or(0) + u64::from(tokens));
         }
@@ -218,7 +218,6 @@ mod tests {
             output_tokens: 50,
             prompt_cache_hit_tokens: None,
             prompt_cache_miss_tokens: None,
-            prompt_cache_write_tokens: None,
             reasoning_tokens: None,
             reasoning_replay_tokens: None,
             server_tool_use: None,
@@ -235,18 +234,17 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             prompt_cache_hit_tokens: Some(30),
-            prompt_cache_miss_tokens: Some(50),
-            prompt_cache_write_tokens: Some(20),
+            prompt_cache_miss_tokens: Some(70),
             reasoning_tokens: None,
             reasoning_replay_tokens: None,
             server_tool_use: None,
         };
         usage.add(&api_usage);
         assert_eq!(usage.cache_read_input_tokens, Some(30));
-        assert_eq!(usage.cache_creation_input_tokens, Some(20));
+        assert_eq!(usage.cache_creation_input_tokens, Some(70));
         usage.add(&api_usage);
         assert_eq!(usage.cache_read_input_tokens, Some(60));
-        assert_eq!(usage.cache_creation_input_tokens, Some(40));
+        assert_eq!(usage.cache_creation_input_tokens, Some(140));
     }
 
     #[test]
@@ -256,8 +254,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             prompt_cache_hit_tokens: Some(0), // explicit zero from provider
-            prompt_cache_miss_tokens: Some(50),
-            prompt_cache_write_tokens: Some(1234),
+            prompt_cache_miss_tokens: Some(1234),
             reasoning_tokens: None,
             reasoning_replay_tokens: None,
             server_tool_use: None,

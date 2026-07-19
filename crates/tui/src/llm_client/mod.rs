@@ -67,14 +67,11 @@ pub trait LlmClient: Send + Sync {
     /// Creates a streaming message completion
     ///
     /// Returns a stream of SSE events that should be consumed until completion.
-    fn create_message_stream(
-        &self,
-        request: MessageRequest,
-    ) -> impl Future<Output = Result<StreamEventBox>> + Send;
+    async fn create_message_stream(&self, request: MessageRequest) -> Result<StreamEventBox>;
 
     /// Optional health check to verify API connectivity
-    fn health_check(&self) -> impl Future<Output = Result<bool>> + Send {
-        async { Ok(true) }
+    async fn health_check(&self) -> Result<bool> {
+        Ok(true)
     }
 }
 

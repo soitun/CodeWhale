@@ -1,9 +1,10 @@
-//! Codewhale terminal theme tokens (legacy module path).
+//! Whale/DeepSeek terminal theme tokens.
 //!
 //! A small, deliberately flat module that names the color, border, and
-//! padding choices the TUI is making. Values follow the semantic grammar
-//! exposed by [`crate::palette`], keeping the older module path for source
-//! compatibility.
+//! padding choices the TUI is already making. All values match the dark
+//! palette previously hard-coded against [`crate::palette`]; a single
+//! source-of-truth change here can swap the skin later. Visible output
+//! is not changed by introducing this module.
 //!
 //! The only consumers today are the plan and tool cell renderers in
 //! [`crate::tui::history`] and the sidebar section chrome in
@@ -65,7 +66,7 @@ impl Theme {
             section_border_type: BorderType::Plain,
             section_border_color: palette::BORDER_COLOR,
             section_bg: palette::WHALE_BG,
-            section_title_color: palette::WHALE_ACTION,
+            section_title_color: palette::WHALE_ACCENT_PRIMARY,
             // Horizontal padding only. `Padding::uniform(1)` ate two rows of
             // each sidebar panel — for compact terminals where Work/Tasks/Agents
             // get ~3 rows total via the 25% layout split, that left zero rows
@@ -76,13 +77,13 @@ impl Theme {
             tool_value_color: palette::TEXT_MUTED,
             tool_label_color: palette::TEXT_DIM,
             tool_running_accent: palette::ACCENT_TOOL_LIVE,
-            tool_success_accent: palette::STATUS_SUCCESS,
-            tool_failed_accent: palette::STATUS_ERROR,
+            tool_success_accent: palette::TEXT_DIM,
+            tool_failed_accent: palette::ACCENT_TOOL_ISSUE,
             plan_progress_color: palette::STATUS_SUCCESS,
             plan_summary_color: palette::TEXT_MUTED,
             plan_explanation_color: palette::TEXT_DIM,
             plan_pending_color: palette::TEXT_MUTED,
-            plan_in_progress_color: palette::WHALE_HUMAN,
+            plan_in_progress_color: palette::STATUS_WARNING,
             plan_completed_color: palette::STATUS_SUCCESS,
         }
     }
@@ -96,20 +97,20 @@ impl Theme {
             section_border_type: BorderType::Plain,
             section_border_color: palette::LIGHT_BORDER,
             section_bg: palette::LIGHT_PANEL,
-            section_title_color: palette::LIGHT_ACTION,
+            section_title_color: palette::WHALE_ACCENT_PRIMARY,
             section_padding: Padding::horizontal(1),
             tool_title_color: palette::LIGHT_TEXT_SOFT,
             tool_value_color: palette::LIGHT_TEXT_MUTED,
             tool_label_color: palette::LIGHT_TEXT_HINT,
-            tool_running_accent: palette::LIGHT_LIVE,
-            tool_success_accent: palette::LIGHT_SUCCESS_FG,
-            tool_failed_accent: palette::LIGHT_DANGER,
-            plan_progress_color: palette::LIGHT_SUCCESS_FG,
+            tool_running_accent: palette::WHALE_ACCENT_PRIMARY,
+            tool_success_accent: palette::LIGHT_TEXT_HINT,
+            tool_failed_accent: palette::WHALE_ERROR,
+            plan_progress_color: palette::WHALE_ACCENT_PRIMARY,
             plan_summary_color: palette::LIGHT_TEXT_MUTED,
             plan_explanation_color: palette::LIGHT_TEXT_HINT,
             plan_pending_color: palette::LIGHT_TEXT_MUTED,
-            plan_in_progress_color: palette::LIGHT_HUMAN,
-            plan_completed_color: palette::LIGHT_SUCCESS_FG,
+            plan_in_progress_color: Color::Rgb(180, 83, 9),
+            plan_completed_color: palette::WHALE_ACCENT_PRIMARY,
         }
     }
 
@@ -231,19 +232,18 @@ mod tests {
     }
 
     #[test]
-    fn dark_theme_uses_codewhale_semantic_roles() {
+    fn dark_theme_matches_existing_palette_choices() {
         let theme = Theme::dark();
         assert_eq!(theme.variant, Variant::Dark);
         assert_eq!(theme.section_border_color, palette::BORDER_COLOR);
         assert_eq!(theme.section_bg, palette::WHALE_BG);
-        assert_eq!(theme.section_title_color, palette::WHALE_ACTION);
+        assert_eq!(theme.section_title_color, palette::WHALE_ACCENT_PRIMARY);
         assert_eq!(theme.tool_title_color, palette::TEXT_SOFT);
         assert_eq!(theme.tool_value_color, palette::TEXT_MUTED);
         assert_eq!(theme.tool_label_color, palette::TEXT_DIM);
         assert_eq!(theme.tool_running_accent, palette::ACCENT_TOOL_LIVE);
-        assert_eq!(theme.tool_success_accent, palette::STATUS_SUCCESS);
-        assert_eq!(theme.tool_failed_accent, palette::STATUS_ERROR);
-        assert_eq!(theme.plan_in_progress_color, palette::WHALE_HUMAN);
+        assert_eq!(theme.tool_success_accent, palette::TEXT_DIM);
+        assert_eq!(theme.tool_failed_accent, palette::ACCENT_TOOL_ISSUE);
     }
 
     #[test]
@@ -254,9 +254,6 @@ mod tests {
         assert_eq!(theme.section_border_color, palette::LIGHT_BORDER);
         assert_eq!(theme.tool_title_color, palette::LIGHT_TEXT_SOFT);
         assert_eq!(theme.tool_value_color, palette::LIGHT_TEXT_MUTED);
-        assert_eq!(theme.section_title_color, palette::LIGHT_ACTION);
-        assert_eq!(theme.tool_running_accent, palette::LIGHT_LIVE);
-        assert_eq!(theme.tool_success_accent, palette::LIGHT_SUCCESS_FG);
         assert_eq!(theme.plan_summary_color, palette::LIGHT_TEXT_MUTED);
     }
 

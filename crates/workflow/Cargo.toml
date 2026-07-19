@@ -2,10 +2,9 @@
 name = "codewhale-workflow"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typed Workflow IR and validation for Codewhale"
+description = "Typed Workflow IR and validation for CodeWhale"
 
 [dependencies]
 serde.workspace = true

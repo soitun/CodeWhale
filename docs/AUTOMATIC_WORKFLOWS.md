@@ -1,11 +1,8 @@
 # Automatic Workflows
 
-You do **not** need to write a `.workflow.js` file to coordinate agents. In
-Operate, ordinary messages can use direct tools or background workers; workers
-are preferred for independent, parallel, background, or long-running work.
-Workflow is reserved for ordered phases, gates, shared budgets, replay, or
-deterministic fan-in. Act/Agent can still use the optional soft-auto policy
-described below.
+You do **not** need to say “workflow” or write a `.workflow.js` file for ordinary
+multi-agent work. CodeWhale decides when orchestration helps, tells you the
+shape, may ask a short setup question, then launches a Workflow.
 
 Related docs:
 
@@ -14,12 +11,12 @@ Related docs:
 - [Configuration](CONFIGURATION.md) — `[workflow]` knobs
 - [Sandbox](SANDBOX.md) — what the Workflow VM cannot do
 
-## Soft-auto in Act/Agent
+## Soft-auto (default product path)
 
 1. **You ask naturally** — “audit every crate for unsafe,” “scout then implement,”
    “compare these two providers in parallel.”
-2. **Codewhale decides in Act/Agent** — broad, independent, or staged work can
-   trigger Workflow; one-file edits, simple commands, and pure Q&A do not.
+2. **CodeWhale decides** — broad, independent, or staged work triggers Workflow;
+   one-file edits, simple commands, and pure Q&A do not.
 3. **It tells you first** — e.g. “This looks set up for a Workflow — three scouts
    then one verifier.”
 4. **Optional setup** — if one or two facts would change the plan (read-only vs
@@ -28,10 +25,7 @@ Related docs:
 5. **Launch** — structured `plan` JSON (goal / phases / children) or a short
    inline script. Parallel branches use `parallel()` partial-success semantics.
 
-In Operate, those same asks prefer one or more direct background workers when
-the split improves throughput, isolation, or context focus. Small or tightly
-coupled work can stay in the parent under the active tool and approval policy.
-You can always type `/workflow` to request orchestration explicitly.
+You can still type `/workflow` to force “orchestrate the current work.”
 
 ## Read-only auto-start vs write approval
 
@@ -44,7 +38,7 @@ You can always type `/workflow` to request orchestration explicitly.
 | `require_approval_for_writes` | `true` | Writes / elevated plans need explicit approval |
 | `auto_start_child_limit` | `8` | Soft cap on automatic child count |
 | `max_children` / `max_depth` | `64` / `2` | Hard ceilings |
-| `default_token_budget` | `120000` | Shared admission hint; not an exact mid-stream cutoff |
+| `default_token_budget` | `120000` | Shared budget hint |
 | `persist_completed_activity` | `true` | Keep completed panel/history activity |
 
 Elevated work (writes, shell beyond read-only, network, secrets, worktrees, high
@@ -71,14 +65,8 @@ approval policy. See [Sandbox](SANDBOX.md).
 ## Synthesis and compatibility
 
 - Prefer `responseSchema` on children that must return structured fields.
-- Ordinary failed parallel slots become `null` (partial success); filter them
-  before synthesizing one operator-facing summary. A `responseSchema` mismatch
-  is a contract failure and intentionally fails the run instead of being
-  silently converted to `null`.
-- Workflow token budgets govern admission and aggregate accounting. Once
-  exhausted they reject later or descendant spawns, but children already
-  running in parallel can reconcile aggregate usage above the hint because
-  providers report usage only at response boundaries.
+- Failed parallel slots become `null` (partial success); filter them before
+  synthesizing one operator-facing summary.
 - Compatibility paths remain: `script`, `source_path` (checked-in
   `.workflow.js` / `.workflow.ts`), and structured `plan`.
 
@@ -92,17 +80,18 @@ Automatic Workflow is suppressed for:
 - Risky writes without a clear decomposition  
 - Estimated children above `auto_start_child_limit` (ask or shrink first)
 
-In those cases Codewhale uses direct tools or a single `agent` instead.
+In those cases CodeWhale uses direct tools or a single `agent` instead.
 
-## Example scenarios (#4131)
+## Dogfood scenarios (#4131)
 
-Checked-in example workflows cover four automatic-Workflow scenarios:
+Release-lane dogfood for automatic Workflow lives in
+[DOGFOOD_AUTOMATIC_WORKFLOWS.md](DOGFOOD_AUTOMATIC_WORKFLOWS.md). It covers:
 
 1. Read-only repo audit  
 2. Staged bug fix with worktree implementer + verifier  
 3. Partial failure and synthesis  
 4. Cancellation mid-run  
 
-Fixtures: [`docs/examples/dogfood-automatic/`](examples/dogfood-automatic/).
+Checked-in fixtures: [`docs/examples/dogfood-automatic/`](examples/dogfood-automatic/).
 Panel regression tests use the `dogfood_` prefix in
 `crates/tui/src/tui/widgets/workflow_panel.rs`.
