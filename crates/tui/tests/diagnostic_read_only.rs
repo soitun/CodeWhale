@@ -3,14 +3,16 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use axum::body::Bytes;
+use axum::http::HeaderMap;
+use axum::routing::post;
+use axum::{Json, Router};
 use codewhale_secrets::{FileKeyringStore, KeyringStore};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn doctor_text_leaves_a_sealed_home_untouched() {
@@ -236,7 +238,6 @@ fn doctor_text_probe_uses_a_legacy_key_without_migrating_it() {
         "doctor must make one local probe request"
     );
     let authorization = requests[0]
-        .headers
         .get("authorization")
         .and_then(|value| value.to_str().ok());
     assert_eq!(
@@ -465,19 +466,17 @@ fn diagnostic_command(workspace: &std::path::Path, home: &std::path::Path) -> Co
 
 struct CompletionServer {
     base_url: String,
-    commands: tokio::sync::mpsc::UnboundedSender<CompletionServerCommand>,
+    requests: Arc<Mutex<Vec<HeaderMap>>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     owner: Option<thread::JoinHandle<()>>,
-}
-
-enum CompletionServerCommand {
-    ReceivedRequests(mpsc::SyncSender<Vec<wiremock::Request>>),
-    Shutdown,
 }
 
 impl CompletionServer {
     fn start() -> Self {
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = Arc::clone(&requests);
         let owner = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -485,31 +484,50 @@ impl CompletionServer {
                 .build()
                 .expect("local probe runtime");
             runtime.block_on(async move {
-                let server = MockServer::start().await;
-                let body = "{\"id\":\"doctor\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
-                Mock::given(method("POST"))
-                    .and(path("/v1/chat/completions"))
-                    .respond_with(
-                        ResponseTemplate::new(200).set_body_raw(body, "application/json"),
-                    )
-                    .mount(&server)
-                    .await;
-                ready_sender
-                    .send(format!("{}/v1", server.uri()))
-                    .expect("publish local probe address");
-
-                while let Some(command) = command_receiver.recv().await {
-                    match command {
-                        CompletionServerCommand::ReceivedRequests(sender) => {
-                            let requests = server
-                                .received_requests()
-                                .await
-                                .expect("request recording enabled");
-                            let _ = sender.send(requests);
+                let app = Router::new().route(
+                    "/v1/chat/completions",
+                    post(move |headers: HeaderMap, body: Bytes| {
+                        let requests = Arc::clone(&server_requests);
+                        async move {
+                            // Extracting Bytes makes Axum drain the complete request body
+                            // before replying. Preserve only headers for the credential
+                            // assertion; the request payload itself is intentionally dropped.
+                            drop(body);
+                            requests
+                                .lock()
+                                .expect("local probe request lock")
+                                .push(headers);
+                            Json(serde_json::json!({
+                                "id": "doctor",
+                                "object": "chat.completion",
+                                "created": 0,
+                                "model": "deepseek-chat",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            }))
                         }
-                        CompletionServerCommand::Shutdown => break,
-                    }
-                }
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await;
+                let listener = listener.expect("bind local probe server");
+                let address = listener.local_addr().expect("local probe address");
+                ready_sender
+                    .send(format!("http://{address}/v1"))
+                    .expect("publish local probe address");
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_receiver.await;
+                    })
+                    .await
+                    .expect("serve local probe request");
             });
         });
         let base_url = ready_receiver
@@ -517,7 +535,8 @@ impl CompletionServer {
             .expect("local probe server must start");
         Self {
             base_url,
-            commands,
+            requests,
+            shutdown: Some(shutdown),
             owner: Some(owner),
         }
     }
@@ -526,22 +545,24 @@ impl CompletionServer {
         self.base_url.clone()
     }
 
-    fn received_requests(&self) -> Vec<wiremock::Request> {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        self.commands
-            .send(CompletionServerCommand::ReceivedRequests(sender))
-            .expect("local probe server must remain available");
-        receiver
-            .recv_timeout(Duration::from_secs(10))
-            .expect("local probe request snapshot")
+    fn received_requests(&self) -> Vec<HeaderMap> {
+        self.requests
+            .lock()
+            .expect("local probe request lock")
+            .clone()
     }
 }
 
 impl Drop for CompletionServer {
     fn drop(&mut self) {
-        let _ = self.commands.send(CompletionServerCommand::Shutdown);
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(owner) = self.owner.take() {
-            owner.join().expect("stop local probe server");
+            let result = owner.join();
+            if !thread::panicking() {
+                result.expect("stop local probe server");
+            }
         }
     }
 }
