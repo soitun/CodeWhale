@@ -241,23 +241,46 @@ function deriveLicense(licText: string): string | null {
   return first.trim();
 }
 
+function deriveToolCountFromGeneratedFacts(source: string): number | null {
+  const match = source.match(
+    /export\s+const\s+FACTS(?:\s*:\s*RepoFacts)?\s*=\s*(\{[\s\S]*\})\s*;?\s*$/,
+  );
+  if (!match) return null;
+
+  try {
+    const parsed = JSON.parse(match[1]) as { toolCount?: unknown };
+    const toolCount = parsed.toolCount;
+    return typeof toolCount === "number" && Number.isSafeInteger(toolCount) && toolCount >= 0
+      ? toolCount
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts | null> {
   const source = await fetchSourceMarker(ghToken);
   if (!source) return null;
 
-  const [cargo, configRs, configModels, sandboxFiles, npmPkg, licText, toolFiles, latestPublishedRelease] = await Promise.all([
+  const [cargo, configRs, configModels, sandboxFiles, npmPkg, licText, generatedFacts, latestPublishedRelease] = await Promise.all([
     fetchText("Cargo.toml", source.revision, ghToken),
     fetchText("crates/tui/src/config.rs", source.revision, ghToken),
     fetchText("crates/tui/src/config/models.rs", source.revision, ghToken),
     fetchListing("crates/tui/src/sandbox", source.revision, ghToken),
     fetchText("npm/codewhale/package.json", source.revision, ghToken),
     fetchText("LICENSE", source.revision, ghToken),
-    fetchListing("crates/tui/src/tools", source.revision, ghToken),
+    fetchText("web/lib/facts.generated.ts", source.revision, ghToken),
     fetchLatestPublishedRelease(ghToken),
   ]);
 
-  void toolFiles; // unused now; build-time value is canonical
   if (!cargo || !configRs) return null;
+  const toolCount = generatedFacts
+    ? deriveToolCountFromGeneratedFacts(generatedFacts)
+    : null;
+  // Never attach current-main provenance to a build-time tool count. The
+  // checked-in generated snapshot is guarded by the exact revision's CI drift
+  // check, so an absent or malformed value makes the whole derivation fail.
+  if (toolCount === null) return null;
 
   const facts: RepoFacts = {
     generatedAt: new Date().toISOString(),
@@ -271,10 +294,7 @@ export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts
     nodeEngines: (() => {
       try { return npmPkg ? JSON.parse(npmPkg).engines?.node ?? null : null; } catch { return null; }
     })(),
-    // Tool count: build-time uses ToolSpec impl regex; fetching every tool file at runtime is too
-    // expensive, and the file count would be a different (less accurate) number. Preserve the
-    // build-time value through KV instead of approximating.
-    toolCount: BUILD_FACTS.toolCount,
+    toolCount,
     license: licText ? deriveLicense(licText) : BUILD_FACTS.license,
     latestPublishedRelease:
       latestPublishedRelease ?? BUILD_FACTS.latestPublishedRelease,
