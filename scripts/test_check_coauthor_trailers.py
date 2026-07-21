@@ -145,6 +145,30 @@ class CheckCoauthorTrailersTests(unittest.TestCase):
         errors = mod.validate([preserved], self.aliases, True)
         self.assertEqual(errors, [])
 
+    def test_preserved_fleitz_credit_resolves_only_for_exact_commit(self) -> None:
+        preserved = mod.Commit(
+            sha="6d0ebc881a8bd2469c45b25f2a606fa63681e112",
+            parents="parent",
+            author_name="Fred Leitz",
+            author_email="fred.leitz@gmail.com",
+            subject="fix(shell): default no-cwd shell commands to context.workspace",
+            body="Co-authored-by: fleitz <fleitzo@gmail.com>",
+        )
+        errors = mod.validate([preserved], self.aliases, True)
+        self.assertEqual(errors, [])
+
+        changed_identity = mod.Commit(
+            sha=preserved.sha,
+            parents=preserved.parents,
+            author_name=preserved.author_name,
+            author_email=preserved.author_email,
+            subject=preserved.subject,
+            body="Co-authored-by: fleitz <different@example.com>",
+        )
+        errors = mod.validate([changed_identity], self.aliases, True)
+        self.assertTrue(errors)
+        self.assertTrue(any("different@example.com" in error for error in errors))
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
