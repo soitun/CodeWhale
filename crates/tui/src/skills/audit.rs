@@ -273,10 +273,15 @@ pub fn action_policy(skill: &AuditedSkill) -> Vec<SkillActionKind> {
         }
         SkillSourceKind::CodeWhaleManual => Vec::new(),
         SkillSourceKind::CompatibleExternal => {
-            if skill.import_candidate
-                && matches!(skill.parser, ParserState::Valid | ParserState::Warning(_))
+            // Import is offered for fresh candidates and for same-name owned
+            // peers (exact duplicate → AlreadyPresent, conflict → replace confirm).
+            // The mutation controller remains the authority on scope/conflict policy.
+            let importable = matches!(skill.parser, ParserState::Valid | ParserState::Warning(_))
                 && matches!(skill.digest, DigestState::Known(_))
-            {
+                && (skill.import_candidate
+                    || skill.exact_duplicate_of.is_some()
+                    || !skill.conflicts_with.is_empty());
+            if importable {
                 vec![SkillActionKind::Import]
             } else {
                 Vec::new()
@@ -1081,6 +1086,37 @@ mod tests {
         assert!(skill.import_candidate);
         assert_eq!(skill.available_actions, vec![SkillActionKind::Import]);
         assert_eq!(skill.source_kind, SkillSourceKind::CompatibleExternal);
+    }
+
+    #[test]
+    fn external_conflicting_with_owned_still_offers_import() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        write_skill(
+            &workspace.join(".codewhale").join("skills"),
+            "shared",
+            "desc",
+            "owned-body",
+        );
+        write_skill(
+            &workspace.join(".claude").join("skills"),
+            "shared",
+            "desc",
+            "external-body",
+        );
+
+        let snap = scan(&workspace, Some(&home), SkillAuditMode::Compatible, None);
+        let external = snap
+            .skills
+            .iter()
+            .find(|s| {
+                s.name == "shared" && s.source_kind == SkillSourceKind::CompatibleExternal
+            })
+            .expect("external");
+        assert!(!external.import_candidate);
+        assert!(!external.conflicts_with.is_empty());
+        assert_eq!(external.available_actions, vec![SkillActionKind::Import]);
     }
 
     #[test]

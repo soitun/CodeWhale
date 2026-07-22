@@ -3,7 +3,7 @@
 //! This view never writes files. Keys emit [`ViewEvent::SkillMutationRequested`];
 //! the host runs [`crate::skills::mutation`] and rebuilds the view.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -741,7 +741,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::tui::app::{App, TuiOptions};
-    use crossterm::event::KeyEventKind;
+    use crossterm::event::{KeyEventKind, KeyModifiers};
     use std::ffi::OsString;
     use std::fs;
     use tempfile::TempDir;
@@ -898,5 +898,102 @@ mod tests {
             }
         }
         assert!(found, "expected Skills title on 80x24 surface");
+    }
+
+    #[test]
+    fn import_replace_confirm_is_scoped_to_import_target() {
+        let tmp = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmp);
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+
+        // Project-owned conflict only — Global import must not prompt replace.
+        write_skill_pkg(
+            &workspace.join(".codewhale").join("skills").join("shared"),
+            "shared",
+            "owned-project",
+        );
+        write_skill_pkg(
+            &workspace.join(".claude").join("skills").join("shared"),
+            "shared",
+            "external-different",
+        );
+
+        let mut app = app_in(&tmp);
+        app.workspace = workspace;
+        // Force HOME for scan so global root is the isolated home.
+        let mut view = SkillsManagerView::from_scan(
+            &app,
+            ManagerMode::Compatible,
+            SkillTargetScope::Global,
+            None,
+            None,
+        );
+        // Select the external row.
+        let ext_idx = view
+            .skills
+            .iter()
+            .position(|s| s.source_kind == SkillSourceKind::CompatibleExternal)
+            .expect("external skill");
+        view.selected = ext_idx;
+
+        let action = view.handle_key(key(KeyCode::Char('i')));
+        assert!(
+            matches!(
+                action,
+                ViewAction::Emit(ViewEvent::SkillMutationRequested {
+                    request: SkillMutationRequest::ImportExternal {
+                        conflict_policy: ConflictPolicy::Reject,
+                        ..
+                    },
+                })
+            ),
+            "global import must not treat project-owned peer as replace: {action:?}"
+        );
+        assert!(view.pending.is_none());
+
+        view.import_scope = SkillTargetScope::Project;
+        let action = view.handle_key(key(KeyCode::Char('i')));
+        assert!(matches!(action, ViewAction::None));
+        assert!(
+            matches!(view.pending, Some(PendingConfirm::ImportReplace { .. })),
+            "project import should confirm replace against project-owned peer"
+        );
+        assert!(home.exists());
+    }
+
+    #[test]
+    fn compatible_scan_includes_configured_skills_dir() {
+        let tmp = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmp);
+        let workspace = tmp.path().join("ws");
+        let configured = tmp.path().join("custom-skills");
+        write_skill_pkg(&configured.join("custom-one"), "custom-one", "from-config");
+
+        let mut app = app_in(&tmp);
+        app.workspace = workspace;
+        app.skills_dir = configured;
+
+        let view = SkillsManagerView::from_scan(
+            &app,
+            ManagerMode::Compatible,
+            SkillTargetScope::Global,
+            None,
+            None,
+        );
+        assert!(
+            view.skills.iter().any(|s| s.name == "custom-one"),
+            "configured skills_dir rows must appear in compatible scan"
+        );
+    }
+
+    fn write_skill_pkg(dir: &std::path::Path, name: &str, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: d\n---\n{body}\n"),
+        )
+        .unwrap();
     }
 }

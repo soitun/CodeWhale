@@ -1489,6 +1489,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_scope_args_and_default_install_target_is_global() {
+        use crate::skills::mutation::SkillTargetScope;
+
+        let (scope, rest) = parse_scope_args("github:o/r").unwrap();
+        assert_eq!(scope, None);
+        assert_eq!(rest, "github:o/r");
+        // Bare install (no --project/--global) maps to the CodeWhale global root.
+        assert_eq!(scope.unwrap_or(SkillTargetScope::Global), SkillTargetScope::Global);
+
+        let (scope, rest) = parse_scope_args("--project my-skill").unwrap();
+        assert_eq!(scope, Some(SkillTargetScope::Project));
+        assert_eq!(rest, "my-skill");
+
+        let (scope, rest) = parse_scope_args("--global my-skill").unwrap();
+        assert_eq!(scope, Some(SkillTargetScope::Global));
+        assert_eq!(rest, "my-skill");
+
+        assert!(parse_scope_args("--project --global x").is_err());
+    }
+
+    #[test]
+    fn uninstall_external_only_skill_refuses_write() {
+        let tmpdir = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmpdir);
+        let ext = tmpdir
+            .path()
+            .join(".claude")
+            .join("skills")
+            .join("ext-only");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(
+            ext.join("SKILL.md"),
+            "---\nname: ext-only\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let sentinel = tmpdir.path().join(".claude").join("skills").join("SENTINEL");
+        std::fs::write(&sentinel, "keep").unwrap();
+
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.workspace = tmpdir.path().to_path_buf();
+        let result = run_skill(&mut app, Some("uninstall ext-only"));
+        assert!(result.is_error, "got: {:?}", result.message);
+        let msg = result.message.unwrap_or_default();
+        assert!(
+            msg.contains("compatible external") || msg.contains("not found"),
+            "got: {msg}"
+        );
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        assert!(ext.join("SKILL.md").is_file());
+    }
+
+    #[test]
     fn test_run_skill_without_name() {
         let tmpdir = TempDir::new().unwrap();
         let _home = IsolatedHome::new(&tmpdir);

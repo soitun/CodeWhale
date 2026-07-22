@@ -1306,4 +1306,59 @@ mod tests {
         assert!(err.unwrap_err().to_string().contains("changed since audit"));
         assert!(root.join("managed").exists());
     }
+
+    #[test]
+    fn dual_scope_same_name_requires_explicit_scope() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        let network = NetworkPolicy::default();
+        let c = ctx(&workspace, &home, &network);
+
+        write_skill(&workspace.join(".codewhale").join("skills"), "dup", "project");
+        write_skill(&home.join(".codewhale").join("skills"), "dup", "global");
+
+        let err = resolve_owned_skill_by_name(&c, "dup", None).unwrap_err();
+        assert!(
+            err.to_string().contains("--project") && err.to_string().contains("--global"),
+            "got: {err}"
+        );
+
+        let project =
+            resolve_owned_skill_by_name(&c, "dup", Some(SkillTargetScope::Project)).unwrap();
+        let global =
+            resolve_owned_skill_by_name(&c, "dup", Some(SkillTargetScope::Global)).unwrap();
+        assert_ne!(project.id.root_id, global.id.root_id);
+        assert_eq!(project.id.canonical_name, "dup");
+        assert_eq!(global.id.canonical_name, "dup");
+    }
+
+    #[test]
+    fn uninstall_external_only_refuses_and_keeps_sentinel() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        let network = NetworkPolicy::default();
+        let c = ctx(&workspace, &home, &network);
+
+        fs::create_dir_all(workspace.join(".codewhale").join("skills")).unwrap();
+        write_skill(&workspace.join(".claude").join("skills"), "only-ext", "body");
+        let sentinel = workspace.join(".claude").join("skills").join("SENTINEL");
+        fs::write(&sentinel, "untouched").unwrap();
+
+        let err = resolve_owned_skill_by_name(&c, "only-ext", None).unwrap_err();
+        assert!(
+            err.to_string().contains("compatible external"),
+            "got: {err}"
+        );
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "untouched");
+        assert!(
+            workspace
+                .join(".claude")
+                .join("skills")
+                .join("only-ext")
+                .join("SKILL.md")
+                .is_file()
+        );
+    }
 }
