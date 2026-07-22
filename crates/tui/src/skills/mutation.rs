@@ -1013,6 +1013,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     fn write_managed_skill(root: &Path, name: &str) -> String {
         write_skill(root, name, "managed body");
         let skill_dir = root.join(name);
