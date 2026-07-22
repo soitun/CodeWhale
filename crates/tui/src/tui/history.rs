@@ -14,6 +14,7 @@ use crate::tools::plan::PlanSnapshot;
 use crate::tools::review::ReviewOutput;
 use crate::tui::app::TranscriptSpacing;
 use crate::tui::diff_render;
+use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::CopyLineSeparator;
 
 mod agent_activity;
@@ -162,6 +163,7 @@ pub struct TranscriptRenderOptions {
     pub inline_diff_mode: crate::settings::InlineDiffMode,
     pub calm_mode: bool,
     pub low_motion: bool,
+    pub motion_mode: MotionMode,
     pub spacing: TranscriptSpacing,
 }
 
@@ -174,12 +176,32 @@ impl Default for TranscriptRenderOptions {
             inline_diff_mode: crate::settings::InlineDiffMode::Full,
             calm_mode: false,
             low_motion: false,
+            motion_mode: MotionMode::Full,
             spacing: TranscriptSpacing::Comfortable,
         }
     }
 }
 
 impl HistoryCell {
+    #[must_use]
+    pub(crate) fn has_live_motion(&self) -> bool {
+        match self {
+            HistoryCell::Assistant { streaming, .. } => *streaming,
+            HistoryCell::Tool(ToolCell::Generic(tool))
+                if tool.name == "agent" && !agent_activity::is_agent_inspection(tool) =>
+            {
+                false
+            }
+            HistoryCell::Tool(tool) => tool.is_running(),
+            HistoryCell::User { .. }
+            | HistoryCell::System { .. }
+            | HistoryCell::Error { .. }
+            | HistoryCell::Thinking { .. }
+            | HistoryCell::ArchivedContext { .. }
+            | HistoryCell::SubAgent(_) => false,
+        }
+    }
+
     /// Render the cell into a set of terminal lines.
     ///
     /// This is the live-display path used by widgets that don't already pass
@@ -267,7 +289,7 @@ impl HistoryCell {
         options: TranscriptRenderOptions,
         folded: bool,
     ) -> Vec<Line<'static>> {
-        match self {
+        let mut lines = match self {
             HistoryCell::Thinking {
                 streaming,
                 duration_secs,
@@ -333,7 +355,20 @@ impl HistoryCell {
             HistoryCell::ArchivedContext { .. } => {
                 render_archived_context(self, width, options.low_motion)
             }
+        };
+        if matches!(self, HistoryCell::Tool(_)) {
+            match options.motion_mode {
+                MotionMode::Reduced => apply_static_tool_markers(
+                    &mut lines,
+                    crate::tui::spinner::BRAILLE_SPINNER_STILL_FRAME,
+                ),
+                MotionMode::Still => {
+                    apply_static_tool_markers(&mut lines, crate::tui::spinner::LIVE_STATIC_MARKER)
+                }
+                MotionMode::Full => {}
+            }
         }
+        lines
     }
 
     #[allow(dead_code)]
@@ -1856,6 +1891,40 @@ fn wrap_card_rail(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines
 }
 
+/// The legacy tool renderers accept only a low-motion boolean, which gives
+/// both Reduced and Still a mix of legacy static frames. Preserve that stable
+/// rendering path, then apply the central mode's exact fallback at the typed
+/// header span (never by rewriting user/tool output text).
+fn apply_static_tool_markers(lines: &mut [Line<'static>], marker: &'static str) {
+    for line in lines {
+        let mut index = 0;
+        if line
+            .spans
+            .first()
+            .is_some_and(|span| matches!(span.content.as_ref(), "─ " | "╭ " | "│ " | "╰ "))
+        {
+            index = 1;
+        }
+        let Some(status) = line.spans.get(index).map(|span| span.content.as_ref()) else {
+            continue;
+        };
+        let Some(family) = line.spans.get(index + 1).map(|span| span.content.as_ref()) else {
+            continue;
+        };
+        if !status.ends_with(' ')
+            || !is_tool_status_glyph(status.trim_end())
+            || !family.ends_with(' ')
+            || !is_tool_family_glyph(family.trim_end())
+        {
+            continue;
+        }
+        let mut chars = status.trim_end().chars();
+        if matches!(chars.next(), Some('\u{2800}'..='\u{28FF}')) && chars.next().is_none() {
+            line.spans[index].content = format!("{marker} ").into();
+        }
+    }
+}
+
 /// Return the width of tool-cell chrome that remains after the transcript
 /// cache removes the cell-local card rail. Tool headers have two additional
 /// visual tokens (`✓`/spinner and the family glyph); detail rows have the
@@ -1896,7 +1965,7 @@ fn tool_copy_prefix_width(line: &Line<'static>) -> usize {
     if !status.ends_with(' ')
         || !is_tool_status_glyph(status.trim_end())
         || !family.ends_with(' ')
-        || UnicodeWidthStr::width(family.trim_end()) != 1
+        || !is_tool_family_glyph(family.trim_end())
     {
         return 0;
     }
@@ -1915,8 +1984,28 @@ fn is_tool_status_glyph(text: &str) -> bool {
             '\u{2713}' // ✓
                 | '\u{2715}' // ✕
                 | '\u{00B7}' // ·
+                | '\u{203A}' // › static still-mode marker
                 | '\u{2800}'..='\u{28FF}' // braille spinner frames
         )
+}
+
+fn is_tool_family_glyph(text: &str) -> bool {
+    use crate::tui::widgets::tool_card::{ToolFamily, family_glyph};
+
+    [
+        ToolFamily::Read,
+        ToolFamily::Patch,
+        ToolFamily::Run,
+        ToolFamily::Find,
+        ToolFamily::Delegate,
+        ToolFamily::Fanout,
+        ToolFamily::Rlm,
+        ToolFamily::Verify,
+        ToolFamily::Think,
+        ToolFamily::Generic,
+    ]
+    .into_iter()
+    .any(|family| family_glyph(family) == text)
 }
 
 fn review_severity_color(severity: &str) -> Color {

@@ -43,6 +43,7 @@ use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
 use crate::tui::file_mention::ContextReference;
 use crate::tui::history::{HistoryCell, TranscriptRenderOptions};
 use crate::tui::hotbar::HotbarActionRegistry;
+use crate::tui::motion::MotionPolicy;
 use crate::tui::paste_burst::{FlushResult, PasteBurst};
 use crate::tui::scrolling::{MouseScrollState, TranscriptLineMeta, TranscriptScroll};
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelection};
@@ -4605,6 +4606,50 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Invalidate only transcript rows whose visible liveness marker is
+    /// time-based. Animation redraws must not churn settled history, but they
+    /// do need fresh cache keys for running history and active-cell entries.
+    pub(crate) fn mark_live_motion_updated(&mut self) {
+        self.mark_live_motion_updated_inner(true);
+    }
+
+    /// Invalidate only committed live rows. The translation placeholder path
+    /// already bumps the whole active-cell cache when it changes, so the UI
+    /// uses this narrower path to avoid bumping that revision twice.
+    pub(crate) fn mark_live_history_motion_updated(&mut self) {
+        self.mark_live_motion_updated_inner(false);
+    }
+
+    fn mark_live_motion_updated_inner(&mut self, invalidate_active_cell: bool) {
+        self.resync_history_revisions();
+        let live_history_indices: Vec<usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| cell.has_live_motion().then_some(index))
+            .collect();
+        for index in live_history_indices {
+            let revision = self.fresh_history_revision();
+            if let Some(slot) = self.history_revisions.get_mut(index) {
+                *slot = revision;
+            }
+        }
+
+        let active_has_live_motion = self
+            .active_cell
+            .as_ref()
+            .is_some_and(|active| active.entries().iter().any(HistoryCell::has_live_motion));
+        if invalidate_active_cell && active_has_live_motion {
+            self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+            if let Some(active) = self.active_cell.as_mut() {
+                active.bump_revision();
+            }
+        }
+
+        self.history_version = self.history_version.wrapping_add(1);
+        self.needs_redraw = true;
+    }
+
     /// Issue a fresh, monotonically increasing revision counter for a new
     /// history cell. Wrapping is acceptable — collisions are astronomically
     /// rare and at worst trigger one extra re-render.
@@ -5389,6 +5434,25 @@ impl App {
             .or_else(|| self.status_toasts.back().cloned())
     }
 
+    /// Resolve one motion policy for every surface that can request or paint
+    /// animation. `fancy_animations = false` is a true still mode even when
+    /// the separate accessibility preference is left at its default.
+    #[must_use]
+    pub(crate) fn motion_policy(&self) -> MotionPolicy {
+        MotionPolicy::from_settings(
+            self.low_motion,
+            self.fancy_animations,
+            self.constrained_frame_rate,
+        )
+    }
+
+    /// Bridge the centralized policy into transcript renderers that still
+    /// accept the legacy boolean motion contract.
+    #[must_use]
+    pub(crate) fn effective_low_motion_for_status(&self) -> bool {
+        self.motion_policy().as_low_motion()
+    }
+
     pub fn transcript_render_options(&self) -> TranscriptRenderOptions {
         TranscriptRenderOptions {
             show_thinking: self.show_thinking,
@@ -5396,7 +5460,8 @@ impl App {
             show_tool_details: self.show_tool_details,
             inline_diff_mode: self.inline_diff_mode,
             calm_mode: self.calm_mode,
-            low_motion: self.low_motion,
+            low_motion: self.effective_low_motion_for_status(),
+            motion_mode: self.motion_policy().mode(),
             spacing: self.transcript_spacing,
         }
     }

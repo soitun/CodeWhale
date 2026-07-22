@@ -429,7 +429,7 @@ fn exec_is_verification(command: &str) -> bool {
 }
 
 fn completion_elapsed_ms(app: &App) -> Option<u128> {
-    if app.low_motion || !app.fancy_animations {
+    if !app.motion_policy().allows_decorative() {
         return None;
     }
     app.ocean_completion_started_at
@@ -456,19 +456,25 @@ pub(crate) fn phase_marker_with_activity(
             // so the two primary liveness marks never look like unrelated
             // spinners. The shared helper also preserves the 400ms
             // "motion is earned" delay and reduced/still fallback.
-            let frame = crate::tui::spinner::braille_spinner_frame(
-                app.turn_started_at,
-                app.low_motion || !app.fancy_animations,
-            );
+            let policy = app.motion_policy();
+            let animated = crate::tui::spinner::braille_spinner_frame(app.turn_started_at, false);
+            let earned = app.turn_started_at.is_none_or(|started| {
+                started.elapsed().as_millis()
+                    >= u128::from(crate::tui::spinner::LIVE_MARKER_DELAY_MS)
+            });
+            let frame = policy.spinner_glyph(animated, earned);
             (frame, activity.label(locale))
         }
         ShellPhase::Verifying => {
             // Metered braille tick on the shared live clock — checking, not
             // searching. Reduced motion holds the legible mid frame.
-            let frame = crate::tui::spinner::verification_tick_frame(
-                app.turn_started_at,
-                app.low_motion || !app.fancy_animations,
-            );
+            let policy = app.motion_policy();
+            let animated = crate::tui::spinner::verification_tick_frame(app.turn_started_at, false);
+            let earned = app.turn_started_at.is_none_or(|started| {
+                started.elapsed().as_millis()
+                    >= u128::from(crate::tui::spinner::LIVE_MARKER_DELAY_MS)
+            });
+            let frame = policy.spinner_glyph(animated, earned);
             (frame, phase.label(locale))
         }
         ShellPhase::Waiting | ShellPhase::Approval => ("◆", phase.label(locale)),
@@ -953,12 +959,7 @@ pub(crate) fn empty_state_mark_visible(area: Rect) -> bool {
 
 #[must_use]
 pub(crate) fn decorative_shell_motion_enabled(app: &App) -> bool {
-    crate::tui::motion::MotionPolicy::from_settings(
-        app.low_motion,
-        app.fancy_animations,
-        app.constrained_frame_rate,
-    )
-    .allows_decorative()
+    app.motion_policy().allows_decorative()
         && app.ocean_treatment.supports_ambient_life()
         && !app.attention_hold_active()
         && app.onboarding == OnboardingState::None
@@ -1605,18 +1606,12 @@ mod tests {
         app.low_motion = false;
         app.fancy_animations = false;
         let fancy_off = phase_marker(&app, ShellPhase::Working).0;
-        assert_eq!(fancy_off, crate::tui::spinner::BRAILLE_SPINNER_STILL_FRAME);
+        assert_eq!(fancy_off, crate::tui::spinner::LIVE_STATIC_MARKER);
 
         let mut cell = ratatui::buffer::Cell::default();
         cell.set_symbol(fancy_off);
         crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
-        assert_eq!(
-            cell.symbol(),
-            crate::tui::glyphs::braille_ascii_fallback(
-                fancy_off.chars().next().expect("one-cell marker")
-            )
-            .expect("product ASCII marker")
-        );
+        assert_eq!(cell.symbol(), ">");
         assert!(cell.symbol().is_ascii());
     }
 

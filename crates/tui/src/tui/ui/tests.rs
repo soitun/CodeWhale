@@ -17577,7 +17577,7 @@ fn status_animation_ticks_for_lone_running_history_tool() {
         "running workflow tool should count as live motion"
     );
     assert!(
-        should_tick_status_animation(&app, false, history_motion, active_motion),
+        should_tick_status_animation(&app, false, history_motion, active_motion, false),
         "a lone running tool in history must force timed redraws for the spout"
     );
 }
@@ -17597,7 +17597,7 @@ fn status_animation_ticks_for_lone_running_active_tool() {
         "running active-cell tool should count as live motion"
     );
     assert!(
-        should_tick_status_animation(&app, false, history_motion, active_motion),
+        should_tick_status_animation(&app, false, history_motion, active_motion, false),
         "a lone running active tool must force timed redraws for the spout"
     );
 }
@@ -17609,9 +17609,114 @@ fn status_animation_stays_idle_without_live_motion() {
     assert!(!history_has_live_motion(&app.history));
     assert!(!active_cell_has_live_motion(&app));
     assert!(
-        !should_tick_status_animation(&app, false, false, false),
+        !should_tick_status_animation(&app, false, false, false, false),
         "idle sessions should not wake the animation timer"
     );
+}
+
+#[test]
+fn status_animation_ticks_for_a_visible_background_task() {
+    let mut app = create_test_app();
+    app.low_motion = false;
+    app.fancy_animations = true;
+    app.sidebar_focus = SidebarFocus::Tasks;
+    app.last_sidebar_area = Some(Rect::new(80, 0, 20, 20));
+    app.task_panel.push(TaskPanelEntry {
+        id: "shell_smooth".to_string(),
+        status: "running".to_string(),
+        prompt_summary: "shell: cargo test --locked".to_string(),
+        duration_ms: Some(crate::tui::spinner::LIVE_MARKER_DELAY_MS),
+        kind: TaskPanelEntryKind::Background,
+        stale: false,
+        elapsed_since_output_ms: None,
+        owner_agent_id: None,
+        owner_agent_name: None,
+        current_tool: None,
+        role: None,
+        files_touched: 0,
+    });
+
+    assert!(visible_background_task_has_live_motion(&app));
+    assert!(should_tick_status_animation(
+        &app, false, false, false, false
+    ));
+
+    app.last_sidebar_area = None;
+    assert!(!visible_background_task_has_live_motion(&app));
+    assert!(!should_tick_status_animation(
+        &app, false, false, false, false
+    ));
+}
+
+#[test]
+fn status_animation_timer_respects_reduced_and_still_policies() {
+    let mut app = create_test_app();
+    app.history.push(running_generic_tool_cell("workflow"));
+    let history_motion = history_has_live_motion(&app.history);
+
+    app.low_motion = false;
+    app.fancy_animations = true;
+    assert!(should_tick_status_animation(
+        &app,
+        false,
+        history_motion,
+        false,
+        false
+    ));
+
+    app.low_motion = true;
+    assert!(
+        should_tick_status_animation(&app, false, history_motion, false, false),
+        "reduced motion keeps its calm liveness refresh while markers stay static"
+    );
+
+    app.low_motion = false;
+    app.fancy_animations = false;
+    assert!(
+        !should_tick_status_animation(&app, false, history_motion, false, false),
+        "still mode must not wake the status animation timer"
+    );
+    assert_eq!(status_animation_interval_ms(&app), 2_400);
+    assert_eq!(active_poll_ms(&app), UI_ACTIVE_POLL_MS);
+    assert_eq!(idle_poll_ms(&app), UI_IDLE_POLL_MS);
+}
+
+#[test]
+fn translation_placeholder_keeps_a_calm_refresh_without_repainting_still_mode() {
+    let mut app = create_test_app();
+    app.low_motion = false;
+    app.fancy_animations = true;
+    assert!(should_tick_status_animation(
+        &app, false, false, false, true
+    ));
+
+    app.low_motion = true;
+    assert!(should_tick_status_animation(
+        &app, false, false, false, true
+    ));
+
+    app.low_motion = false;
+    app.fancy_animations = false;
+    assert!(!should_tick_status_animation(
+        &app, false, false, false, true
+    ));
+}
+
+#[test]
+fn classic_header_indicator_animates_only_in_full_motion() {
+    let mut app = create_test_app();
+    app.turn_started_at = Some(Instant::now());
+
+    app.low_motion = false;
+    app.fancy_animations = true;
+    assert!(classic_header_indicator_started_at(&app).is_some());
+
+    app.low_motion = true;
+    assert!(classic_header_indicator_started_at(&app).is_none());
+
+    app.low_motion = false;
+    app.fancy_animations = false;
+    assert!(classic_header_indicator_started_at(&app).is_none());
 }
 
 #[test]

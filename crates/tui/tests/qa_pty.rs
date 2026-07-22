@@ -3013,6 +3013,20 @@ fn phase_marker_for_label(frame: &qa_harness::Frame, label: &str) -> char {
         .expect("phase row should contain a marker")
 }
 
+fn transcript_marker_before_icon(frame: &qa_harness::Frame, needle: &str, icon: &str) -> char {
+    let row = visible_row_with_text(frame, needle)
+        .unwrap_or_else(|| panic!("transcript row {needle:?} missing:\n{}", frame.debug_dump()));
+    frame
+        .row(row)
+        .split_once(icon)
+        .unwrap_or_else(|| panic!("tool icon {icon:?} missing from {:?}", frame.row(row)))
+        .0
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .expect("live transcript row should carry a status marker")
+}
+
 fn horizontal_rule_fills(frame: &qa_harness::Frame, row: u16, cols: u16) -> bool {
     let text = frame.row(row);
     UnicodeWidthStr::width(text.as_str()) == usize::from(cols)
@@ -3652,7 +3666,11 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
     struct Case {
         name: &'static str,
         theme: &'static str,
+        motion_mode: &'static str,
         reduced_motion: bool,
+        fancy_animations: bool,
+        expect_motion: bool,
+        static_marker: Option<char>,
         ascii_safe: bool,
         reasoning_size: (u16, u16),
         reading_size: (u16, u16),
@@ -3663,7 +3681,11 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
         Case {
             name: "dark-motion",
             theme: "dark",
+            motion_mode: "full",
             reduced_motion: false,
+            fancy_animations: true,
+            expect_motion: true,
+            static_marker: None,
             ascii_safe: false,
             reasoning_size: (100, 32),
             reading_size: (50, 16),
@@ -3672,7 +3694,11 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
         Case {
             name: "light-reduced",
             theme: "light",
+            motion_mode: "reduced",
             reduced_motion: true,
+            fancy_animations: false,
+            expect_motion: false,
+            static_marker: Some('⣤'),
             ascii_safe: false,
             reasoning_size: (100, 32),
             reading_size: (80, 24),
@@ -3681,11 +3707,28 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
         Case {
             name: "dark-ascii",
             theme: "dark",
+            motion_mode: "full",
             reduced_motion: false,
+            fancy_animations: true,
+            expect_motion: true,
+            static_marker: None,
             ascii_safe: true,
             reasoning_size: (80, 24),
             reading_size: (80, 24),
             tool_size: (80, 24),
+        },
+        Case {
+            name: "dark-still",
+            theme: "dark",
+            motion_mode: "still",
+            reduced_motion: false,
+            fancy_animations: false,
+            expect_motion: false,
+            static_marker: Some('›'),
+            ascii_safe: false,
+            reasoning_size: (100, 32),
+            reading_size: (80, 24),
+            tool_size: (100, 32),
         },
     ];
 
@@ -3721,7 +3764,7 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
             codewhale_home.join("settings.toml"),
             format!(
                 "theme = \"{}\"\nlocale = \"en\"\ndefault_mode = \"agent\"\npermission_posture = \"full-access\"\nshow_thinking = false\nlow_motion = {}\nfancy_animations = {}\ncomposer_border = true\n",
-                case.theme, case.reduced_motion, !case.reduced_motion,
+                case.theme, case.reduced_motion, case.fancy_animations,
             ),
         )?;
         std::fs::write(
@@ -3774,30 +3817,58 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
         h.wait_for(|frame| frame.contains("reasoning"), Duration::from_secs(15))?;
 
         let reasoning_marker = phase_marker_for_label(h.frame(), "reasoning");
-        if case.reduced_motion {
+        if !case.expect_motion {
+            assert_eq!(
+                Some(reasoning_marker),
+                case.static_marker,
+                "wrong semantic fallback marker in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
             std::thread::sleep(Duration::from_millis(320));
             h.pump();
             assert_eq!(
                 phase_marker_for_label(h.frame(), "reasoning"),
                 reasoning_marker,
-                "reduced-motion reasoning marker moved in {}:\n{}",
+                "static reasoning marker moved in {}:\n{}",
                 case.name,
                 h.frame().debug_dump()
             );
         } else {
+            let static_marker = if case.ascii_safe { '>' } else { '›' };
             let deadline = Instant::now() + Duration::from_secs(2);
-            let mut moved = false;
+            let mut first_animated =
+                (reasoning_marker != static_marker).then_some(reasoning_marker);
+            while Instant::now() < deadline && first_animated.is_none() {
+                std::thread::sleep(Duration::from_millis(80));
+                h.pump();
+                let marker = phase_marker_for_label(h.frame(), "reasoning");
+                if marker != static_marker {
+                    first_animated = Some(marker);
+                }
+            }
+            let first_animated = first_animated.unwrap_or_else(|| {
+                panic!(
+                    "semantic reasoning marker never crossed its earned-motion delay in {}:\n{}",
+                    case.name,
+                    h.frame().debug_dump()
+                )
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut advanced_after_delay = false;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(80));
                 h.pump();
-                if phase_marker_for_label(h.frame(), "reasoning") != reasoning_marker {
-                    moved = true;
+                let marker = phase_marker_for_label(h.frame(), "reasoning");
+                if marker != static_marker && marker != first_animated {
+                    advanced_after_delay = true;
                     break;
                 }
             }
             assert!(
-                moved,
-                "semantic reasoning marker never advanced in {}:\n{}",
+                advanced_after_delay,
+                "semantic reasoning marker froze after its earned-motion delay in {}:\n{}",
                 case.name,
                 h.frame().debug_dump()
             );
@@ -3823,8 +3894,12 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
                     case.name, case.reasoning_size.0, case.reasoning_size.1
                 ),
                 &format!(
-                    "theme={}\nphase=reasoning\nreduced_motion={}\nascii_safe={}\nprivate_reasoning_visible=false",
-                    case.theme, case.reduced_motion, case.ascii_safe
+                    "theme={}\nphase=reasoning\nmotion_mode={}\nreduced_motion={}\nfancy_animations={}\nascii_safe={}\nprivate_reasoning_visible=false",
+                    case.theme,
+                    case.motion_mode,
+                    case.reduced_motion,
+                    case.fancy_animations,
+                    case.ascii_safe
                 ),
                 frame,
             )?;
@@ -3869,11 +3944,13 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
                     case.name, case.reading_size.0, case.reading_size.1
                 ),
                 &format!(
-                    "theme={}\nphase=reading\nreal_tool=File.read\nsize={}x{}\nreduced_motion={}\nascii_safe={}\nprivate_reasoning_visible=false",
+                    "theme={}\nphase=reading\nreal_tool=File.read\nsize={}x{}\nmotion_mode={}\nreduced_motion={}\nfancy_animations={}\nascii_safe={}\nprivate_reasoning_visible=false",
                     case.theme,
                     case.reading_size.0,
                     case.reading_size.1,
+                    case.motion_mode,
                     case.reduced_motion,
+                    case.fancy_animations,
                     case.ascii_safe
                 ),
                 frame,
@@ -3927,15 +4004,94 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
                     case.name, case.tool_size.0, case.tool_size.1
                 ),
                 &format!(
-                    "theme={}\nphase=using-tool\nreal_tool=Bash.run\nsize={}x{}\nreduced_motion={}\nascii_safe={}\nprivate_reasoning_visible=false",
+                    "theme={}\nphase=using-tool\nreal_tool=Bash.run\nsize={}x{}\nmotion_mode={}\nreduced_motion={}\nfancy_animations={}\nascii_safe={}\nprivate_reasoning_visible=false",
                     case.theme,
                     case.tool_size.0,
                     case.tool_size.1,
+                    case.motion_mode,
                     case.reduced_motion,
+                    case.fancy_animations,
                     case.ascii_safe
                 ),
                 frame,
             )?;
+        }
+
+        if case.expect_motion && !case.ascii_safe {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut first_animated = None;
+            while Instant::now() < deadline && first_animated.is_none() {
+                std::thread::sleep(Duration::from_millis(80));
+                h.pump();
+                let marker = transcript_marker_before_icon(h.frame(), "run running", "▶");
+                if marker != '›' {
+                    first_animated = Some(marker);
+                }
+            }
+            let first_animated = first_animated.unwrap_or_else(|| {
+                panic!(
+                    "full-motion transcript tool marker never crossed its earned-motion delay in {}:\n{}",
+                    case.name,
+                    h.frame().debug_dump()
+                )
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut advanced_after_delay = false;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(80));
+                h.pump();
+                let marker = transcript_marker_before_icon(h.frame(), "run running", "▶");
+                if marker != '›' && marker != first_animated {
+                    advanced_after_delay = true;
+                    break;
+                }
+            }
+            assert!(
+                advanced_after_delay,
+                "full-motion transcript tool marker froze after its earned-motion delay in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
+        } else if !case.ascii_safe {
+            let initial_tool_marker = transcript_marker_before_icon(h.frame(), "run running", "▶");
+            assert_eq!(
+                Some(initial_tool_marker),
+                case.static_marker,
+                "wrong transcript fallback marker in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
+            std::thread::sleep(Duration::from_millis(320));
+            h.pump();
+            assert_eq!(
+                transcript_marker_before_icon(h.frame(), "run running", "▶"),
+                initial_tool_marker,
+                "static transcript tool marker moved in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
+            resize_and_wait_for_composition(
+                &mut h,
+                case.tool_size.1,
+                case.tool_size.0 + 1,
+                |frame| frame.contains("using tool") && frame.contains("run running"),
+                KEY_TIMEOUT,
+            )?;
+            resize_and_wait_for_composition(
+                &mut h,
+                case.tool_size.1,
+                case.tool_size.0,
+                |frame| frame.contains("using tool") && frame.contains("run running"),
+                KEY_TIMEOUT,
+            )?;
+            assert_eq!(
+                transcript_marker_before_icon(h.frame(), "run running", "▶"),
+                initial_tool_marker,
+                "state-change redraw moved a static transcript marker in {}:\n{}",
+                case.name,
+                h.frame().debug_dump()
+            );
         }
 
         std::fs::write(ws.workspace().join(BASH_RELEASE), "release\n")?;

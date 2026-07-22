@@ -9,6 +9,7 @@ use crate::deepseek_theme::Theme;
 use crate::models::{ContentBlock, Message};
 use crate::palette;
 use crate::tools::plan::{PlanSnapshot, StepStatus};
+use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::{line_to_plain, slice_text, text_display_width};
 use ratatui::style::Modifier;
 use std::time::{Duration, Instant};
@@ -1152,6 +1153,15 @@ fn tool_lines_with_options_respects_low_motion_in_default_path() {
         80,
         TranscriptRenderOptions {
             low_motion: true,
+            motion_mode: MotionMode::Reduced,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+    let still = cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            motion_mode: MotionMode::Still,
             ..TranscriptRenderOptions::default()
         },
     );
@@ -1159,12 +1169,94 @@ fn tool_lines_with_options_respects_low_motion_in_default_path() {
     // Index 0 is card-rail glyph (╭); the animated symbol is at index 1.
     let animated_symbol = animated[0].spans[1].content.trim();
     let low_motion_symbol = low_motion[0].spans[1].content.trim();
+    let still_symbol = still[0].spans[1].content.trim();
 
     // Reduced motion freezes at a filled, legible bubble rather than an
     // invisible blank braille cell.
     assert_eq!(low_motion_symbol, "⣤");
+    assert_eq!(still_symbol, "›");
     // The animated path should be on a different frame (index 2).
     assert_ne!(animated_symbol, TOOL_RUNNING_SYMBOLS[0]);
+}
+
+#[test]
+fn reduced_verify_marker_uses_the_shared_calm_glyph() {
+    let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+        name: "run_verifiers".to_string(),
+        status: ToolStatus::Running,
+        input_summary: None,
+        output: None,
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }));
+    let lines = cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            motion_mode: MotionMode::Reduced,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+
+    assert_eq!(lines[0].spans[1].content.trim(), "⣤");
+}
+
+#[test]
+fn still_fanout_marker_uses_the_shared_chevron() {
+    let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+        name: "workflow".to_string(),
+        status: ToolStatus::Running,
+        input_summary: Some("action: run".to_string()),
+        output: None,
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }));
+    let lines = cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            motion_mode: MotionMode::Still,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+
+    assert_eq!(lines[0].spans[1].content.trim(), "›");
+    assert_eq!(lines[0].spans[2].content.trim(), "⋮⋮");
+}
+
+#[test]
+fn still_marker_rewrite_never_consumes_braille_tool_output() {
+    let cell = HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+        name: "read_file".to_string(),
+        status: ToolStatus::Running,
+        input_summary: None,
+        output: Some("⣿".to_string()),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }));
+    let lines = cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            motion_mode: MotionMode::Still,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+
+    assert_eq!(lines[0].spans[1].content.trim(), "›");
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.as_ref() == "⣿"),
+        "tool output must survive the typed-header marker pass: {lines:?}"
+    );
 }
 
 // === Speaker glyph tests (v0.6.6 UI redesign) ===

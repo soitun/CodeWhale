@@ -62,15 +62,15 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Animate the spacer between the left status line and the right-hand
     // chips whenever a turn is live: model loading/streaming, compacting, or
-    // sub-agents in flight. The spout strip and dot-pulse fallback are gated
-    // on `fancy_animations` (the "do I want animated chrome" knob);
-    // `low_motion` governs streaming pacing and redraw cadence.
+    // sub-agents in flight. The shared Full-motion policy owns the spout strip
+    // and dot pulse; Reduced and Still keep the truthful label without cycling.
     if footer_working_strip_active(app) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let dot_frame = footer_working_label_frame(now_ms, app.fancy_animations);
+        let status_motion = app.motion_policy().allows_status_spin();
+        let dot_frame = footer_working_label_frame(now_ms, status_motion);
         // Header ● Live owns coarse turn state; footer shows action detail only.
         let elapsed_secs = app
             .turn_started_at
@@ -121,9 +121,9 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         // math in `footer_working_strip_glyph_at` was tuned for this cadence
         // (`t = frame / 1000.0`, primary term × 8.0 ≈ 1.3 Hz at 1 ms ticks),
         // so frame must advance at ~1000 units/sec to produce the intended
-        // animation feel. `fancy_animations = false` hides the strip and pins
-        // the textual fallback to `working`.
-        if app.fancy_animations {
+        // animation feel. Non-Full modes hide the strip and pin the textual
+        // fallback to `working`.
+        if status_motion {
             props.working_strip_frame = Some(now_ms);
         }
     } else if matches!(props.state_label.as_str(), "idle" | "ready")
@@ -286,8 +286,8 @@ pub(crate) fn footer_working_strip_active(app: &App) -> bool {
         || turn_in_progress
 }
 
-pub(crate) fn footer_working_label_frame(now_ms: u64, fancy_animations: bool) -> u64 {
-    if fancy_animations { now_ms / 400 } else { 0 }
+pub(crate) fn footer_working_label_frame(now_ms: u64, animate: bool) -> u64 {
+    if animate { now_ms / 400 } else { 0 }
 }
 
 #[cfg(test)]

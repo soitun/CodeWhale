@@ -2412,7 +2412,7 @@ fn config_label_for_key(key: &str) -> String {
         "work_surface_placement" => "Sidebar position",
         "calm_mode" => "Quiet transcript",
         "low_motion" => "Reduce motion",
-        "fancy_animations" => "Ocean motion",
+        "fancy_animations" => "Live UI motion",
         "launch_screen" => "Launch screen",
         "show_thinking" => "Model reasoning in chat",
         "show_tool_details" => "Tool detail level",
@@ -2522,9 +2522,9 @@ fn config_hint_for_key(key: &str) -> &'static str {
             "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"
         }
         "cost_currency" => "usd | cny",
-        "calm_mode" => "quietens transcript chrome and tool detail; independent of ocean motion",
-        "low_motion" => "on overrides decorative motion; model output is unchanged",
-        "fancy_animations" => "on animates fish, bubbles, and live ocean state",
+        "calm_mode" => "quietens transcript chrome and tool detail; independent of live motion",
+        "low_motion" => "on overrides live-state motion; model output is unchanged",
+        "fancy_animations" => "on animates truthful tool, status, and ocean live state",
         "ocean_treatment" => "ombre | flat (appearance; independent of motion)",
         "show_thinking" => "show or hide model reasoning in chat; task lists stay concise",
         "synchronized_output" => "auto | on | off; terminal redraw pacing, not model speed",
@@ -2727,10 +2727,10 @@ fn config_choice_detail(key: &str, value: &str) -> &'static str {
         ("work_surface_placement", "right") => {
             "Show Tasks, To-do, and Workers in a right sidebar when the terminal is wide enough."
         }
-        ("low_motion", "true") => "Stops decorative movement without changing model output.",
+        ("low_motion", "true") => "Stops live-state movement without changing model output.",
         ("low_motion", "false") => "Allows motion selected by the other appearance settings.",
-        ("fancy_animations", "true") => "Animates fish, bubbles, and live ocean state.",
-        ("fancy_animations", "false") => "Keeps the ocean treatment but makes it static.",
+        ("fancy_animations", "true") => "Animates truthful tool, status, and ocean live state.",
+        ("fancy_animations", "false") => "Keeps live-state markers and the ocean treatment static.",
         ("show_thinking", "true") => "Show model reasoning blocks in the transcript.",
         ("show_thinking", "false") => {
             "Keep model reasoning hidden; answers and tools remain visible."

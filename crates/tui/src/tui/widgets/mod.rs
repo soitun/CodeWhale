@@ -440,21 +440,25 @@ impl ChatWidget {
             );
         }
 
-        // Brief flash highlight on the most recently sent user message.
-        if !app.low_motion
-            && let Some(send_at) = app.last_send_at
-        {
-            if send_at.elapsed() < SEND_FLASH_DURATION {
-                apply_send_flash(
-                    &mut lines,
-                    top,
-                    &app.history,
-                    line_meta,
-                    &app.collapsed_cell_map,
-                );
-            } else {
-                app.last_send_at = None;
+        // Brief flash highlight on the most recently sent user message. It is
+        // a one-shot transition, so Reduced/Still clear the timestamp instead
+        // of leaving a stale flash waiting for a later state-change redraw.
+        if app.motion_policy().allows_decorative() {
+            if let Some(send_at) = app.last_send_at {
+                if send_at.elapsed() < SEND_FLASH_DURATION {
+                    apply_send_flash(
+                        &mut lines,
+                        top,
+                        &app.history,
+                        line_meta,
+                        &app.collapsed_cell_map,
+                    );
+                } else {
+                    app.last_send_at = None;
+                }
             }
+        } else {
+            app.last_send_at = None;
         }
 
         if let Some(target_cell) = detail_target_cell {
@@ -6224,6 +6228,38 @@ mod tests {
         assert!(!widget.ocean_animated);
         assert!(!widget.ambient_life);
         assert!(!should_render_empty_state(&app));
+    }
+
+    #[test]
+    fn reduced_and_still_modes_clear_the_one_shot_send_flash() {
+        for (low_motion, fancy_animations) in [(true, true), (false, false)] {
+            let mut app = create_test_app();
+            app.low_motion = low_motion;
+            app.fancy_animations = fancy_animations;
+            app.last_send_at = Some(Instant::now());
+            app.add_message(HistoryCell::User {
+                content: "semantic receipt".to_string(),
+            });
+
+            let _widget = ChatWidget::new(&mut app, Rect::new(0, 0, 100, 20));
+            assert!(
+                app.last_send_at.is_none(),
+                "non-full motion must not retain a time-based flash"
+            );
+        }
+
+        let mut full = create_test_app();
+        full.low_motion = false;
+        full.fancy_animations = true;
+        full.last_send_at = Some(Instant::now());
+        full.add_message(HistoryCell::User {
+            content: "animated receipt".to_string(),
+        });
+        let _widget = ChatWidget::new(&mut full, Rect::new(0, 0, 100, 20));
+        assert!(
+            full.last_send_at.is_some(),
+            "full motion should retain the active send-flash window"
+        );
     }
 
     #[test]

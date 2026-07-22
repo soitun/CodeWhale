@@ -109,7 +109,7 @@ use crate::tui::plan_todo_bridge::{PlanAcceptance, project_accepted_plan};
 use crate::tui::scrolling::TranscriptScroll;
 use crate::work_graph::task_owner_snapshot;
 // SelectionAutoscroll unused
-use crate::tui::motion::{FrameRequester, MotionPolicy};
+use crate::tui::motion::{FrameRequester, MotionMode};
 use crate::tui::session_picker::SessionPickerView;
 use crate::tui::shell_job_routing::{
     add_shell_job_message, format_shell_job_list, format_shell_poll, open_shell_job_pager,
@@ -4195,6 +4195,8 @@ async fn run_event_loop(
         maybe_throttled_recovery_snapshot(app, Instant::now(), &mut last_recovery_snapshot_at);
         let history_has_live_motion = history_has_live_motion(&app.history);
         let active_cell_has_live_motion = active_cell_has_live_motion(app);
+        let translation_placeholder_has_live_motion = app.translation_enabled
+            && (pending_thinking_translations > 0 || app.streaming_thinking_active_entry.is_some());
         // Idle ambient motion belongs to every underwater treatment: ombre
         // breathes its water column, while flat and Terminal-owned animate
         // foreground life only. Schedule redraws only when something can
@@ -4239,30 +4241,31 @@ async fn run_event_loop(
             has_running_agents,
             history_has_live_motion,
             active_cell_has_live_motion,
+            translation_placeholder_has_live_motion,
         );
         let animation_interval_ms = animation_interval_ms(
             app,
             status_motion,
             underwater_ambient_motion || underwater_completion_motion,
         );
-        let motion_policy = MotionPolicy::from_settings(
-            app.low_motion,
-            app.fancy_animations,
-            app.constrained_frame_rate,
-        );
+        let motion_policy = app.motion_policy();
         if (status_motion || underwater_ambient_motion || underwater_completion_motion)
             && last_status_frame.elapsed() >= Duration::from_millis(animation_interval_ms)
         {
-            if streaming_thinking::animate_pending_translation(
+            let translation_animated = streaming_thinking::animate_pending_translation(
                 app,
                 pending_thinking_translations > 0,
-            ) {
-                app.mark_history_updated();
-            }
-            if motion_policy.allows_decorative()
+            );
+            if !matches!(motion_policy.mode(), MotionMode::Still)
                 && (history_has_live_motion || active_cell_has_live_motion)
             {
-                app.mark_history_updated();
+                if translation_animated {
+                    if history_has_live_motion {
+                        app.mark_live_history_motion_updated();
+                    }
+                } else {
+                    app.mark_live_motion_updated();
+                }
             }
             // Coalesce decorative animation wakes through the shared requester.
             // Reduced/Still drop these requests; state-change redraws still set
@@ -4349,11 +4352,7 @@ async fn run_event_loop(
         // Central motion contract: frame cap, stream catch-up, and chunking
         // all read from MotionPolicy so reduced motion stays semantically calm
         // (not a slow typewriter) and Full motion keeps the steady display clock.
-        let motion_policy = MotionPolicy::from_settings(
-            app.low_motion,
-            app.fancy_animations,
-            app.constrained_frame_rate,
-        );
+        let motion_policy = app.motion_policy();
         frame_rate_limiter.set_low_motion(motion_policy.uses_constrained_frame_rate());
         app.streaming_state
             .set_low_motion(motion_policy.as_low_motion());
@@ -11968,6 +11967,13 @@ fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     preview
 }
 
+fn classic_header_indicator_started_at(app: &App) -> Option<Instant> {
+    app.motion_policy()
+        .allows_status_spin()
+        .then_some(app.turn_started_at)
+        .flatten()
+}
+
 fn render_classic_header(area: Rect, buf: &mut Buffer, app: &App) {
     let context_usage = context_usage_snapshot(app);
     let context_window = context_usage.as_ref().map(|(_, max, _)| *max).or_else(|| {
@@ -11988,7 +11994,7 @@ fn render_classic_header(area: Rect, buf: &mut Buffer, app: &App) {
         .unwrap_or("workspace");
     let model = app.model_display_label();
     let effort = app.reasoning_effort_display_label();
-    let started_at = (!app.low_motion).then_some(app.turn_started_at).flatten();
+    let started_at = classic_header_indicator_started_at(app);
     let data = HeaderData::new(
         app.mode,
         &model,
@@ -15812,7 +15818,7 @@ fn should_auto_compact_before_send_with_config(
 }
 
 fn status_animation_interval_ms(app: &App) -> u64 {
-    if app.low_motion {
+    if app.effective_low_motion_for_status() {
         2_400
     } else {
         UI_STATUS_ANIMATION_MS
@@ -15908,41 +15914,38 @@ fn should_tick_status_animation(
     has_running_agents: bool,
     history_has_live_motion: bool,
     active_cell_has_live_motion: bool,
+    translation_placeholder_has_live_motion: bool,
 ) -> bool {
-    app.is_loading
-        || has_running_agents
-        || app.is_compacting
-        || app.is_purging
-        || history_has_live_motion
-        || active_cell_has_live_motion
+    !matches!(app.motion_policy().mode(), MotionMode::Still)
+        && (app.is_loading
+            || has_running_agents
+            || app.is_compacting
+            || app.is_purging
+            || history_has_live_motion
+            || active_cell_has_live_motion
+            || translation_placeholder_has_live_motion
+            || visible_background_task_has_live_motion(app))
+}
+
+fn visible_background_task_has_live_motion(app: &App) -> bool {
+    matches!(
+        app.sidebar_focus,
+        SidebarFocus::Auto | SidebarFocus::Pinned | SidebarFocus::Tasks
+    ) && app
+        .last_sidebar_area
+        .or(app.viewport.last_sidebar_area)
+        .is_some()
+        && app.task_panel.iter().any(|task| task.status == "running")
 }
 
 fn active_cell_has_live_motion(app: &App) -> bool {
-    app.active_cell.as_ref().is_some_and(|active| {
-        active.entries().iter().any(|cell| match cell {
-            HistoryCell::Thinking { streaming, .. } => *streaming,
-            HistoryCell::Tool(tool) => tool_cell_is_running(tool),
-            _ => false,
-        })
-    })
+    app.active_cell
+        .as_ref()
+        .is_some_and(|active| active.entries().iter().any(HistoryCell::has_live_motion))
 }
 
 fn history_has_live_motion(history: &[HistoryCell]) -> bool {
-    use crate::tui::history::SubAgentCell;
-    use crate::tui::widgets::agent_card::AgentLifecycle;
-    history.iter().any(|cell| match cell {
-        HistoryCell::Thinking { streaming, .. } => *streaming,
-        HistoryCell::Tool(tool) => tool_cell_is_running(tool),
-        HistoryCell::SubAgent(SubAgentCell::Delegate(card)) => matches!(
-            card.status,
-            AgentLifecycle::Pending | AgentLifecycle::Running
-        ),
-        HistoryCell::SubAgent(SubAgentCell::Fanout(card)) => card
-            .workers
-            .iter()
-            .any(|w| matches!(w.status, AgentLifecycle::Pending | AgentLifecycle::Running)),
-        _ => false,
-    })
+    history.iter().any(HistoryCell::has_live_motion)
 }
 
 pub(crate) fn open_pager_for_selection(app: &mut App) -> bool {

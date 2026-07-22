@@ -32,7 +32,8 @@ use super::app::{
     SidebarHoverSection, SidebarHoverState, SidebarRowAction, TaskPanelEntry, TaskPanelEntryKind,
 };
 use super::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus, summarize_tool_output};
-use super::spinner::braille_spinner_frame_for_duration_ms;
+use super::motion::MotionPolicy;
+use super::spinner::{LIVE_MARKER_DELAY_MS, braille_spinner_frame_for_elapsed_ms};
 use super::subagent_routing::active_fanout_counts;
 use super::ui_text::{concise_shell_command_label, truncate_line_to_width};
 
@@ -1516,9 +1517,13 @@ fn task_panel_rows(
                 .map(format_duration_ms)
                 .unwrap_or_else(|| "-".to_string());
             let (label, detail) = background_task_labels(task, &duration);
-            let label = background_task_spinner_prefix(task, app.low_motion)
-                .map(|prefix| format!("{prefix} {label}"))
-                .unwrap_or(label);
+            let label = background_task_spinner_prefix(
+                task,
+                app.motion_policy(),
+                app.ocean_started_at.elapsed().as_millis(),
+            )
+            .map(|prefix| format!("{prefix} {label}"))
+            .unwrap_or(label);
             let (show_action, detail_action) = background_task_click_actions(task);
             let label = if background_task_has_stop_target(task) {
                 label_with_stop_target(&label, content_width.max(1))
@@ -1649,9 +1654,13 @@ fn task_panel_hover_texts(app: &App, row_sets: &TaskPanelRowSets, max_rows: usiz
                 .map(format_duration_ms)
                 .unwrap_or_else(|| "-".to_string());
             let (label, detail) = background_task_labels(task, &duration);
-            let label = background_task_spinner_prefix(task, app.low_motion)
-                .map(|prefix| format!("{prefix} {label}"))
-                .unwrap_or(label);
+            let label = background_task_spinner_prefix(
+                task,
+                app.motion_policy(),
+                app.ocean_started_at.elapsed().as_millis(),
+            )
+            .map(|prefix| format!("{prefix} {label}"))
+            .unwrap_or(label);
             texts.push(label);
             if texts.len() >= max_rows {
                 break;
@@ -1775,14 +1784,17 @@ fn background_task_is_live(task: &TaskPanelEntry) -> bool {
         && matches!(task.status.as_str(), "queued" | "running")
 }
 
-fn background_task_spinner_prefix(task: &TaskPanelEntry, low_motion: bool) -> Option<&'static str> {
+fn background_task_spinner_prefix(
+    task: &TaskPanelEntry,
+    motion_policy: MotionPolicy,
+    animation_elapsed_ms: u128,
+) -> Option<&'static str> {
     if task.status != "running" {
         return None;
     }
-    Some(braille_spinner_frame_for_duration_ms(
-        task.duration_ms.unwrap_or_default(),
-        low_motion,
-    ))
+    let elapsed_ms = task.duration_ms.unwrap_or_default();
+    let animated_frame = braille_spinner_frame_for_elapsed_ms(animation_elapsed_ms, false);
+    Some(motion_policy.spinner_glyph(animated_frame, elapsed_ms >= LIVE_MARKER_DELAY_MS))
 }
 
 fn stale_no_output_label(task: &TaskPanelEntry) -> Option<String> {
@@ -3622,7 +3634,11 @@ mod tests {
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolStatus,
     };
-    use crate::tui::spinner::{BRAILLE_SPINNER_FRAME_MS, LIVE_MARKER_DELAY_MS, LIVE_STATIC_MARKER};
+    use crate::tui::motion::MotionPolicy;
+    use crate::tui::spinner::{
+        BRAILLE_SPINNER_FRAME_MS, BRAILLE_SPINNER_STILL_FRAME, LIVE_MARKER_DELAY_MS,
+        LIVE_STATIC_MARKER,
+    };
     use ratatui::{Terminal, backend::TestBackend, text::Line};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -5185,6 +5201,7 @@ mod tests {
 
     #[test]
     fn background_task_spinner_advances_at_readable_cadence() {
+        let full = MotionPolicy::from_settings(false, true, false);
         let mut task = TaskPanelEntry {
             id: "shell_33a08c3c".to_string(),
             status: "running".to_string(),
@@ -5201,26 +5218,106 @@ mod tests {
         };
 
         assert_eq!(
-            background_task_spinner_prefix(&task, false),
+            background_task_spinner_prefix(&task, full, 0),
             Some(LIVE_STATIC_MARKER)
         );
 
         task.duration_ms = Some(LIVE_MARKER_DELAY_MS - 1);
         assert_eq!(
-            background_task_spinner_prefix(&task, false),
+            background_task_spinner_prefix(&task, full, 0),
             Some(LIVE_STATIC_MARKER)
         );
 
         task.duration_ms = Some(LIVE_MARKER_DELAY_MS);
         assert_eq!(
-            background_task_spinner_prefix(&task, false),
+            background_task_spinner_prefix(&task, full, u128::from(LIVE_MARKER_DELAY_MS),),
             Some(crate::tui::spinner::BRAILLE_SPINNER_FRAMES[0])
         );
 
         task.duration_ms = Some(LIVE_MARKER_DELAY_MS + BRAILLE_SPINNER_FRAME_MS);
         assert_eq!(
-            background_task_spinner_prefix(&task, false),
+            background_task_spinner_prefix(
+                &task,
+                full,
+                u128::from(LIVE_MARKER_DELAY_MS + BRAILLE_SPINNER_FRAME_MS),
+            ),
             Some(crate::tui::spinner::BRAILLE_SPINNER_FRAMES[1])
+        );
+    }
+
+    #[test]
+    fn tasks_panel_background_marker_freezes_when_fancy_animations_are_off() {
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = false;
+        app.task_panel.push(TaskPanelEntry {
+            id: "shell_still".to_string(),
+            status: "running".to_string(),
+            prompt_summary: "shell: cargo test --locked".to_string(),
+            duration_ms: Some(LIVE_MARKER_DELAY_MS),
+            kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
+            owner_agent_id: None,
+            owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
+        });
+
+        let clock = Instant::now();
+        app.ocean_started_at = clock - Duration::from_millis(LIVE_MARKER_DELAY_MS);
+        let first = lines_to_text(&task_panel_lines(&app, 96, 8));
+        app.ocean_started_at =
+            clock - Duration::from_millis(LIVE_MARKER_DELAY_MS + BRAILLE_SPINNER_FRAME_MS);
+        let second = lines_to_text(&task_panel_lines(&app, 96, 8));
+        let first_live = first
+            .iter()
+            .find(|line| line.contains("Bash running"))
+            .expect("first live background row");
+        let second_live = second
+            .iter()
+            .find(|line| line.contains("Bash running"))
+            .expect("second live background row");
+
+        assert!(
+            first_live.starts_with(&format!("{LIVE_STATIC_MARKER} ")),
+            "{first:?}"
+        );
+        assert!(
+            second_live.starts_with(&format!("{LIVE_STATIC_MARKER} ")),
+            "still-mode marker must stay fixed while the shared frame clock advances: {second:?}"
+        );
+
+        app.low_motion = false;
+        app.fancy_animations = true;
+        app.ocean_started_at = clock - Duration::from_millis(LIVE_MARKER_DELAY_MS);
+        let full_first = lines_to_text(&task_panel_lines(&app, 96, 8));
+        app.ocean_started_at =
+            clock - Duration::from_millis(LIVE_MARKER_DELAY_MS + BRAILLE_SPINNER_FRAME_MS);
+        let full_second = lines_to_text(&task_panel_lines(&app, 96, 8));
+        let full_first_live = full_first
+            .iter()
+            .find(|line| line.contains("Bash running"))
+            .expect("first full-motion background row");
+        let full_second_live = full_second
+            .iter()
+            .find(|line| line.contains("Bash running"))
+            .expect("second full-motion background row");
+        assert_ne!(
+            full_first_live.chars().next(),
+            full_second_live.chars().next(),
+            "Full marker should advance from the shared frame clock without a task snapshot update"
+        );
+
+        app.low_motion = true;
+        app.fancy_animations = true;
+        let reduced = lines_to_text(&task_panel_lines(&app, 96, 8));
+        assert!(
+            reduced
+                .iter()
+                .any(|line| line.contains(BRAILLE_SPINNER_STILL_FRAME)),
+            "reduced mode should use the calm braille marker: {reduced:?}"
         );
     }
 
