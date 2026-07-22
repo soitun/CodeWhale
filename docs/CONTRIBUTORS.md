@@ -48,7 +48,7 @@ notes, and relevant issue/PR comments.
 - **[zhangweiii](https://github.com/zhangweiii)** and
   **[Sterne Lee / sternelee](https://github.com/sternelee)** — the original
   first-class OpenCode Go implementations in PRs #773 and #1050, harvested
-  into the current provider architecture with co-authorship planned for the
+  into the current provider architecture with co-authorship preserved in the
   landing commit
 - **[Sean Tse / seanthefuturegorilla](https://github.com/seanthefuturegorilla)**
   — the canonical OpenCode Go/Zen provider request and acceptance direction in
