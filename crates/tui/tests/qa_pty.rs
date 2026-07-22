@@ -2074,7 +2074,14 @@ fn spawn_long_reply_fixture(
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> anyhow::Result<String> {
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    // Reqwest may establish the next loopback connection before the real PTY
+    // test releases a blocked tool. Keep that idle socket bounded, but long
+    // enough for the deliberately observed reasoning/read phases to finish.
+    // Darwin can propagate O_NONBLOCK from the listener to accepted sockets;
+    // restore blocking reads before applying the timeout or an early accept
+    // races the first request byte and reports EAGAIN as a network failure.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
     let mut request = Vec::new();
     let mut chunk = [0_u8; 16 * 1024];
     loop {
