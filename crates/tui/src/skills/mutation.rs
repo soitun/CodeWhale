@@ -5,7 +5,8 @@
 //! never mutated.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -20,7 +21,9 @@ use super::install::{
 };
 use super::normalize_skill_name_for_lookup;
 use super::package_digest;
-use super::roots::{SkillRootCatalog, SkillRootKind, SkillScope, safe_display_path};
+use super::roots::{
+    SkillRootCatalog, SkillRootDescriptor, SkillRootKind, SkillScope, safe_display_path,
+};
 
 /// Project vs global CodeWhale-owned install target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +128,224 @@ pub struct MutationContext<'a> {
     pub registry_url: &'a str,
 }
 
+fn owned_anchor<'a>(
+    workspace: &'a Path,
+    home: Option<&'a Path>,
+    target: SkillTargetScope,
+) -> Result<&'a Path> {
+    match target {
+        SkillTargetScope::Project => Ok(workspace),
+        SkillTargetScope::Global => home.context("global skill mutations require a home directory"),
+    }
+}
+
+/// Return whether `path` is an existing real directory, rejecting links and
+/// non-directory components. `symlink_metadata` is intentional: following a
+/// link before checking it would turn a lexical CodeWhale-owned root into an
+/// attacker-selected write target.
+fn checked_real_directory(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!(
+                "refusing to mutate symlinked CodeWhale skills path component {}",
+                path.display()
+            )
+        }
+        Ok(meta) if !meta.is_dir() => bail!(
+            "refusing to mutate through non-directory CodeWhale skills path component {}",
+            path.display()
+        ),
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+/// Validate the complete owned-root chain without following a symlink in the
+/// workspace/home anchor, `.codewhale`, or `skills` component.
+fn validate_owned_target_chain(
+    anchor: &Path,
+    skills_dir: &Path,
+    require_existing: bool,
+) -> Result<()> {
+    let expected = anchor.join(".codewhale").join("skills");
+    if skills_dir != expected {
+        bail!(
+            "refusing to mutate non-canonical CodeWhale skills root {}",
+            skills_dir.display()
+        );
+    }
+
+    let anchor_exists = checked_real_directory(anchor)?;
+    if !anchor_exists {
+        if require_existing {
+            bail!("owned skill anchor {} does not exist", anchor.display());
+        }
+        return Ok(());
+    }
+
+    let codewhale_dir = anchor.join(".codewhale");
+    let codewhale_exists = checked_real_directory(&codewhale_dir)?;
+    if !codewhale_exists {
+        if require_existing {
+            bail!(
+                "owned skill parent {} does not exist",
+                codewhale_dir.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let skills_exists = checked_real_directory(skills_dir)?;
+    if !skills_exists {
+        if require_existing {
+            bail!("owned skill root {} does not exist", skills_dir.display());
+        }
+        return Ok(());
+    }
+
+    let canonical_anchor = fs::canonicalize(anchor)
+        .with_context(|| format!("failed to resolve owned anchor {}", anchor.display()))?;
+    let canonical_skills = fs::canonicalize(skills_dir).with_context(|| {
+        format!(
+            "failed to resolve owned skill root {}",
+            skills_dir.display()
+        )
+    })?;
+    if !canonical_skills.starts_with(&canonical_anchor) {
+        bail!(
+            "owned skill root {} escapes anchor {}",
+            skills_dir.display(),
+            anchor.display()
+        );
+    }
+    Ok(())
+}
+
+fn create_owned_directory(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to create {}", path.display()));
+        }
+    }
+    if !checked_real_directory(path)? {
+        bail!("failed to create owned skill directory {}", path.display());
+    }
+    Ok(())
+}
+
+fn prepare_owned_target(
+    workspace: &Path,
+    home: Option<&Path>,
+    target: SkillTargetScope,
+) -> Result<PathBuf> {
+    let skills_dir = resolve_owned_target(workspace, home, target)?;
+    let anchor = owned_anchor(workspace, home, target)?;
+    if !checked_real_directory(anchor)? {
+        bail!("owned skill anchor {} does not exist", anchor.display());
+    }
+
+    let codewhale_dir = anchor.join(".codewhale");
+    if !checked_real_directory(&codewhale_dir)? {
+        create_owned_directory(&codewhale_dir)?;
+    }
+    validate_owned_target_chain(anchor, &skills_dir, false)?;
+    if !checked_real_directory(&skills_dir)? {
+        create_owned_directory(&skills_dir)?;
+    }
+    validate_owned_target_chain(anchor, &skills_dir, true)?;
+    Ok(skills_dir)
+}
+
+fn target_scope_for_root(root: &SkillRootDescriptor) -> Result<SkillTargetScope> {
+    if !root.is_writable_owned() {
+        bail!("refusing to mutate non-owned root {}", root.path.display());
+    }
+    match root.kind {
+        SkillRootKind::CodeWhaleProject => Ok(SkillTargetScope::Project),
+        SkillRootKind::CodeWhaleGlobal => Ok(SkillTargetScope::Global),
+        _ => bail!("refusing to mutate non-owned root {}", root.path.display()),
+    }
+}
+
+fn validate_owned_root_descriptor(
+    ctx: &MutationContext<'_>,
+    root: &SkillRootDescriptor,
+) -> Result<PathBuf> {
+    let target = target_scope_for_root(root)?;
+    let expected = resolve_owned_target(ctx.workspace, ctx.home, target)?;
+    if root.path != expected {
+        bail!(
+            "audited owned root {} does not match mutation target {}",
+            root.path.display(),
+            expected.display()
+        );
+    }
+    let anchor = owned_anchor(ctx.workspace, ctx.home, target)?;
+    validate_owned_target_chain(anchor, &expected, true)?;
+    Ok(expected)
+}
+
+/// Validate a real direct child of an already validated owned skills root.
+/// Returns false only when a missing child is permitted.
+fn validate_owned_child(skills_dir: &Path, child: &Path, require_existing: bool) -> Result<bool> {
+    if child.parent() != Some(skills_dir) {
+        bail!(
+            "refusing to mutate path {} outside direct owned root {}",
+            child.display(),
+            skills_dir.display()
+        );
+    }
+    let exists = checked_real_directory(child)?;
+    if !exists {
+        if require_existing {
+            bail!("owned skill path {} does not exist", child.display());
+        }
+        return Ok(false);
+    }
+
+    let canonical_root = fs::canonicalize(skills_dir).with_context(|| {
+        format!(
+            "failed to resolve owned skill root {}",
+            skills_dir.display()
+        )
+    })?;
+    let canonical_child = fs::canonicalize(child)
+        .with_context(|| format!("failed to resolve owned skill path {}", child.display()))?;
+    if canonical_child.parent() != Some(canonical_root.as_path()) {
+        bail!(
+            "owned skill path {} escapes direct root {}",
+            child.display(),
+            skills_dir.display()
+        );
+    }
+    Ok(true)
+}
+
+fn validate_owned_skill_path(
+    ctx: &MutationContext<'_>,
+    skill: &AuditedSkill,
+    path: &Path,
+) -> Result<PathBuf> {
+    if skill.id.root_id != skill.root.id {
+        bail!("audited skill root identity changed; refusing mutation");
+    }
+    let skills_dir = validate_owned_root_descriptor(ctx, &skill.root)?;
+    let package_name = on_disk_package_name(&skill.id)?;
+    let expected = skills_dir.join(package_name);
+    if path != expected {
+        bail!(
+            "audited skill path {} does not match owned package {}",
+            path.display(),
+            expected.display()
+        );
+    }
+    validate_owned_child(&skills_dir, path, true)?;
+    Ok(skills_dir)
+}
+
 /// Resolve the on-disk CodeWhale-owned skills directory for a target scope.
 pub fn resolve_owned_target(
     workspace: &Path,
@@ -144,6 +365,8 @@ pub fn resolve_owned_target(
     if !root.is_writable_owned() {
         bail!("refusing to mutate non-owned root {}", root.path.display());
     }
+    let anchor = owned_anchor(workspace, home, target)?;
+    validate_owned_target_chain(anchor, &root.path, false)?;
     Ok(root.path.clone())
 }
 
@@ -314,17 +537,18 @@ fn find_audited_skill(
 /// when calling install helpers that join `skills_dir / name` — installs use
 /// raw frontmatter names, while audit stores a normalized lookup key.
 fn on_disk_package_name(skill_id: &AuditedSkillId) -> Result<&str> {
-    let name = skill_id
-        .relative_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid on-disk package directory for skill '{}'",
-                skill_id.canonical_name
-            )
-        })?;
+    let mut components = skill_id.relative_dir.components();
+    let name = match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => name.to_str(),
+        _ => None,
+    }
+    .filter(|name| !name.is_empty())
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid on-disk package directory for skill '{}'",
+            skill_id.canonical_name
+        )
+    })?;
     Ok(name)
 }
 
@@ -366,9 +590,8 @@ async fn install_remote(
     target: SkillTargetScope,
     ctx: &MutationContext<'_>,
 ) -> Result<SkillMutationReceipt> {
-    let skills_dir = resolve_owned_target(ctx.workspace, ctx.home, target)?;
-    fs::create_dir_all(&skills_dir)
-        .with_context(|| format!("failed to create {}", skills_dir.display()))?;
+    let skills_dir = prepare_owned_target(ctx.workspace, ctx.home, target)?;
+    let anchor = owned_anchor(ctx.workspace, ctx.home, target)?;
 
     let outcome = install::install_with_registry(
         source,
@@ -379,9 +602,11 @@ async fn install_remote(
         ctx.registry_url,
     )
     .await?;
+    validate_owned_target_chain(anchor, &skills_dir, true)?;
 
     match outcome {
         InstallOutcome::Installed(installed) => {
+            validate_owned_child(&skills_dir, &installed.path, true)?;
             let after = package_digest::compute_package_digest(&installed.path).ok();
             Ok(SkillMutationReceipt {
                 action: SkillActionKind::Install,
@@ -447,9 +672,8 @@ fn import_external(
 
     let before = verify_expected_digest(&source_path, Some(&expected_digest))?;
 
-    let skills_dir = resolve_owned_target(ctx.workspace, ctx.home, target)?;
-    fs::create_dir_all(&skills_dir)
-        .with_context(|| format!("failed to create {}", skills_dir.display()))?;
+    let skills_dir = prepare_owned_target(ctx.workspace, ctx.home, target)?;
+    let anchor = owned_anchor(ctx.workspace, ctx.home, target)?;
 
     let want_kind = match target {
         SkillTargetScope::Project => SkillRootKind::CodeWhaleProject,
@@ -481,7 +705,8 @@ fn import_external(
         ),
     };
 
-    if dest.exists() {
+    let dest_exists = validate_owned_child(&skills_dir, &dest, false)?;
+    if dest_exists {
         let existing = package_digest::compute_package_digest(&dest).ok();
         if existing.as_deref() == Some(expected_digest.as_str()) {
             return Ok(SkillMutationReceipt {
@@ -504,20 +729,27 @@ fn import_external(
 
     // Re-verify source digest immediately before copy (TOCTOU).
     let _ = verify_expected_digest(&source_path, Some(&expected_digest))?;
+    validate_owned_target_chain(anchor, &skills_dir, true)?;
 
     let staging = skills_dir.join(format!("{dest_segment}.tmp"));
-    if staging.exists() {
-        fs::remove_dir_all(&staging).ok();
+    if validate_owned_child(&skills_dir, &staging, false)? {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to clean stale staging dir {}", staging.display()))?;
     }
     copy_skill_package(&source_path, &staging)?;
+    validate_owned_target_chain(anchor, &skills_dir, true)?;
+    validate_owned_child(&skills_dir, &staging, true)?;
     package_digest::compute_package_digest(&staging)
         .context("staged import package failed digest validation")?;
 
     let mut backup_path: Option<PathBuf> = None;
-    if dest.exists() {
+    if dest_exists {
+        validate_owned_child(&skills_dir, &dest, true)?;
         let backup = skills_dir.join(format!("{dest_segment}.bak"));
-        if backup.exists() {
-            fs::remove_dir_all(&backup).ok();
+        if validate_owned_child(&skills_dir, &backup, false)? {
+            fs::remove_dir_all(&backup).with_context(|| {
+                format!("failed to clean stale backup dir {}", backup.display())
+            })?;
         }
         fs::rename(&dest, &backup)
             .with_context(|| format!("failed to backup {}", dest.display()))?;
@@ -531,11 +763,15 @@ fn import_external(
         let _ = fs::remove_dir_all(&staging);
         return Err(err).context("failed to install imported skill");
     }
+    validate_owned_target_chain(anchor, &skills_dir, true)?;
+    validate_owned_child(&skills_dir, &dest, true)?;
 
     // Keep backup until digest + marker finalize succeed so a failed import
     // can restore the previous owned skill.
     let finalize = (|| -> Result<String> {
         let _ = verify_expected_digest(&source_path, Some(&expected_digest))?;
+        validate_owned_target_chain(anchor, &skills_dir, true)?;
+        validate_owned_child(&skills_dir, &dest, true)?;
         let after = package_digest::compute_package_digest(&dest)?;
         if after != expected_digest {
             bail!("imported content digest mismatch after copy; aborted");
@@ -630,10 +866,10 @@ async fn update_skill(
     if skill.source_kind != SkillSourceKind::CodeWhaleManaged {
         bail!("only CodeWhale managed skills can be updated");
     }
+    let skills_dir = validate_owned_skill_path(ctx, &skill, &path)?;
     // Imported skills carry `import:…` provenance and must not hit the registry.
     ensure_remote_updatable(&path)?;
     let before = verify_expected_digest(&path, expected_digest.as_deref())?;
-    let skills_dir = skill.root.path.clone();
     let scope = match skill.root.kind {
         SkillRootKind::CodeWhaleProject => SkillScope::Project,
         SkillRootKind::CodeWhaleGlobal => SkillScope::Global,
@@ -641,6 +877,7 @@ async fn update_skill(
     };
 
     let package_name = on_disk_package_name(&skill_id)?;
+    validate_owned_skill_path(ctx, &skill, &path)?;
     let outcome = install::update_with_registry(
         package_name,
         &skills_dir,
@@ -649,6 +886,8 @@ async fn update_skill(
         ctx.registry_url,
     )
     .await?;
+    validate_owned_root_descriptor(ctx, &skill.root)?;
+    validate_owned_child(&skills_dir, &path, true)?;
 
     match outcome {
         UpdateResult::NoChange => Ok(SkillMutationReceipt {
@@ -705,6 +944,7 @@ fn remove_skill(
     if skill.source_kind != SkillSourceKind::CodeWhaleManaged {
         bail!("only CodeWhale managed skills can be removed");
     }
+    let skills_dir = validate_owned_skill_path(ctx, &skill, &path)?;
     let before = verify_expected_digest(&path, expected_digest.as_deref())?;
     let scope = match skill.root.kind {
         SkillRootKind::CodeWhaleProject => SkillScope::Project,
@@ -712,7 +952,8 @@ fn remove_skill(
         _ => SkillScope::Logical,
     };
     let package_name = on_disk_package_name(&skill_id)?;
-    install::uninstall(package_name, &skill.root.path)?;
+    validate_owned_skill_path(ctx, &skill, &path)?;
+    install::uninstall(package_name, &skills_dir)?;
     Ok(SkillMutationReceipt {
         action: SkillActionKind::Remove,
         name: skill_id.canonical_name,
@@ -736,7 +977,9 @@ fn trust_skill(
     if skill.source_kind != SkillSourceKind::CodeWhaleManaged {
         bail!("only CodeWhale managed skills can be trusted");
     }
+    validate_owned_skill_path(ctx, &skill, &path)?;
     let before = verify_expected_digest(&path, Some(&expected_digest))?;
+    validate_owned_skill_path(ctx, &skill, &path)?;
     write_trust_v2(&path, &expected_digest)?;
     let scope = match skill.root.kind {
         SkillRootKind::CodeWhaleProject => SkillScope::Project,
@@ -770,6 +1013,22 @@ mod tests {
         .unwrap();
     }
 
+    fn write_managed_skill(root: &Path, name: &str) -> String {
+        write_skill(root, name, "managed body");
+        let skill_dir = root.join(name);
+        let digest = package_digest::compute_package_digest(&skill_dir).unwrap();
+        write_installed_from_v2(
+            &skill_dir,
+            "github:owner/repo",
+            None,
+            "source-digest",
+            &digest,
+            name,
+        )
+        .unwrap();
+        digest
+    }
+
     fn ctx<'a>(
         workspace: &'a Path,
         home: &'a Path,
@@ -799,6 +1058,200 @@ mod tests {
             resolve_owned_target(&workspace, Some(&home), SkillTargetScope::Global).unwrap();
         assert_eq!(project, workspace.join(".codewhale").join("skills"));
         assert_eq!(global, home.join(".codewhale").join("skills"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_target_resolution_rejects_symlinked_parent_and_root_in_both_scopes() {
+        for target in [SkillTargetScope::Project, SkillTargetScope::Global] {
+            let tmp = TempDir::new().unwrap();
+            let workspace = tmp.path().join("ws");
+            let home = tmp.path().join("home");
+            fs::create_dir_all(&workspace).unwrap();
+            fs::create_dir_all(&home).unwrap();
+            let anchor = match target {
+                SkillTargetScope::Project => &workspace,
+                SkillTargetScope::Global => &home,
+            };
+
+            let outside_parent = tmp.path().join("outside-parent");
+            fs::create_dir_all(&outside_parent).unwrap();
+            std::os::unix::fs::symlink(&outside_parent, anchor.join(".codewhale")).unwrap();
+            let err = resolve_owned_target(&workspace, Some(&home), target).unwrap_err();
+            assert!(err.to_string().contains("symlinked"), "got: {err}");
+
+            fs::remove_file(anchor.join(".codewhale")).unwrap();
+            fs::create_dir(anchor.join(".codewhale")).unwrap();
+            let outside_root = tmp.path().join("outside-root");
+            fs::create_dir_all(&outside_root).unwrap();
+            std::os::unix::fs::symlink(&outside_root, anchor.join(".codewhale").join("skills"))
+                .unwrap();
+            let err = resolve_owned_target(&workspace, Some(&home), target).unwrap_err();
+            assert!(err.to_string().contains("symlinked"), "got: {err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_rejects_symlinked_owned_root_without_external_writes() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(workspace.join(".codewhale")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("SENTINEL"), "untouched").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join(".codewhale").join("skills")).unwrap();
+
+        let network = NetworkPolicy::default();
+        let c = ctx(&workspace, &home, &network);
+        let err = execute(
+            SkillMutationRequest::InstallRemote {
+                source: InstallSource::GitHubRepo("owner/repo".into()),
+                target: SkillTargetScope::Project,
+            },
+            &c,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("symlinked"), "got: {err}");
+        assert_eq!(
+            fs::read_to_string(outside.join("SENTINEL")).unwrap(),
+            "untouched"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_symlinked_owned_parent_without_external_writes() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        let outside_parent = tmp.path().join("outside-parent");
+        let outside_root = outside_parent.join("skills");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+        fs::write(outside_root.join("SENTINEL"), "untouched").unwrap();
+        write_skill(
+            &workspace.join(".claude").join("skills"),
+            "from-claude",
+            "import me",
+        );
+        std::os::unix::fs::symlink(&outside_parent, workspace.join(".codewhale")).unwrap();
+
+        let network = NetworkPolicy::default();
+        let c = ctx(&workspace, &home, &network);
+        let snap = scan_with_configured(
+            &workspace,
+            Some(&home),
+            None,
+            SkillAuditMode::Compatible,
+            None,
+        );
+        let external = snap
+            .skills
+            .iter()
+            .find(|skill| skill.source_kind == SkillSourceKind::CompatibleExternal)
+            .unwrap();
+        let DigestState::Known(digest) = &external.digest else {
+            panic!("digest");
+        };
+        let err = execute_sync(
+            SkillMutationRequest::ImportExternal {
+                source_id: external.id.clone(),
+                expected_digest: digest.clone(),
+                target: SkillTargetScope::Project,
+                conflict_policy: ConflictPolicy::Reject,
+            },
+            &c,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symlinked"), "got: {err}");
+        assert_eq!(
+            fs::read_to_string(outside_root.join("SENTINEL")).unwrap(),
+            "untouched"
+        );
+        assert!(!outside_root.join("from-claude").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_rejects_symlinked_owned_root_without_external_deletion() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        let outside_root = tmp.path().join("outside-root");
+        fs::create_dir_all(workspace.join(".codewhale")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+        let digest = write_managed_skill(&outside_root, "managed");
+        std::os::unix::fs::symlink(&outside_root, workspace.join(".codewhale").join("skills"))
+            .unwrap();
+
+        let network = NetworkPolicy::default();
+        let c = ctx(&workspace, &home, &network);
+        let snap = scan_with_configured(
+            &workspace,
+            Some(&home),
+            None,
+            SkillAuditMode::OwnedOnly,
+            None,
+        );
+        let skill = snap.skills.first().expect("managed skill through symlink");
+        let err = execute_sync(
+            SkillMutationRequest::Remove {
+                skill_id: skill.id.clone(),
+                expected_digest: Some(digest),
+            },
+            &c,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symlinked"), "got: {err}");
+        assert!(outside_root.join("managed").join("SKILL.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trust_rejects_symlinked_owned_parent_without_external_marker_write() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        let outside_parent = tmp.path().join("outside-parent");
+        let outside_root = outside_parent.join("skills");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+        let digest = write_managed_skill(&outside_root, "managed");
+        std::os::unix::fs::symlink(&outside_parent, workspace.join(".codewhale")).unwrap();
+
+        let network = NetworkPolicy::default();
+        let c = ctx(&workspace, &home, &network);
+        let snap = scan_with_configured(
+            &workspace,
+            Some(&home),
+            None,
+            SkillAuditMode::OwnedOnly,
+            None,
+        );
+        let skill = snap.skills.first().expect("managed skill through symlink");
+        let err = execute_sync(
+            SkillMutationRequest::Trust {
+                skill_id: skill.id.clone(),
+                expected_digest: digest,
+            },
+            &c,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("symlinked"), "got: {err}");
+        assert!(
+            !outside_root
+                .join("managed")
+                .join(install::TRUSTED_MARKER)
+                .exists()
+        );
     }
 
     #[test]
