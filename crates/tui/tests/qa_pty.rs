@@ -2345,8 +2345,8 @@ fn assert_running_tool_lifecycle_frame(
         "canonical Work item missing:\n{dump}"
     );
     assert!(
-        frame.contains("working"),
-        "statusline did not enter working:\n{dump}"
+        frame.contains("using tool"),
+        "statusline did not name live tool use:\n{dump}"
     );
     assert!(
         frame.contains("run running"),
@@ -2363,7 +2363,7 @@ fn assert_running_tool_lifecycle_frame(
         vt100::Color::Default,
         "Bash running state lost its semantic foreground:\n{dump}"
     );
-    (colored_foreground(frame, "working"), tool_running)
+    (colored_foreground(frame, "using tool"), tool_running)
 }
 
 enum ScrollDir {
@@ -2658,30 +2658,30 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
     h.send(keys::key::enter())?;
     h.wait_for(
         |frame| {
-            frame.contains("working")
+            frame.contains("using tool")
                 && frame.contains("run running")
                 && frame.contains("PTY lifecycle")
         },
         Duration::from_secs(15),
     )?;
 
-    // Working liveness belongs to the phase strip once transcript activity
+    // Typed tool liveness belongs to the phase strip once transcript activity
     // replaces the idle BlueWhale. Prove the actual emitted marker advances;
     // do not relabel the decorative idle silhouette as a running tool row.
-    let initial_working_marker = phase_marker_for_label(h.frame(), "working");
+    let initial_tool_marker = phase_marker_for_label(h.frame(), "using tool");
     let marker_deadline = Instant::now() + Duration::from_secs(2);
-    let mut working_marker_moved = false;
+    let mut tool_marker_moved = false;
     while Instant::now() < marker_deadline {
         std::thread::sleep(Duration::from_millis(80));
         h.pump();
-        if phase_marker_for_label(h.frame(), "working") != initial_working_marker {
-            working_marker_moved = true;
+        if phase_marker_for_label(h.frame(), "using tool") != initial_tool_marker {
+            tool_marker_moved = true;
             break;
         }
     }
     assert!(
-        working_marker_moved,
-        "working phase marker never advanced in the real PTY:\n{}",
+        tool_marker_moved,
+        "using-tool phase marker never advanced in the real PTY:\n{}",
         h.frame().debug_dump()
     );
 
@@ -2694,7 +2694,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
             |frame| {
                 frame.rows() == rows
                     && frame.cols() == cols
-                    && frame.contains("working")
+                    && frame.contains("using tool")
                     && frame.contains("run running")
                     && frame.contains("PTY lifecycle")
             },
@@ -2706,7 +2706,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
             assert_eq!(
                 colors,
                 expected,
-                "working/tool ANSI roles changed at {cols}x{rows}:\n{}",
+                "using-tool/transcript ANSI roles changed at {cols}x{rows}:\n{}",
                 frame.debug_dump()
             );
         } else {
@@ -2714,7 +2714,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         }
         write_real_pty_evidence(
             &format!("tool-lifecycle-running-{cols}x{rows}"),
-            &format!("size={cols}x{rows}\nphase=working\nreal_tool=Bash\nwork_surface=Work"),
+            &format!("size={cols}x{rows}\nphase=using-tool\nreal_tool=Bash\nwork_surface=Work"),
             frame,
         )?;
     }
@@ -2748,7 +2748,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         assert_ne!(
             done_color,
             live_colors.expect("live colors").0,
-            "done and working collapsed to one ANSI role"
+            "done and live tool use collapsed to one ANSI role"
         );
         write_real_pty_evidence(
             "tool-lifecycle-settled-140x40",
