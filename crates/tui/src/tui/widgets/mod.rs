@@ -5,11 +5,6 @@ mod header;
 // dead code rather than scattering `#[allow]` across every constructor.
 #[allow(dead_code)]
 pub mod key_hint;
-// Phase 1 of #85: widget lands without a wire-up site so reviewers can
-// evaluate the rendering in isolation. The follow-up PR plumbs it through
-// the composer area in `ui.rs`. `pub mod` (vs the usual `pub use` pattern)
-// keeps the unused-imports lint quiet until then.
-pub mod activity_shelf;
 pub mod agent_card;
 pub mod decision_card;
 pub mod pending_input_preview;
@@ -817,9 +812,7 @@ impl ChatWidget {
             };
             // Whale cameo rides the completion breath clock when present.
             let whale = crate::tui::ambient_life::WhaleCameo {
-                elapsed_ms: self
-                    .ocean_column
-                    .and_then(|c| c.completion_elapsed_ms()),
+                elapsed_ms: self.ocean_column.and_then(|c| c.completion_elapsed_ms()),
                 anchor_x: area.x.saturating_add(area.width / 2),
                 anchor_y: area.y.saturating_add(area.height.saturating_mul(2) / 3),
             };

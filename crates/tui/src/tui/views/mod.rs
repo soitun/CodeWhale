@@ -3754,9 +3754,6 @@ pub(crate) fn subagent_view_agents(
                     }
                 }
             }
-            HistoryCell::SubAgent(SubAgentCell::Shelf(_)) => {
-                // Synthetic shelf projector — agents already counted via live cards.
-            }
             _ => {}
         }
     }

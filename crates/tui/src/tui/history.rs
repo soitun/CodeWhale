@@ -145,8 +145,6 @@ pub enum HistoryCell {
 pub enum SubAgentCell {
     Delegate(crate::tui::widgets::agent_card::DelegateCard),
     Fanout(crate::tui::widgets::agent_card::FanoutCard),
-    /// Collapsed multi-agent activity shelf (rebuilt each frame when needed).
-    Shelf(crate::tui::widgets::activity_shelf::ActivityShelf),
 }
 
 impl SubAgentCell {
@@ -154,37 +152,6 @@ impl SubAgentCell {
         match self {
             SubAgentCell::Delegate(card) => card.render_lines(width),
             SubAgentCell::Fanout(card) => card.render_lines(width),
-            SubAgentCell::Shelf(shelf) => shelf.render_lines(width),
-        }
-    }
-
-    /// True when this card still represents live concurrent work.
-    /// Retained for shelf helpers / future grouping; transcript no longer collapses.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn is_live_for_shelf(&self) -> bool {
-        use crate::tui::widgets::agent_card::AgentLifecycle;
-        match self {
-            SubAgentCell::Delegate(card) => !matches!(
-                card.status,
-                AgentLifecycle::Completed | AgentLifecycle::Failed | AgentLifecycle::Cancelled
-            ),
-            SubAgentCell::Fanout(card) => !matches!(
-                card.aggregate_status_public(),
-                AgentLifecycle::Completed | AgentLifecycle::Failed | AgentLifecycle::Cancelled
-            ),
-            SubAgentCell::Shelf(_) => true,
-        }
-    }
-
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn as_shelf_agent(&self) -> Option<crate::tui::widgets::activity_shelf::ShelfAgent> {
-        use crate::tui::widgets::activity_shelf::ShelfAgent;
-        match self {
-            SubAgentCell::Delegate(card) => Some(ShelfAgent::Delegate(card.clone())),
-            SubAgentCell::Fanout(card) => Some(ShelfAgent::Fanout(card.clone())),
-            SubAgentCell::Shelf(_) => None,
         }
     }
 }
