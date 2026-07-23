@@ -5597,23 +5597,6 @@ async fn run_event_loop(
                 {
                     continue;
                 }
-                // Activity shelf: Enter expands/collapses concurrent sub-agent
-                // banners when the composer is empty and live agents > 1.
-                KeyCode::Enter
-                    if key.modifiers == KeyModifiers::NONE
-                        && app.input.is_empty()
-                        && running_agent_count(app) > 1 =>
-                {
-                    app.activity_shelf_expanded = !app.activity_shelf_expanded;
-                    app.status_message = Some(if app.activity_shelf_expanded {
-                        "Sub-agent shelf expanded".into()
-                    } else {
-                        "Sub-agent shelf collapsed".into()
-                    });
-                    app.mark_history_updated();
-                    app.needs_redraw = true;
-                    continue;
-                }
                 KeyCode::Char('l')
                     if key_shortcuts::alt_nav_modifiers(key.modifiers)
                         && app.input.is_empty()
@@ -12070,7 +12053,8 @@ fn render_classic_header(area: Rect, buf: &mut Buffer, app: &App) {
     .with_status_indicator(crate::tui::widgets::header_status_indicator_frame(
         started_at,
         &app.status_indicator,
-    ));
+    ))
+    .with_running_agents(running_agent_count(app));
     HeaderWidget::new(data).render(area, buf);
 }
 

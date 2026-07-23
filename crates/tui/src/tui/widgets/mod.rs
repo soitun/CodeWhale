@@ -230,20 +230,10 @@ impl ChatWidget {
             }
         }
 
-        // Activity shelf: collapse concurrent live sub-agent cards into one row.
-        let (shelf_hidden, shelf_summary_cells) = activity_shelf_collapse(
-            &app.history,
-            active_entries,
-            history_len,
-            app.activity_shelf_expanded,
-        );
-        for idx in &shelf_hidden {
-            collapsed_tool_indices.insert(*idx);
-        }
-
-        let has_collapsed = !app.collapsed_cells.is_empty()
-            || !collapsed_run_starts.is_empty()
-            || !shelf_hidden.is_empty();
+        // v0.9.1: do not collapse concurrent sub-agent cards into an Enter-
+        // expand shelf. Count lives in header chrome; full cards stay visible;
+        // sidebar / SubAgents modal are the drill-in surface.
+        let has_collapsed = !app.collapsed_cells.is_empty() || !collapsed_run_starts.is_empty();
 
         // Fast path: no collapsed cells — use original slices directly.
         if !has_collapsed {
@@ -282,12 +272,11 @@ impl ChatWidget {
             // up front so the ref list can borrow from a stable Vec —
             // avoiding the per-frame deep clone of every visible cell that
             // this path used to pay (#3896).
-            let mut summary_cells: Vec<(usize, HistoryCell)> = tool_runs
+            let summary_cells: Vec<(usize, HistoryCell)> = tool_runs
                 .iter()
                 .filter(|run| collapsed_run_starts.contains(&run.start))
                 .map(|run| (run.start, tool_run_summary_cell(run)))
                 .collect();
-            summary_cells.extend(shelf_summary_cells);
             let summary_cell_for = |idx: usize| -> Option<&HistoryCell> {
                 summary_cells
                     .iter()
@@ -323,18 +312,6 @@ impl ChatWidget {
                     filtered_to_original.push(idx);
                     continue;
                 }
-                if let Some(summary) = summary_cell_for(idx) {
-                    // Activity shelf head: synthetic collapsed projector.
-                    filtered_cells.push(summary);
-                    filtered_revs.push(
-                        history_entry_revision(
-                            app.history_revisions.get(idx).copied().unwrap_or(0),
-                        )
-                        .wrapping_add(0xA11C_5E1F), // shelf domain salt
-                    );
-                    filtered_to_original.push(idx);
-                    continue;
-                }
                 filtered_cells.push(cell);
                 filtered_revs.push(history_entry_revision(app.history_revisions[idx]));
                 filtered_to_original.push(idx);
@@ -361,13 +338,6 @@ impl ChatWidget {
                             history_len,
                             active_rev,
                         ));
-                        filtered_to_original.push(original_idx);
-                        continue;
-                    }
-                    if let Some(summary) = summary_cell_for(original_idx) {
-                        filtered_cells.push(summary);
-                        let salt = (i as u64).wrapping_add(0xA11C_5E1F);
-                        filtered_revs.push(active_entry_revision(active_rev, salt));
                         filtered_to_original.push(original_idx);
                         continue;
                     }
@@ -633,62 +603,6 @@ fn tool_run_summary_cell(run: &ToolRun) -> HistoryCell {
         output_summary: None,
         is_diff: false,
     }))
-}
-
-/// Collapse concurrent live sub-agent cards into a single activity shelf row.
-///
-/// Returns (hidden secondary indices, synthetic shelf cells at head indices).
-fn activity_shelf_collapse(
-    history: &[HistoryCell],
-    active_entries: &[HistoryCell],
-    history_len: usize,
-    expanded: bool,
-) -> (HashSet<usize>, Vec<(usize, HistoryCell)>) {
-    use crate::tui::history::SubAgentCell;
-    use crate::tui::widgets::activity_shelf::{ActivityShelf, ShelfAgent};
-
-    let mut live: Vec<(usize, ShelfAgent)> = Vec::new();
-    for (idx, cell) in history.iter().enumerate() {
-        if let HistoryCell::SubAgent(sub) = cell
-            && sub.is_live_for_shelf()
-            && let Some(agent) = sub.as_shelf_agent()
-        {
-            live.push((idx, agent));
-        }
-    }
-    for (i, cell) in active_entries.iter().enumerate() {
-        if let HistoryCell::SubAgent(sub) = cell
-            && sub.is_live_for_shelf()
-            && let Some(agent) = sub.as_shelf_agent()
-        {
-            live.push((history_len + i, agent));
-        }
-    }
-
-    if live.len() < 2 {
-        return (HashSet::new(), Vec::new());
-    }
-
-    let agents: Vec<ShelfAgent> = live.iter().map(|(_, a)| a.clone()).collect();
-    let shelf = ActivityShelf::new(agents, expanded);
-    let head_idx = live[0].0;
-
-    if expanded {
-        // Expanded: keep every card; optional header is drawn only via shelf
-        // when we still want a collapse affordance on the head.
-        let summary = HistoryCell::SubAgent(SubAgentCell::Shelf(shelf));
-        // Prepend collapse header by wrapping head — actually leave cards
-        // alone when expanded so each agent keeps its full detail surface.
-        let _ = summary;
-        return (HashSet::new(), Vec::new());
-    }
-
-    let mut hidden = HashSet::new();
-    for (idx, _) in live.iter().skip(1) {
-        hidden.insert(*idx);
-    }
-    let summary = HistoryCell::SubAgent(SubAgentCell::Shelf(shelf));
-    (hidden, vec![(head_idx, summary)])
 }
 
 fn tool_run_summary_revision(

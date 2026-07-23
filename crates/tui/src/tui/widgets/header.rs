@@ -106,6 +106,9 @@ pub struct HeaderData<'a> {
     /// so the widget itself stays a pure pre-built render. `None` hides the
     /// chip entirely (e.g., `status_indicator = "off"`).
     pub status_indicator_frame: Option<&'static str>,
+    /// Live sub-agent count for the header chrome. `0` hides the chip.
+    /// Drill-in is the Agents sidebar / SubAgents modal — not a transcript shelf.
+    pub running_agents: usize,
 }
 
 impl<'a> HeaderData<'a> {
@@ -130,7 +133,15 @@ impl<'a> HeaderData<'a> {
             reasoning_effort_label: None,
             provider_label: None,
             status_indicator_frame: Some("cw"),
+            running_agents: 0,
         }
+    }
+
+    /// Live concurrent sub-agent count (`2 agents`). Hidden when zero.
+    #[must_use]
+    pub fn with_running_agents(mut self, count: usize) -> Self {
+        self.running_agents = count;
+        self
     }
 
     /// Attach a short reasoning-effort label for the header chip.
@@ -552,6 +563,24 @@ impl<'a> HeaderWidget<'a> {
                 effort.to_string(),
                 Style::default().fg(palette::WHALE_INFO),
             ));
+        }
+        // Sub-agent count: high-signal when workers are live; sits after
+        // route/mode so the left zone still names "where am I" first.
+        if self.data.running_agents > 0 {
+            let agents = if self.data.running_agents == 1 {
+                "1 agent".to_string()
+            } else {
+                format!("{} agents", self.data.running_agents)
+            };
+            if Self::span_width(&spans) + 3 + agents.width() <= max_width {
+                spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
+                spans.push(Span::styled(
+                    agents,
+                    Style::default()
+                        .fg(palette::WHALE_LIVE)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
         }
         spans
     }
@@ -1014,6 +1043,26 @@ mod tests {
         assert_eq!(cw[0].style.fg, Some(palette::WHALE_HUMAN));
         assert_eq!(live[0].style.fg, Some(palette::WHALE_INFO));
         assert_ne!(cw[0].style.fg, live[0].style.fg);
+    }
+
+    #[test]
+    fn header_shows_running_agent_count() {
+        let rendered = render_left(
+            HeaderData::new(AppMode::Agent, "glm-5.1", "CW", true, palette::WHALE_BG)
+                .with_status_indicator(Some("cw"))
+                .with_running_agents(2),
+            80,
+        );
+        assert!(
+            rendered.contains("2 agents"),
+            "live agent count belongs in header chrome: {rendered:?}"
+        );
+        let empty = render_left(
+            HeaderData::new(AppMode::Agent, "glm-5.1", "CW", false, palette::WHALE_BG)
+                .with_running_agents(0),
+            80,
+        );
+        assert!(!empty.contains("agent"), "{empty:?}");
     }
 
     #[test]

@@ -158,8 +158,10 @@ impl SubAgentCell {
         }
     }
 
-    /// True when this card still represents live concurrent work (shelf input).
+    /// True when this card still represents live concurrent work.
+    /// Retained for shelf helpers / future grouping; transcript no longer collapses.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_live_for_shelf(&self) -> bool {
         use crate::tui::widgets::agent_card::AgentLifecycle;
         match self {
@@ -176,6 +178,7 @@ impl SubAgentCell {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn as_shelf_agent(&self) -> Option<crate::tui::widgets::activity_shelf::ShelfAgent> {
         use crate::tui::widgets::activity_shelf::ShelfAgent;
         match self {
