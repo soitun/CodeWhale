@@ -6532,7 +6532,9 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
             status: "passed".to_string(),
             check: "cargo test".to_string(),
             summary: "focused tests passed".to_string(),
+            ..Default::default()
         }),
+        ..Default::default()
     };
 
     assert!(apply_goal_snapshot_to_app(&mut app, &completed));
@@ -6562,6 +6564,7 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
         blocker: Some("needs user approval".to_string()),
         pause_reason: None,
         completion_verification: None,
+        ..Default::default()
     };
 
     assert!(apply_goal_snapshot_to_app(&mut app, &blocked));
@@ -6593,6 +6596,7 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
         blocker: None,
         pause_reason: None,
         completion_verification: None,
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &stale_active));
     assert!(app.hunt.quarry.is_some());
@@ -6611,6 +6615,7 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
         blocker: None,
         pause_reason: None,
         completion_verification: None,
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &cleared));
     assert!(app.hunt.quarry.is_none());
@@ -6663,7 +6668,9 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
             status: "passed".to_string(),
             check: "cargo test".to_string(),
             summary: "ok".to_string(),
+            ..Default::default()
         }),
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &completed));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
@@ -6683,6 +6690,7 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
         blocker: None,
         pause_reason: None,
         completion_verification: None,
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
@@ -6712,6 +6720,7 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         blocker: None,
         pause_reason: Some(crate::tools::goal::GoalPauseReason::User),
         completion_verification: None,
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &paused));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
@@ -6739,6 +6748,7 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         blocker: None,
         pause_reason: Some(crate::tools::goal::GoalPauseReason::User),
         completion_verification: None,
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &paused_with_usage));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
@@ -6761,6 +6771,7 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         blocker: None,
         pause_reason: None,
         completion_verification: None,
+        ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);

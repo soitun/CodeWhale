@@ -11,6 +11,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
@@ -74,6 +75,26 @@ pub enum GoalPauseReason {
     BudgetLimit,
 }
 
+/// Whether a goal review is allowed to decide the judged contract.
+///
+/// Critical reviews fail closed and may satisfy the completion gate. Advisory
+/// reviews are append-only context: malformed or negative advice must never
+/// pause, block, or complete the goal.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalReviewRole {
+    #[default]
+    Critical,
+    Advisory,
+}
+
+/// Best-effort review context kept separate from the judged completion
+/// contract. Notes are append-only for the lifetime of one objective.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GoalAdvisoryNote {
+    pub summary: String,
+}
+
 impl GoalPauseReason {
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -102,6 +123,7 @@ pub struct GoalState {
     blocker: Option<String>,
     pause_reason: Option<GoalPauseReason>,
     completion_verification: Option<GoalCompletionVerification>,
+    advisories: Vec<GoalAdvisoryNote>,
 }
 
 impl GoalState {
@@ -147,6 +169,7 @@ impl GoalState {
                     self.blocker = None;
                     self.pause_reason = None;
                     self.completion_verification = None;
+                    self.advisories.clear();
                 } else if self.token_budget != token_budget {
                     self.token_budget = token_budget;
                 }
@@ -198,6 +221,7 @@ impl GoalState {
         self.blocker = None;
         self.pause_reason = None;
         self.completion_verification = None;
+        self.advisories.clear();
         Ok(())
     }
 
@@ -217,17 +241,39 @@ impl GoalState {
     pub fn mark_complete(
         &mut self,
         evidence: String,
-        verification: GoalCompletionVerification,
+        mut verification: GoalCompletionVerification,
     ) -> Result<(), &'static str> {
         if self.objective.is_none() {
             return Err("No active goal exists to complete.");
         }
+        if self.status == Some(GoalStatus::Complete) || self.completion_verification.is_some() {
+            return Err("The judged completion contract is already sealed and cannot be replaced.");
+        }
+        if verification.role != GoalReviewRole::Critical {
+            return Err("An advisory review cannot complete the judged goal contract.");
+        }
+        verification.contract_fingerprint = completion_contract_fingerprint(
+            self.objective.as_deref().unwrap_or_default(),
+            &verification,
+        );
         self.status = Some(GoalStatus::Complete);
         self.finished_at = Some(Instant::now());
         self.evidence = Some(evidence);
         self.blocker = None;
         self.pause_reason = None;
         self.completion_verification = Some(verification);
+        Ok(())
+    }
+
+    pub fn record_advisory(&mut self, summary: String) -> Result<(), &'static str> {
+        if !self.is_active() {
+            return Err("Advisory notes require an active goal.");
+        }
+        const MAX_ADVISORY_NOTES: usize = 16;
+        if self.advisories.len() == MAX_ADVISORY_NOTES {
+            self.advisories.remove(0);
+        }
+        self.advisories.push(GoalAdvisoryNote { summary });
         Ok(())
     }
 
@@ -288,12 +334,13 @@ impl GoalState {
             blocker: self.blocker.clone(),
             pause_reason: self.pause_reason,
             completion_verification: self.completion_verification.clone(),
+            advisories: self.advisories.clone(),
         }
     }
 }
 
 /// Serializable tool output and prompt input for the current goal.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct GoalSnapshot {
     pub objective: Option<String>,
     pub status: String,
@@ -306,13 +353,39 @@ pub struct GoalSnapshot {
     pub blocker: Option<String>,
     pub pause_reason: Option<GoalPauseReason>,
     pub completion_verification: Option<GoalCompletionVerification>,
+    pub advisories: Vec<GoalAdvisoryNote>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GoalCompletionVerification {
     pub status: String,
     pub check: String,
     pub summary: String,
+    #[serde(default)]
+    pub role: GoalReviewRole,
+    #[serde(default)]
+    pub contract_fingerprint: String,
+}
+
+fn completion_contract_fingerprint(
+    objective: &str,
+    verification: &GoalCompletionVerification,
+) -> String {
+    let mut hasher = Sha256::new();
+    for field in [
+        objective.trim(),
+        verification.status.trim(),
+        verification.check.trim(),
+        verification.summary.trim(),
+    ] {
+        hasher.update(field.as_bytes());
+        hasher.update([0]);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl GoalSnapshot {
@@ -338,6 +411,7 @@ impl GoalSnapshot {
             blocker: None,
             pause_reason,
             completion_verification: None,
+            advisories: Vec::new(),
         }
     }
 }
@@ -428,6 +502,8 @@ fn parse_completion_verification(input: &Value) -> Result<GoalCompletionVerifica
         status: normalized_status.to_string(),
         check: verification.check.trim().to_string(),
         summary: verification.summary.trim().to_string(),
+        role: verification.role,
+        contract_fingerprint: String::new(),
     })
 }
 
@@ -582,7 +658,7 @@ impl ToolSpec for UpdateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update the runtime goal completion gate. Only mark complete when the objective has verified evidence; mark blocked whenever progress requires user input, including after asking a question whose answer is needed."
+        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input."
     }
 
     fn input_schema(&self) -> Value {
@@ -591,8 +667,8 @@ impl ToolSpec for UpdateGoalTool {
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["complete", "blocked"],
-                    "description": "Use complete only when the goal is fully satisfied; blocked when meaningful progress cannot continue without external action or user input. Pause, resume, and budget-limit states are controlled by the user or system."
+                    "enum": ["complete", "blocked", "advisory"],
+                    "description": "Use complete only when a critical verifier proves the goal; blocked when meaningful progress cannot continue; advisory to append best-effort context without changing lifecycle state."
                 },
                 "evidence": {
                     "type": "string",
@@ -614,6 +690,11 @@ impl ToolSpec for UpdateGoalTool {
                         "summary": {
                             "type": "string",
                             "description": "Brief result summary from the verifier/check."
+                        },
+                        "role": {
+                            "type": "string",
+                            "enum": ["critical", "advisory"],
+                            "description": "Critical reviews may satisfy the judged completion contract. Advisory reviews are fail-open and cannot complete it. Defaults to critical for compatibility."
                         }
                     },
                     "required": ["status", "check", "summary"],
@@ -622,6 +703,10 @@ impl ToolSpec for UpdateGoalTool {
                 "blocker": {
                     "type": "string",
                     "description": "Required when status is blocked. Explain the condition preventing progress."
+                },
+                "advisory": {
+                    "type": "string",
+                    "description": "Required when status is advisory. Appended separately from the judged completion contract."
                 },
                 "objective": {
                     "type": "string",
@@ -680,9 +765,25 @@ impl ToolSpec for UpdateGoalTool {
                         .mark_blocked(blocker)
                         .map_err(ToolError::invalid_input)?;
                 }
+                "advisory" => {
+                    let advisory = input
+                        .get("advisory")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .to_string();
+                    if advisory.is_empty() {
+                        return Err(ToolError::invalid_input(
+                            "advisory is required when status is advisory",
+                        ));
+                    }
+                    state
+                        .record_advisory(advisory)
+                        .map_err(ToolError::invalid_input)?;
+                }
                 other => {
                     return Err(ToolError::invalid_input(format!(
-                        "unsupported goal status '{other}'; update_goal can only mark complete or blocked"
+                        "unsupported goal status '{other}'; update_goal can only mark complete or blocked, or append advisory context"
                     )));
                 }
             }
@@ -825,6 +926,7 @@ mod tests {
                     status: "passed".to_string(),
                     check: "cargo test".to_string(),
                     summary: "goal tests passed".to_string(),
+                    ..Default::default()
                 },
             )
             .expect("complete goal");
@@ -852,6 +954,7 @@ mod tests {
                     status: "passed".to_string(),
                     check: "cargo test".to_string(),
                     summary: "goal tests passed".to_string(),
+                    ..Default::default()
                 },
             )
             .expect("complete first goal");
@@ -990,6 +1093,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn advisory_review_is_append_only_and_fail_open() {
+        let state = new_shared_goal_state_from_host_status(
+            Some("keep the judged contract authoritative".to_string()),
+            None,
+            GoalStatus::Active,
+        );
+        let update = UpdateGoalTool::new(state.clone());
+        update
+            .execute(
+                json!({
+                    "status": "advisory",
+                    "advisory": "Consider a narrower compatibility test."
+                }),
+                &ToolContext::new("."),
+            )
+            .await
+            .expect("advisory note");
+        let result = state.lock().expect("goal lock").snapshot();
+
+        assert_eq!(result.status, "active");
+        assert_eq!(result.advisories.len(), 1);
+        assert_eq!(
+            result.advisories[0].summary,
+            "Consider a narrower compatibility test."
+        );
+        assert!(result.completion_verification.is_none());
+    }
+
+    #[tokio::test]
+    async fn advisory_verification_cannot_complete_goal() {
+        let state = new_shared_goal_state_from_host_status(
+            Some("require a critical judge".to_string()),
+            None,
+            GoalStatus::Active,
+        );
+        let err = UpdateGoalTool::new(state.clone())
+            .execute(
+                json!({
+                    "status": "complete",
+                    "evidence": "an advisor liked it",
+                    "verification": {
+                        "status": "passed",
+                        "check": "advisory review",
+                        "summary": "looks reasonable",
+                        "role": "advisory"
+                    }
+                }),
+                &ToolContext::new("."),
+            )
+            .await
+            .expect_err("advisory completion must fail closed");
+
+        assert!(err.to_string().contains("advisory review cannot complete"));
+        assert!(state.lock().expect("goal lock").is_active());
+    }
+
+    #[test]
+    fn judged_completion_contract_is_fingerprinted_and_immutable() {
+        let mut state = GoalState::default();
+        state
+            .create("seal the release candidate".to_string(), None)
+            .expect("create goal");
+        state
+            .mark_complete(
+                "locked tests passed".to_string(),
+                GoalCompletionVerification {
+                    status: "passed".to_string(),
+                    check: "cargo test --locked".to_string(),
+                    summary: "all required tests passed".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("seal judged contract");
+        let sealed = state.snapshot();
+        let fingerprint = &sealed
+            .completion_verification
+            .as_ref()
+            .expect("completion contract")
+            .contract_fingerprint;
+        assert_eq!(fingerprint.len(), 64);
+
+        let err = state
+            .mark_complete(
+                "replace the evidence".to_string(),
+                GoalCompletionVerification {
+                    status: "passed".to_string(),
+                    check: "different check".to_string(),
+                    summary: "different result".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect_err("sealed contract must be immutable");
+        assert!(err.contains("already sealed"));
+        assert_eq!(state.snapshot(), sealed);
+    }
+
+    #[tokio::test]
     async fn update_goal_rejects_model_resume() {
         let state = new_shared_goal_state_from_host_status(
             Some("pause remains host controlled".to_string()),
@@ -1057,6 +1257,7 @@ mod tests {
                     status: "passed".to_string(),
                     check: "cargo test".to_string(),
                     summary: "ok".to_string(),
+                    ..Default::default()
                 },
             )
             .expect("mark complete");
@@ -1136,6 +1337,7 @@ mod tests {
             blocker: None,
             pause_reason: None,
             completion_verification: None,
+            ..Default::default()
         };
 
         let prompt = render_continuation_prompt(&snapshot, 2);

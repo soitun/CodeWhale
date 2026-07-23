@@ -4311,6 +4311,7 @@ async fn runtime_goal_updates_emit_ui_snapshot() {
                 check: "cargo test -p codewhale-tui runtime_goal_updates_emit_ui_snapshot"
                     .to_string(),
                 summary: "focused runtime goal snapshot test passed".to_string(),
+                ..Default::default()
             },
         )
         .expect("mark complete");
