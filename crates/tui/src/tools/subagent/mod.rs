@@ -702,8 +702,14 @@ impl SubAgentAssignment {
 }
 
 /// Sub-agent execution types with specialized behavior and tool access.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
+///
+/// **Public vocabulary is Fleet roles** (`worker`, `scout`, `planner`,
+/// `reviewer`, `builder`, `verifier`, `custom`). The enum variants retain
+/// historical Rust names for call-site stability; serialization, prompts,
+/// receipts, and UI always use [`Self::as_str`]. Legacy wire spellings
+/// (`explore`, `plan`, …) are accepted only through
+/// [`migrate_legacy_role_token`] at deserialization / parse boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SubAgentType {
     /// General purpose - full tool access for multi-step tasks.
     #[default]
@@ -728,24 +734,80 @@ pub enum SubAgentType {
     Custom,
 }
 
+impl Serialize for SubAgentType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SubAgentType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::from_str(&raw).ok_or_else(|| {
+            serde::de::Error::unknown_variant(
+                &raw,
+                &[
+                    "worker",
+                    "scout",
+                    "planner",
+                    "reviewer",
+                    "builder",
+                    "verifier",
+                    "custom",
+                ],
+            )
+        })
+    }
+}
+
+/// Explicit boundary migration for pre-Fleet serialized role tokens.
+///
+/// Call this only at load / parse edges. Runtime code must use Fleet role
+/// names via [`SubAgentType::as_str`]. Returns `None` for tokens that are
+/// already canonical or unknown — callers should prefer [`SubAgentType::from_str`]
+/// for full acceptance (canonical + legacy).
+#[must_use]
+pub fn migrate_legacy_role_token(token: &str) -> Option<&'static str> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "general" | "general-purpose" | "general_purpose" | "default" => Some("worker"),
+        "explore" | "exploration" | "explorer" => Some("scout"),
+        "plan" | "planning" | "awaiter" => Some("planner"),
+        "review" | "code-review" | "code_review" => Some("reviewer"),
+        "implementer" | "implement" | "implementation" => Some("builder"),
+        "verify" | "verification" | "validator" | "tester" => Some("verifier"),
+        _ => None,
+    }
+}
+
 impl SubAgentType {
-    /// Parse a sub-agent type from user input.
+    /// Parse a sub-agent type from user input or a serialized boundary.
+    ///
+    /// Accepts Fleet role names and, at this parse boundary only, legacy
+    /// aliases (`explore` → scout, `plan` → planner, …).
     #[must_use]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "general" | "general-purpose" | "general_purpose" | "worker" | "default" => {
-                Some(Self::General)
-            }
-            "scout" | "explore" | "exploration" | "explorer" => Some(Self::Explore),
-            "plan" | "planning" | "planner" | "awaiter" => Some(Self::Plan),
-            "review" | "code-review" | "code_review" | "reviewer" => Some(Self::Review),
-            "implementer" | "implement" | "implementation" | "builder" => Some(Self::Implementer),
-            "verifier" | "verify" | "verification" | "validator" | "tester" => Some(Self::Verifier),
+        let normalized = s.trim().to_ascii_lowercase();
+        // Boundary migration first, then canonical Fleet names.
+        let token = migrate_legacy_role_token(&normalized).unwrap_or(normalized.as_str());
+        match token {
+            "worker" => Some(Self::General),
+            "scout" => Some(Self::Explore),
+            "planner" => Some(Self::Plan),
+            "reviewer" => Some(Self::Review),
+            "builder" => Some(Self::Implementer),
+            "verifier" => Some(Self::Verifier),
             "custom" => Some(Self::Custom),
             _ => None,
         }
     }
 
+    /// Canonical Fleet role label for runtime, schemas, prompts, receipts, UI.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -759,9 +821,8 @@ impl SubAgentType {
         }
     }
 
-    /// Persisted v0.9.x adapter name. Serde still owns snapshot compatibility;
-    /// this helper is only for legacy model-override lookup during the Fleet
-    /// vocabulary migration.
+    /// Pre-Fleet model-override key (`explorer_model` / `ni_model` tables).
+    /// Not used for receipts or UI — only config key lookup.
     #[must_use]
     fn legacy_type_name(&self) -> &'static str {
         match self {

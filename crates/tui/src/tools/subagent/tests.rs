@@ -1791,13 +1791,31 @@ fn test_agent_type_round_trips_via_as_str() {
 fn fleet_role_labels_are_canonical_while_legacy_snapshot_wire_stays_readable() {
     assert_eq!(SubAgentType::Explore.as_str(), "scout");
     assert_eq!(SubAgentType::Implementer.as_str(), "builder");
+    // Normal serialization writes Fleet role names only.
     assert_eq!(
-        serde_json::to_string(&SubAgentType::Explore).expect("serialize legacy snapshot adapter"),
-        "\"explore\""
+        serde_json::to_string(&SubAgentType::Explore).expect("serialize fleet role"),
+        "\"scout\""
     );
     assert_eq!(
-        serde_json::from_str::<SubAgentType>("\"explore\"").expect("read v0.9.x snapshot"),
+        serde_json::to_string(&SubAgentType::Implementer).expect("serialize fleet role"),
+        "\"builder\""
+    );
+    // Legacy wire is accepted only at the deserialize boundary.
+    assert_eq!(
+        serde_json::from_str::<SubAgentType>("\"explore\"").expect("read legacy snapshot"),
         SubAgentType::Explore
+    );
+    assert_eq!(
+        migrate_legacy_role_token("explore"),
+        Some("scout"),
+        "boundary helper maps explore → scout"
+    );
+    // Re-serializing a migrated load never re-emits the legacy token.
+    let migrated: SubAgentType =
+        serde_json::from_str("\"explore\"").expect("migrate legacy explore");
+    assert_eq!(
+        serde_json::to_string(&migrated).expect("re-serialize after migration"),
+        "\"scout\""
     );
 }
 
