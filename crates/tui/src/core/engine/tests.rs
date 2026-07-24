@@ -10438,7 +10438,20 @@ async fn slop_gate_survives_mid_turn_compaction_without_reinjection() {
         token_threshold: 1,
         ..CompactionConfig::default()
     };
-    let mock = MockLlmClient::new(vec![canned::simple_text_turn("bounded history summary")]);
+    // Structured successor brief so the post-compact failure ladder does not
+    // treat a one-line mock string as degenerate and issue a second sample.
+    let successor_brief = "\
+1. Primary request and intent — keep the active slop gate across compaction.\n\
+2. Key technical concepts — mid-turn pin of the gate message.\n\
+3. Files and code sections — none.\n\
+4. Errors and fixes — none.\n\
+5. Problem solving — pin active turn before summarize.\n\
+6. User messages — exercise active-turn pin specifically.\n\
+7. Pending tasks — assert gate text survives compact.\n\
+8. Current work — compact_messages_safe mid-turn with pins.\n\
+9. Next step — verify marker still present in retained messages.\n\
+Extra padding so non-whitespace seed length clears the degenerate floor.";
+    let mock = MockLlmClient::new(vec![canned::simple_text_turn(successor_brief)]);
     assert!(should_compact(
         &engine.session.messages,
         &compaction,
