@@ -561,6 +561,14 @@ mod tests {
 
     #[test]
     fn test_close_hunt_freezes_elapsed_timer() {
+        // close_hunt writes a trophy card under CODEWHALE_HOME/trophies. Isolate
+        // the home dir so sandbox/readonly HOME cannot turn a successful close
+        // into a trophy path error (and so we never touch the real home).
+        let _lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().expect("isolated CODEWHALE_HOME");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+
         let mut app = create_test_app();
         let _ = hunt(&mut app, Some("Freeze the timer on close"));
         assert!(
@@ -577,7 +585,8 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("Goal hunted. Elapsed:"),
-            "close-out message should report a frozen elapsed"
+            "close-out message should report a frozen elapsed; got {:?}",
+            result.message
         );
         assert_eq!(app.hunt.verdict, HuntVerdict::Hunted);
         assert!(
