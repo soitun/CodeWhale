@@ -1320,8 +1320,16 @@ fn graph_node_row(snapshot: &WorkGraphSnapshot, node: &WorkNode) -> WorkRow {
     };
     let state = state_label(node);
     let kind = kind_label(node.kind);
-    let detail = if node.state == NodeState::Ready && node.kind == NodeKind::PlanStep {
-        kind.to_string()
+    // To-do rows are self-evidently plan steps — the strip's checkbox marks
+    // already say so, so the "plan step" kind label is pure noise there. A
+    // ready step shows no detail at all; other states show just the state.
+    // Non-step nodes keep the state · kind pair.
+    let detail = if node.kind == NodeKind::PlanStep {
+        if node.state == NodeState::Ready {
+            String::new()
+        } else {
+            state.to_string()
+        }
     } else {
         format!("{state} · {kind}")
     };
