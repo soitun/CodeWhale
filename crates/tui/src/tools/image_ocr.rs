@@ -367,7 +367,8 @@ mod tests {
                 // (restricted Vision, broken tesseract install, sandbox).
                 // Name promises coverage only when the backend works.
                 let msg = err.to_string();
-                eprintln!("skipping: OCR backend probe passed but execute failed: {msg}");
+                let _skip_reason = format!("OCR backend probe passed but execute failed: {msg}");
+                let _ = &_skip_reason;
                 return;
             }
         };

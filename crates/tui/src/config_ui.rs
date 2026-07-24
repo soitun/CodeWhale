@@ -1101,7 +1101,8 @@ impl DefaultModeValue {
     }
 
     /// User-facing label in config UI (wire values stay agent/plan/operate).
-    fn label(self) -> &'static str {
+    #[allow(dead_code)] // reserved for config UI option rendering / chrome
+    pub fn label(self) -> &'static str {
         match self {
             Self::Agent => "Act",
             Self::Plan => "Plan",

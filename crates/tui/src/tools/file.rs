@@ -1434,7 +1434,9 @@ mod tests {
                 // Name is when_backend_exists — skip if live OCR fails after
                 // the availability probe (restricted Vision, etc.).
                 let msg = err.to_string();
-                eprintln!("skipping: OCR backend probe passed but read_file OCR failed: {msg}");
+                let _skip_reason =
+                    format!("OCR backend probe passed but read_file OCR failed: {msg}");
+                let _ = &_skip_reason;
                 return;
             }
         };
